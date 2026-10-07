@@ -1,6 +1,6 @@
 # preflight — a deployable, machine-local PR-Agent review setup
 
-[![CI](https://github.com/413x5/preflight/actions/workflows/ci.yml/badge.svg)](https://github.com/413x5/preflight/actions/workflows/ci.yml)
+[![CI](https://github.com/413x5/preflight/workflows/CI/badge.svg)](https://github.com/413x5/preflight/actions/workflows/ci.yml)
 
 One command deploys a **machine-local** PR-Agent that reviews your **working tree** (no commit, no GitHub round
 trip) and hands the findings back to whatever coding agent is editing the code. It works against **any
@@ -146,6 +146,8 @@ actionlint                 # workflow lint
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full list and
 [`tests/README.md`](tests/README.md) for the requirement-to-case mapping.
+
+The CI badge in this README only renders for signed-in viewers, because the repository is private.
 
 ## Uninstall
 

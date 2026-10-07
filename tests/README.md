@@ -36,7 +36,8 @@ never appear in a snapshot.
 ## Traceability
 
 Each case declares the requirement it guards. The mapping is one-to-one with the behaviour it protects,
-and every previously-fixed bug has a case that fails if the fix is reverted.
+and every previously-fixed bug has a case that fails if the fix is reverted. Hook cases use `REQ-HOOK-nn`;
+the selfcheck itself is `REQ-SELF-nn`, listed in its own table below.
 
 | Requirement | What it asserts | Guards against |
 |---|---|---|
@@ -66,6 +67,12 @@ and every previously-fixed bug has a case that fails if the fix is reverted.
 | REQ-HOOK-24 | Deleting a reviewed file whose name needs quoting is blocked | `--name-only` without `-z` quoting the path turned a tracked file into a nonexistent one, so its deletion looked like an untracked scratch file |
 | REQ-HOOK-25 | Removing a reviewed gitlink (submodule) is blocked | `git cat-file -e "HEAD:sub"` failing for a gitlink, so a submodule removal counted as "not tracked at HEAD" |
 | REQ-HOOK-26 | The example hook reports a missing helper when `HOME` is unset | `set -u` plus a bare `$HOME` aborting with "HOME: unbound variable" instead of the documented message |
+
+The selfcheck is its own requirement, since it checks the suite rather than the hook:
+
+| Requirement | What it asserts | Guards against |
+|---|---|---|
+| REQ-SELF-01 | A neutered hook fails exactly the declared enforcement-sensitive cases, every case is classified, and the child run actually produced results | a case claiming to test enforcement that passes with the hook disabled; the insensitive set growing by default; the child suite silently running nothing |
 
 ## Mutation-checked
 

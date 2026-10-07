@@ -4,6 +4,7 @@
 #   tests/run.sh              # run everything (a few minutes)
 #   tests/run.sh hook         # only the hook cases
 #   tests/run.sh e2e          # only the live-endpoint cases
+#   tests/run.sh selfcheck    # only the selfcheck: the suite re-run against a neutered hook
 #
 # They exercise the REAL hook files from files/, against real git repositories, with no network and no
 # API key. That matters: everything here was written to catch a specific regression that a unit test
@@ -14,8 +15,9 @@
 # a worktree-scope review would have written, using the same scratch-index method preflight itself
 # uses. That keeps the suite offline and deterministic, and keeps the tested logic the real thing.
 #
-# Traceability: every case declares the requirement it guards, as [REQ-HOOK-nn], and the mapping is
-# listed in tests/README.md. A case that fails names its requirement in the output.
+# Traceability: every case declares the requirement it guards - `[REQ-HOOK-nn]` for a hook case,
+# `[REQ-SELF-nn]` for the selfcheck itself - and the mapping is listed in tests/README.md. A case that
+# fails names its requirement in the output.
 set -u
 
 here="$(cd "$(dirname "$0")" && pwd)"

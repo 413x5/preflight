@@ -48,6 +48,11 @@ run means a green CI run:
 The live-endpoint case (`./tests/run.sh e2e`) is **not** run in CI: it needs a paid key, and CI should
 not depend on one.
 
+Workflow actions are pinned to a **moving major tag** (`actions/checkout@v7`), and Dependabot
+(`.github/dependabot.yml`) proposes bumps weekly, grouped into one PR. If you add an action, pin the same
+way; Dependabot will pick it up. Its PRs run this CI, so a bump that breaks something fails the same
+checks a hand-written change would.
+
 `tests/run.sh` is the integration suite: real repositories, the real hook files, no framework and no
 network. Refer to [`tests/README.md`](tests/README.md) for the requirement-to-case mapping.
 

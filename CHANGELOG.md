@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.secrets.toml`), validates the generated config as TOML, and runs the offline commit-hook suite. A
   separate job lints the workflows with a pinned `actionlint`. The live-endpoint test is deliberately
   excluded: it needs a paid key, and CI must not depend on one.
+- **Dependabot** (`.github/dependabot.yml`) keeps the workflow actions current, weekly and grouped into a
+  single pull request. The pins had already gone stale once (CI shipped with `actions/checkout@v5` and
+  `actionlint` 1.7.7), so this replaces "someone notices" with an automated bump whose PR is checked by
+  the CI it changes.
 - **A commit hook that refuses an unreviewed commit.** An agent (or human) could previously skip the review
   entirely; now a repo can make the commit itself fail. Copy the bundled `files/githooks/*` into the repo's
   own `.githooks/` and run `git config core.hooksPath .githooks` (relative - an absolute path breaks git
@@ -48,6 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CI actions updated to current: `actions/checkout` v5 to v7 and `actionlint` 1.7.7 to 1.7.12. They stay
+  pinned to a moving major tag, so patch releases arrive without an edit. Note that `checkout` v6 and later
+  run on Node 24, which the `ubuntu-latest` and `macos-latest` runner images already provide.
 - **Renamed the bundle from `pr-agent` to `preflight`**, so it no longer collides with the upstream
   PR-Agent project it wraps. After this change `pr-agent` means exactly one thing: the upstream tool.
   - Commands: `pra` → `preflight-pr`, `pral` → `preflight`, `pral-gate` → `preflight-gate`.

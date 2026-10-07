@@ -33,7 +33,7 @@ jobs:
         # macOS" claim honest.
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Verify required tools are present
         shell: bash
@@ -117,11 +117,11 @@ jobs:
     name: workflow lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # A pinned static binary, so the lint result is reproducible.
       - name: Run actionlint
         run: |
-          version=1.7.7
+          version=1.7.12
           curl -fsSL -o actionlint.tar.gz \
             "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
           tar -xzf actionlint.tar.gz actionlint

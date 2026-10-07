@@ -32,13 +32,34 @@ work="$(mktemp -d)"
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
 
+# The fixtures make real commits, so they need an identity. Set it in the environment rather than
+# relying on the machine's git config: a CI runner has none by default, and the suite must not depend
+# on how the machine is set up. This also keeps the tests from touching the user's config.
+GIT_AUTHOR_NAME="preflight tests"
+GIT_AUTHOR_EMAIL="preflight-tests@localhost"
+GIT_COMMITTER_NAME="preflight tests"
+GIT_COMMITTER_EMAIL="preflight-tests@localhost"
+export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+# A developer's global hooksPath or gpgsign must not leak into the fixtures either.
+GIT_CONFIG_GLOBAL=/dev/null
+GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+
 # ---------------------------------------------------------------------------- helpers
 
 say()  { printf '%s\n' "$*"; }
-ok()   { printf '  \033[32mPASS\033[0m  %s  [%s]\n' "$1" "$2"; pass=$((pass+1)); }
-bad()  { printf '  \033[31mFAIL\033[0m  %s  [%s]\n        expected exit %s, got %s\n%s' \
-           "$1" "$2" "$3" "$4" "${5:-}"; fail=$((fail+1)); }
-skip() { printf '  \033[33mSKIP\033[0m  %s  (%s)\n' "$1" "$2"; skipped=$((skipped+1)); }
+
+# Colour only when writing to a terminal, so CI logs stay plain text.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+  c_pass='\033[32m'; c_fail='\033[31m'; c_skip='\033[33m'; c_off='\033[0m'
+else
+  c_pass=''; c_fail=''; c_skip=''; c_off=''
+fi
+
+ok()   { printf '  %sPASS%s  %s  [%s]\n' "$c_pass" "$c_off" "$1" "$2"; pass=$((pass+1)); }
+bad()  { printf '  %sFAIL%s  %s  [%s]\n        expected exit %s, got %s\n%s' \
+           "$c_fail" "$c_off" "$1" "$2" "$3" "$4" "${5:-}"; fail=$((fail+1)); }
+skip() { printf '  %sSKIP%s  %s  (%s)\n' "$c_skip" "$c_off" "$1" "$2"; skipped=$((skipped+1)); }
 
 # A fresh repository with the sample project committed and the hook enabled.
 new_repo() {

@@ -1,0 +1,128 @@
+name: CI
+
+# The bundle is shell plus git hooks, so there is nothing to compile. What matters is that the scripts
+# parse on both platforms the bundle claims to support, and that the commit hook actually refuses what
+# it is supposed to refuse - the latter being the only thing that makes the hook worth installing.
+on:
+  # Branch pushes cover `main` and any long-lived branch; pull_request covers PR heads. Using `push:
+  # branches: ["**"]` together with pull_request would run everything twice for every PR commit, so
+  # push is limited to the default branch (PR branches are already covered by the PR event).
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push makes an in-flight run obsolete, except on the default branch, where every commit is
+# worth reporting on.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: shell + hook tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The bundle ships a macOS/Linux installer and the hook is plain git, so both are pinned
+        # rather than assumed. ubuntu-latest is the required gate; macos-latest keeps the "works on
+        # macOS" claim honest.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify required tools are present
+        shell: bash
+        run: |
+          for t in git python3 awk sed mktemp; do
+            command -v "$t" >/dev/null 2>&1 || { echo "missing required tool: $t"; exit 1; }
+          done
+
+      - name: Check shell syntax
+        shell: bash
+        # The hooks and the tests are POSIX sh (they may run where only sh exists, e.g. a minimal
+        # container); the installer and the helpers are bash. Mirrors CONTRIBUTING.md.
+        run: |
+          rc=0
+          for f in install.sh uninstall.sh \
+                   files/preflight files/preflight-pr files/preflight-gate files/ensure-link.sh
+          do
+            bash -n "$f" || { echo "bash syntax: FAIL $f"; rc=1; }
+          done
+          for f in files/preflight-hook files/githooks/pre-commit files/githooks/post-commit tests/run.sh
+          do
+            sh -n "$f" || { echo "sh syntax: FAIL $f"; rc=1; }
+          done
+          [ "$rc" = 0 ] && echo "all scripts parse"
+          exit "$rc"
+
+      - name: Installer deploys into a throwaway prefix
+        shell: bash
+        # Exercises install.sh end to end without uv, the network or the real ~/.config. This is also
+        # the regression test for the installer itself, which otherwise has no coverage.
+        run: |
+          tmp="$(mktemp -d)"
+          PREFLIGHT_HOME="$tmp/cfg" \
+          PREFLIGHT_BIN_DIR="$tmp/bin" \
+          PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+          PREFLIGHT_SKIP_PACKAGE_LINK=1 \
+            ./install.sh
+          rc=0
+          for f in preflight preflight-pr preflight-gate; do
+            [ -x "$tmp/bin/$f" ] || { echo "installer did not install $f"; rc=1; }
+          done
+          for f in preflight.toml preflight-hook ensure-link.sh; do
+            [ -f "$tmp/cfg/$f" ] || { echo "installer did not write $f"; rc=1; }
+          done
+          [ -x "$tmp/cfg/preflight-hook" ] || { echo "preflight-hook is not executable"; rc=1; }
+          for f in pre-commit post-commit; do
+            [ -x "$tmp/cfg/githooks/$f" ] || { echo "githooks/$f missing"; rc=1; }
+          done
+          # install.sh must never clobber an existing secrets file.
+          echo 'key      = "sentinel"' > "$tmp/cfg/.secrets.toml"
+          PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" \
+          PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 ./install.sh >/dev/null
+          grep -q sentinel "$tmp/cfg/.secrets.toml" || { echo "installer clobbered .secrets.toml"; rc=1; }
+          rm -rf "$tmp"
+          [ "$rc" = 0 ] && echo "installer OK"
+          exit "$rc"
+
+      - name: Generated config is valid TOML
+        shell: bash
+        run: |
+          tmp="$(mktemp -d)"
+          PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" \
+          PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 ./install.sh >/dev/null
+          python3 - "$tmp/cfg/preflight.toml" <<'PY'
+          import sys, tomllib
+          d = tomllib.load(open(sys.argv[1], "rb"))
+          cfg = d["config"]
+          assert cfg["model"], "no model configured"
+          assert cfg["fallback_models"], "no fallback model configured"
+          assert d["litellm"]["force_streaming_api_base_substrings"], "no streaming host configured"
+          print("config parses:", cfg["model"], "->", cfg["fallback_models"])
+          PY
+          rm -rf "$tmp"
+
+      - name: Commit-hook integration tests
+        shell: bash
+        # Offline cases only: the live-endpoint case needs a paid key, and CI must not depend on one.
+        run: ./tests/run.sh hook
+
+  actionlint:
+    name: workflow lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # A pinned static binary, so the lint result is reproducible.
+      - name: Run actionlint
+        run: |
+          version=1.7.7
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color

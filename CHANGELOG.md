@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CI** (`.github/workflows/ci.yml`): on every pull request and on pushes to `main`, on both Ubuntu and
+  macOS, it checks shell syntax (`bash -n` for the helpers/installer, `sh -n` for the hooks and tests),
+  dry-runs `install.sh` into a throwaway prefix (including that it never clobbers an existing
+  `.secrets.toml`), validates the generated config as TOML, and runs the offline commit-hook suite. A
+  separate job lints the workflows with a pinned `actionlint`. The live-endpoint test is deliberately
+  excluded: it needs a paid key, and CI must not depend on one.
 - **A commit hook that refuses an unreviewed commit.** An agent (or human) could previously skip the review
   entirely; now a repo can make the commit itself fail. Copy the bundled `files/githooks/*` into the repo's
   own `.githooks/` and run `git config core.hooksPath .githooks` (relative - an absolute path breaks git

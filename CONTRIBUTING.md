@@ -33,6 +33,21 @@ is a default, not an assumption.
 
 ## Testing changes
 
+`.github/workflows/ci.yml` runs the whole check set on every pull request and on pushes to `main`, on
+both Ubuntu and macOS (the bundle claims both). It mirrors what you can run locally, so a green local
+run means a green CI run:
+
+| CI step | Run it locally |
+|---|---|
+| Shell syntax (`bash -n` / `sh -n`) | the loop below |
+| Installer deploys into a throwaway prefix | `PREFLIGHT_HOME=$(mktemp -d)/cfg ... ./install.sh` |
+| Generated config is valid TOML | `python3 -c 'import tomllib; tomllib.load(...)'` |
+| Commit-hook integration tests | `./tests/run.sh hook` |
+| Workflow lint (`actionlint`) | `actionlint .github/workflows/ci.yml` |
+
+The live-endpoint case (`./tests/run.sh e2e`) is **not** run in CI: it needs a paid key, and CI should
+not depend on one.
+
 `tests/run.sh` is the integration suite: real repositories, the real hook files, no framework and no
 network. Refer to [`tests/README.md`](tests/README.md) for the requirement-to-case mapping.
 

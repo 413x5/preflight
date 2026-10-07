@@ -24,6 +24,9 @@ Small, ready to do.
       `tests/README.md`). Every fix in the hook was reverted in turn to confirm the matching case fails,
       and neutering the hook turns 14 cases red. Guards the four bypasses found while building it
       (unreviewed deletions, renames, symlink typechanges, `git rm --cached`).
+- [x] **Add CI.** `.github/workflows/ci.yml` runs shell syntax checks, an installer dry-run, a TOML check
+      and the offline hook suite on Ubuntu and macOS for every PR and push to `main`, plus an `actionlint`
+      job. The live-endpoint case stays out of CI so it never depends on a paid key.
 - [x] **Rename the bundle to `preflight`.** The old name collided with the upstream `pr-agent`
       project. Commands `pra`/`pral`/`pral-gate` → `preflight-pr`/`preflight`/`preflight-gate`,
       config `~/.config/preflight/preflight.toml`, artifacts `.preflight/`, env `PREFLIGHT_*`.

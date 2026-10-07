@@ -78,7 +78,58 @@ already knows, `custom_model_max_tokens = 0` lets LiteLLM declare the real windo
 A global `commit.gpgsign = true` was applied to the synthetic snapshot commit. `preflight` passes
 `-c commit.gpgsign=false`; make sure you are running the bundled `preflight`, not a modified copy.
 
-## `preflight-pr`/`preflight` print "relinked secrets" on every run
+## `git commit` says "commit blocked: no review found for this repo"
+
+The commit hook is doing its job: nothing has been reviewed yet. Run `preflight review`, fix what it
+finds, and commit again. The hook never runs the review for you - it only verifies one that already ran.
+
+## `git commit` says "these paths changed after the review"
+
+You edited (or staged) content after the last review. The named paths are the ones being committed that
+the reviewer never saw. Re-run `preflight review` so the review covers the current content, then commit.
+
+This is the normal consequence of iterating: the review is bound to the exact content it covered, so any
+later edit invalidates it. It is not a bug and there is no time-based expiry to wait out.
+
+## `git commit` says "the last review did not pass"
+
+The review ran but the gate verdict was not a pass - `preflight-gate` decides this (key issues,
+security concerns, `changes_required`, or an effort over the limit). Read `.preflight/review.md`, fix the
+findings, and re-review. The artifacts are left in place on a block precisely so you can read them.
+
+If you disagree with a finding, opt out deliberately rather than defeating the hook: re-record the review
+with `PREFLIGHT_GATE_ALLOW_ISSUES=1 preflight-gate` semantics, or bypass once with
+`git commit --no-verify`.
+
+## `git commit` says "commit blocked: the preflight helper is missing"
+
+The hook is installed but `~/.config/preflight/preflight-hook` is not. Run the bundle's `install.sh`. The
+hook fails closed on purpose: passing the commit would let unreviewed work through, which is the one thing
+it exists to prevent. `git commit --no-verify` bypasses it deliberately.
+
+## The hook never blocks anything
+
+Check, in order:
+
+- `git config core.hooksPath` - if it is empty, the repo is still using `.git/hooks` and the committed
+  `.githooks/` files are not being run. Set it to the **relative** `.githooks`.
+- The branch actually contains `.githooks/pre-commit`. A branch created before the hooks were committed
+  will not have them.
+- `PREFLIGHT_SKIP=1` in the environment (or a shell profile) silently disables the check.
+- Your last review used `PREFLIGHT_SCOPE=head`. Head-scope reviews cover already-committed content, so a
+  pre-commit hook could never vouch for a commit that did not exist when it ran - the hook says so on
+  stderr and allows the commit. Use the default worktree scope for enforcement.
+
+## The hook does not run in a git worktree
+
+An **absolute** `core.hooksPath` breaks worktrees: every worktree is pointed at the hooks directory of
+whichever checkout the path names, instead of its own. Use the relative form:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+## `preflight-pr` / `preflight` print "relinked secrets" on every run
 
 Normal after a `uv tool upgrade` (the venv, and the symlink, are recreated). It is a one-time message
 per upgrade; if it happens every run, the symlink target is being deleted - check

@@ -97,10 +97,33 @@ Paste `AGENTS-review-snippet.md` into the repo's `AGENTS.md` so every agent foll
 findings in one pass → re-review → commit once when the gate is green. The snippet also points at this repo, so
 an agent can look up current guidance as the bundle evolves.
 
+## Make it enforced (recommended)
+
+Instructions are easy to forget. A committed pre-commit hook makes the repo **refuse** a commit whose content
+was never reviewed:
+
+```sh
+cp ~/.config/preflight/githooks/* .githooks/     # shipped by install.sh
+git add .githooks && git commit -m "chore: enforce preflight before commits"
+git config core.hooksPath .githooks              # RELATIVE - required for worktrees
+```
+
+- It **verifies** that the content being committed is exactly what `preflight review` reviewed; an edit
+  after the review, or a newly staged unreviewed file, blocks the commit and names the paths.
+- It is **content-based, not time-based** - a review counts only while it still covers what you commit.
+- It **never runs a review** and is **strictly read-only** (index, `HEAD` and working tree untouched).
+- Reviewed-but-uncommitted content is ignored, so `git commit -a` still works with untracked scratch files.
+- `PREFLIGHT_SCOPE=head` reviews cannot be enforced; use the default worktree scope.
+- One-off bypass: `git commit --no-verify` (or `PREFLIGHT_SKIP=1`).
+
+Use the **relative** hooks path - an absolute one breaks git worktrees. See
+[`docs/DESIGN.md`](docs/DESIGN.md) for how the check works and why.
+
 ## What install.sh writes
 
 - `~/.local/bin/{preflight,preflight-pr,preflight-gate}` — the helpers.
-- `~/.config/preflight/{preflight.toml,ensure-link.sh,AGENTS-review-snippet.md}` — config + helpers.
+- `~/.config/preflight/{preflight.toml,ensure-link.sh,AGENTS-review-snippet.md,preflight-hook}` — config + helpers.
+- `~/.config/preflight/githooks/{pre-commit,post-commit}` — the example hooks to copy into a repo's `.githooks/`.
 - `~/.config/preflight/.secrets.toml` — created only if missing, chmod 600.
 - A symlink from that secrets file into the PR-Agent package's `settings/` dir.
 
@@ -119,6 +142,8 @@ key) and migrate it by hand.
 
 - `preflight` adds `.preflight/` to each repo's `.git/info/exclude` automatically, so review output is never
   committed.
+- The commit hook is opt-in per repo: copy `~/.config/preflight/githooks/*` into the repo's `.githooks/` and
+  set the **relative** `core.hooksPath`. See "Make it enforced" above.
 - The helpers run the upstream **`pr-agent`** tool (installed by `uv`); "pr-agent" here always means that
   upstream project, not this bundle.
 - Upgrading PR-Agent (`uv tool upgrade pr-agent`) recreates the venv; the wrappers re-link the secrets

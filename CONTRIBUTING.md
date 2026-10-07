@@ -11,6 +11,8 @@ is a default, not an assumption.
 | `install.sh` / `uninstall.sh` | Deploy / remove the setup on a machine |
 | `files/preflight.toml` | The global config (model, provider/streaming knobs, review caps) |
 | `files/preflight`, `files/preflight-pr`, `files/preflight-gate` | The helpers installed into `~/.local/bin` |
+| `files/preflight-hook` | The commit-time verifier; a repo's `.githooks/pre-commit` calls it |
+| `files/githooks/` | Example hooks a repo copies into its own `.githooks/` |
 | `files/ensure-link.sh` | Re-links the secrets file after `uv tool upgrade` |
 | `files/secrets.toml.example` | The secrets template - **never** a real key |
 | `AGENTS-review-snippet.md` | The block pasted into a repo's `AGENTS.md` |
@@ -49,12 +51,29 @@ with no overrides set, the generated config must still parse to the same values 
 python3 -c "import tomllib;print(tomllib.load(open('$T/cfg/preflight.toml','rb'))['config'])"
 ```
 
-Sanity-check the shell:
+Sanity-check the shell (the hooks are POSIX `sh`, the helpers `bash`):
 
 ```sh
 for f in install.sh uninstall.sh files/preflight files/preflight-pr files/preflight-gate files/ensure-link.sh; do
   bash -n "$f" || echo "FAIL $f"
 done
+for f in files/preflight-hook files/githooks/pre-commit files/githooks/post-commit; do
+  sh -n "$f" || echo "FAIL $f"
+done
+```
+
+Test the commit hook in a **throwaway** repo, never in a working checkout — `core.hooksPath` is
+clone-wide, so setting it here would apply to every worktree of this clone:
+
+```sh
+R="$(mktemp -d)"; cd "$R"; git init -q -b main .
+printf '# x\n' > README.md; git add README.md; git -c commit.gpgsign=false commit -q -m init
+mkdir -p .githooks && cp ~/.config/preflight/githooks/* .githooks/
+git config core.hooksPath .githooks
+
+git -c commit.gpgsign=false commit --allow-empty -m should-block   # no review -> blocked
+preflight review && preflight-gate                                  # must be a pass
+git -c commit.gpgsign=false commit -m "feat: ok"                    # now accepted
 ```
 
 ## Commits

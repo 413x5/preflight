@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A commit hook that refuses an unreviewed commit.** An agent (or human) could previously skip the review
+  entirely; now a repo can make the commit itself fail. Copy the bundled `files/githooks/*` into the repo's
+  own `.githooks/` and run `git config core.hooksPath .githooks` (relative - an absolute path breaks git
+  worktrees). The hook is opt-in per repo and covers every worktree.
+  - It **verifies** that the content being committed is exactly what `preflight review` reviewed, and never
+    runs a review itself (a review cannot be graded before the commit it describes exists).
+  - The binding is **content-based, not time-based**: an edit after the review, or a newly staged unreviewed
+    file, blocks the commit and names the paths.
+  - Reviewed-but-uncommitted content is ignored, so `git commit -a` keeps working with untracked scratch
+    files. This is `containment` - deliberately not strict equality, which would break `commit -a`, and not
+    a superset check, which would let a brand-new unreviewed file through.
+  - It is **strictly read-only**: it never modifies the index, `HEAD`, the working tree, or the artifacts,
+    and it fails closed when the helper is missing.
+  - `PREFLIGHT_SCOPE=head` reviews cannot be enforced (they cover already-committed content), so the hook
+    says so on stderr rather than pretending; a `post-commit` companion warns when enforcement did not apply.
+  - `preflight review` now also writes `.preflight/review.meta.json`, recording the tree it reviewed and the
+    `preflight-gate` verdict. `.preflight/` is left in place on a block so the findings can be inspected.
+  - New `preflight hook` subcommand and `preflight-hook` helper; `install.sh` installs both plus the example
+    hooks into `~/.config/preflight/`.
+
 ### Changed
 
 - **Renamed the bundle from `pr-agent` to `preflight`**, so it no longer collides with the upstream

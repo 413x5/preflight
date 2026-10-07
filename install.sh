@@ -101,6 +101,14 @@ install -m 0755 "$files/preflight-pr"   "$bindir/preflight-pr"
 install -m 0755 "$files/preflight"      "$bindir/preflight"
 install -m 0755 "$files/preflight-gate" "$bindir/preflight-gate"
 install -m 0644 "$files/ensure-link.sh" "$cfg/ensure-link.sh"
+# preflight-hook is what a repo's committed .githooks/pre-commit calls (via $PREFLIGHT_HOOK or
+# ~/.config/preflight/preflight-hook), so it lives with the config rather than on PATH.
+install -m 0755 "$files/preflight-hook" "$cfg/preflight-hook"
+if [ -d "$files/githooks" ]; then
+  mkdir -p "$cfg/githooks"
+  install -m 0755 "$files/githooks/pre-commit"  "$cfg/githooks/pre-commit"
+  install -m 0755 "$files/githooks/post-commit" "$cfg/githooks/post-commit"
+fi
 if [ -f "$here/AGENTS-review-snippet.md" ]; then
   install -m 0644 "$here/AGENTS-review-snippet.md" "$cfg/AGENTS-review-snippet.md"
 fi
@@ -132,3 +140,8 @@ say ""
 say "Done."
 if [ -z "$key" ]; then say "NEXT: paste your API key into $cfg/.secrets.toml (it is chmod 600)"; fi
 say "TRY:  cd <repo> && preflight review"
+say ""
+say "To make a repo REFUSE a commit that was not reviewed, commit the hooks and point git at them:"
+say "  mkdir -p .githooks && cp $cfg/githooks/* .githooks/ && git add .githooks"
+say "  git config core.hooksPath .githooks      # relative, so it also works in every worktree"
+say "See the 'enforce it' section of AGENTS-review-snippet.md."

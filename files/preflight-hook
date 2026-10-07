@@ -1,0 +1,84 @@
+#!/bin/sh
+# preflight-hook — verify that what is being committed has already been reviewed.
+#
+# Called by a repo's committed .githooks/pre-commit (see the preflight bundle docs). It is
+# READ-ONLY: it never modifies the index, HEAD or the working tree, and it never runs a review
+# (a review cannot be graded before the commit it describes exists).
+#
+# It answers one question: does the content being committed match the content that was reviewed?
+# Anything being committed that the reviewer never saw blocks the commit.
+#
+# Exit: 0 = the commit may proceed | 1 = blocked (run 'preflight review', then commit again)
+#
+# Env:  PREFLIGHT_DIR   artifact dir (default .preflight)
+#       PREFLIGHT_SKIP=1 bypass once (same idea as 'git commit --no-verify')
+set -u
+
+[ "${PREFLIGHT_SKIP:-0}" = "1" ] && exit 0
+
+dir="${PREFLIGHT_DIR:-.preflight}"
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 0
+
+fail() {
+  printf 'preflight: commit blocked: %s\n' "$1" >&2
+  printf "preflight: run 'preflight review', then commit again.\n" >&2
+  exit 1
+}
+
+# Fail closed on a missing interpreter rather than silently passing an unverified commit.
+command -v python3 >/dev/null 2>&1 || fail "python3 is required to read the review sidecar"
+
+meta="$dir/review.meta.json"
+[ -f "$meta" ] || fail "no review found for this repo"
+
+# Read the sidecar written by `preflight review`. Prints shell assignments; empty on any problem.
+assignments=$(python3 - "$meta" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+except Exception:
+    sys.exit(0)
+if not isinstance(d, dict):
+    sys.exit(0)
+def q(v):
+    return "'" + str(v if v is not None else '').replace("'", "'\\''") + "'"
+gate = d.get('gate') if isinstance(d.get('gate'), dict) else {}
+print('pf_scope='   + q(d.get('scope')))
+print('pf_tree='    + q(d.get('reviewed_tree')))
+print('pf_verdict=' + q(gate.get('verdict')))
+PY
+)
+[ -n "$assignments" ] || fail "could not read $meta"
+eval "$assignments"
+
+# A head-scope review covers already-committed content, which cannot be graded before the *next*
+# commit exists. Say so plainly rather than pretending to enforce it. Checked before the tree,
+# because a head-scope sidecar deliberately records no reviewed tree.
+if [ "${pf_scope:-}" != "worktree" ]; then
+  printf 'preflight: not enforced: the last review used scope=%s (hook enforcement needs worktree scope).\n' "${pf_scope:-unknown}" >&2
+  printf "preflight: run 'preflight review' with the default scope to enforce commits.\n" >&2
+  exit 0
+fi
+
+[ -n "${pf_tree:-}" ] || fail "the review sidecar does not name a reviewed tree"
+
+[ "${pf_verdict:-}" = "pass" ] || fail "the last review did not pass (${pf_verdict:-unknown})"
+
+# The binding is purely CONTENT-based, deliberately. There is no check that the review's recorded
+# head equals HEAD: committing moves HEAD, so such a check would invalidate the sidecar after every
+# commit and would forbid splitting one reviewed change across commits - while adding nothing, since
+# any real content change is already caught by the comparison below.
+staged=$(git write-tree 2>/dev/null) || fail "could not read the staged tree"
+
+# Containment: every path being committed must match the reviewed tree. Reviewed content that is
+# NOT being committed (status D) is ignored, which is what keeps `git commit -a` working when
+# untracked files are present.
+changed=$(git diff-tree -r -M --diff-filter=AM "$pf_tree" "$staged" 2>/dev/null)
+[ -n "$changed" ] || exit 0
+printf 'preflight: commit blocked: these paths changed after the review:\n' >&2
+printf '%s\n' "$changed" | awk -F'\t' 'NF>1 { printf "  %s\n", $2 }' >&2
+printf "preflight: run 'preflight review', then commit again.\n" >&2
+exit 1

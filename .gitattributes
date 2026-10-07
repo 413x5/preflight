@@ -5,8 +5,10 @@
 # The helpers are shell scripts: text, LF-only.
 *.sh                 text eol=lf
 files/preflight      text eol=lf
+files/preflight-hook text eol=lf
 files/preflight-pr   text eol=lf
 files/preflight-gate text eol=lf
+files/githooks/*     text eol=lf
 
 *.toml text eol=lf
 *.md   text eol=lf

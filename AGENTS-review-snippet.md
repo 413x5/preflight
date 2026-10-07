@@ -39,6 +39,46 @@ Loop until `preflight-gate` exits 0:
   `preflight ask "<question>"`.
 - If the helpers are missing on this machine, install them with the bundle's `install.sh`.
 
+### Make it enforced (recommended): refuse a commit that was not reviewed
+
+The loop above only works if someone remembers to run it. To make the repo **refuse** an unreviewed commit,
+commit a pre-commit hook and point git at it - once per clone, and it then covers every worktree:
+
+```sh
+cp ~/.config/preflight/githooks/* .githooks/     # ships with the bundle's install.sh
+git add .githooks && git commit -m "chore: enforce preflight before commits"
+git config core.hooksPath .githooks              # RELATIVE - see the note below
+```
+
+Use the **relative** path. An absolute one breaks git worktrees: every worktree would run the hooks
+directory of whichever checkout the path names, instead of its own.
+
+What the hook does, and does not do:
+
+- It **verifies** that the content being committed was what `preflight review` reviewed. If you edited
+  anything after the last review, or staged a file that was never reviewed, the commit is **blocked** and
+  the offending paths are named.
+- It **never runs a review** and never stages anything. It does not modify the index, `HEAD`, or the
+  working tree - it only reads.
+- It is **content-based, not time-based**: there is no expiry. A review counts only while the content it
+  covered is exactly what you are committing.
+- Reviewed content you are **not** committing is ignored, so `git commit -a` keeps working when untracked
+  scratch files are around.
+- `PREFLIGHT_SCOPE=head` reviews cannot be enforced (a head-scope review covers content that already
+  exists, and a pre-commit hook runs before the commit it would cover). Use the default worktree scope.
+- Deliberate one-off bypass: `git commit --no-verify` (or `PREFLIGHT_SKIP=1`).
+- `.preflight/` is left in place on a block so you can read `.preflight/review.md` for the detail. The
+  verdict is also stored in `.preflight/review.meta.json`.
+
+Worked example of the intended sequence:
+
+```sh
+preflight review          # review the working tree; writes .preflight/review.meta.json
+# fix the findings, then re-review until the gate passes
+preflight review && preflight-gate
+git add -A && git commit -m "feat: ..."     # the hook verifies the reviewed content
+```
+
 ### Where the preflight bundle lives, and how to get current guidance
 
 The helpers, the config template, and the full docs live in **this bundle's own repository**:
@@ -50,8 +90,8 @@ Read it (do not guess) when you need to know how the review loop is *meant* to w
 
 - `README.md` - install, use, and the "using another provider" recipe.
 - `ROADMAP.md` - what is planned and what changed recently.
-- `docs/DESIGN.md` - how the working-tree snapshot, the gate, and the provider config actually work.
-- `docs/TROUBLESHOOTING.md` - symptoms and fixes (auth, model ids, token budgets, and more).
+- `docs/DESIGN.md` - how the working-tree snapshot, the commit hook, the gate, and the provider config work.
+- `docs/TROUBLESHOOTING.md` - symptoms and fixes (auth, model ids, token budgets, blocked commits).
 - `CHANGELOG.md` - version-by-version changes, including any **breaking** rename or env-var change.
 
 It is a private repo; if `gh` is authenticated on this machine, `gh repo view 413x5/preflight` or

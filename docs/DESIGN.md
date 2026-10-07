@@ -62,6 +62,86 @@ budget.
 
 The key is never placed in the shell environment.
 
+## Enforcing the review: the commit hook
+
+The loop is only as good as remembering to run it, so the bundle ships a hook (in `files/githooks/`) that a
+repo commits into its own `.githooks/` and enables with `git config core.hooksPath .githooks`.
+
+### It verifies; it does not review
+
+The hook **never runs `preflight review`**. It cannot: `pre-commit` runs *before* the commit exists, so a
+worktree-scope review would hash content that only *becomes* the commit, and a head-scope review hashes the
+*parent*. There is also no way to invoke a run and then return to grade it, and review flags change the
+result without changing any hash. So the hook only checks a review that already happened.
+
+It also never reads `preflight review`'s exit code as a verdict: in plain-diff mode `review` exits `0` even
+when it finds 20 issues (it returns `1` only for a tool failure). The verdict comes from `preflight-gate`'s
+rules, which `preflight` records in `review.meta.json` at review time.
+
+### What it compares, and why content and not time
+
+`preflight review` snapshots the **worktree** (`read-tree HEAD` + `add -A` in a temporary index) and hands
+that diff to the model. It records the tree of exactly that snapshot in `review.meta.json` as
+`reviewed_tree`, captured on the same temp index - so it is a true record of what the model saw, rather than
+a later recomputation.
+
+At commit time the hook computes the **staged** tree (`git write-tree`) and compares:
+
+```sh
+git diff-tree -r -M --diff-filter=AM "$reviewed_tree" "$staged_tree"
+```
+
+Empty output means everything being committed was reviewed. Anything printed names a path that is being
+committed but was never reviewed.
+
+The comparison is **content-based, not time-based**, so there is no clock skew and no expiry window to
+reason about: a review counts exactly while the content it covered is what is being committed.
+
+### Why containment, and not the two obvious alternatives
+
+Both alternatives were measured on a real repo rather than reasoned about:
+
+| Situation | strict equality | **containment** | superset |
+|---|---|---|---|
+| Edit a file after review, then stage | blocked | blocked | blocked |
+| Stage a brand-new, never-reviewed file | blocked | blocked | **passes - unsafe** |
+| `git commit -a` with an untracked scratch file | **blocked - breaks a common idiom** | passes | passes |
+| Commit a subset of the reviewed files | blocked | passes | passes |
+
+- **Superset** (merely require the reviewed tree to cover the staged tree) is unsafe: it lets a brand-new,
+  never-reviewed file through.
+- **Strict equality** breaks `git commit -a`. `-a` stages tracked modifications but not untracked files,
+  while the snapshot includes them, so any non-ignored scratch file or build artifact makes the trees
+  differ and the commit fails. That is a common workflow, not a corner case.
+- **Containment** is the rule: every path being *committed* must equal that path in the *reviewed* tree,
+  and reviewed content that is not being committed is ignored. `D` records (reviewed but not committed)
+  are filtered out, which is what keeps `commit -a` working.
+
+Note what containment does **not** permit: committing only part of a reviewed *file* (for example the first
+half of its new content) is blocked, because that intermediate version was never reviewed. Only whole,
+reviewed versions of paths pass.
+
+### The state it needs, and the state it deliberately does not have
+
+`review.meta.json` inside the artifact dir is the single source of truth. `.preflight/` is **not deleted**
+by the hook: leaving it in place lets a blocked review be inspected, each run refreshes it, and deletion
+would buy nothing anyway - if someone acts on stale findings the content changes and the comparison fails,
+and if they change nothing the recorded verdict was already `fail`.
+
+Consequently the hook is **strictly read-only**: it never touches the index, `HEAD`, the working tree, or
+the artifacts. It needs no per-run state of its own.
+
+### Worktrees
+
+A commit can only be verified once it exists, so enforcement is inherently about the commit you are
+*making*. Two consequences:
+
+- Use a **relative** `core.hooksPath`. An absolute path points every worktree at the hooks directory of
+  whichever checkout it names, instead of the worktree you are in.
+- `git rev-parse --git-path preflight/` resolves per worktree, but the hook does not need it: the artifact
+  dir is a working-directory path, so it is already per worktree, and each worktree is reviewed and
+  committed independently.
+
 ## The gate
 
 `preflight-gate` is a small, dependency-free check over `review.json`:
@@ -75,3 +155,6 @@ The key is never placed in the shell environment.
 
 Env knobs: `PREFLIGHT_GATE_ALLOW_ISSUES=1` (ignore key issues), `PREFLIGHT_GATE_MAX_EFFORT=N` (fail above the
 estimated effort).
+
+`preflight review` runs the same check to record `gate.verdict` in `review.meta.json`, so the commit hook
+and the gate can never disagree about what counts as a pass.

@@ -12,6 +12,13 @@ Small, ready to do.
 
 ## Done
 
+- [x] **Enforce the review at commit time.** A repo can now refuse a commit whose content was never
+      reviewed: bundled `files/githooks/*` copied into its own `.githooks/` plus a **relative**
+      `git config core.hooksPath .githooks`. Content-based (not time-based) binding via tree comparison,
+      so an edit after the review or a newly staged unreviewed file blocks the commit; reviewed-but-
+      uncommitted content is ignored so `git commit -a` still works. Strictly read-only, fails closed, and
+      `git commit --no-verify` / `PREFLIGHT_SKIP=1` bypass deliberately. Opt-in per repo, per clone, and it
+      covers every worktree.
 - [x] **Rename the bundle to `preflight`.** The old name collided with the upstream `pr-agent`
       project. Commands `pra`/`pral`/`pral-gate` → `preflight-pr`/`preflight`/`preflight-gate`,
       config `~/.config/preflight/preflight.toml`, artifacts `.preflight/`, env `PREFLIGHT_*`.
@@ -59,8 +66,9 @@ Needs a decision or an external dependency.
 - [ ] **Bot identity.** Decide between a dedicated bot account (works with the CLI), the
       `github-actions[bot]` identity (Actions only), or a GitHub App + webhook server (not
       CLI-compatible). Required before Layer 2/3 can post under its own name.
-- [ ] **Pre-push hook** that runs `preflight review` + `preflight-gate` and blocks a push when the
-      gate fails.
+- [ ] **Pre-push hook** that reruns `preflight review` + `preflight-gate` and blocks a push when the gate
+      fails. Secondary to the commit hook: a pushed branch's content equals its commits, which the commit
+      hook already covers, and a pre-push check cannot detect a rewritten or already-pushed hash.
 
 ## Ideas
 

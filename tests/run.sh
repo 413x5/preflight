@@ -25,6 +25,14 @@ hook="$repo_root/files/preflight-hook"
 which_cases="${1:-all}"
 pass=0; fail=0; skipped=0
 
+# Reject an unrecognized group rather than running nothing and reporting success. A typo in a CI step
+# (`./tests/run.sh hok`) would otherwise exit 0 with "0 passed" and look green.
+case "$which_cases" in
+  all|hook|e2e) ;;
+  *) echo "tests: unknown case group '$which_cases' (expected one of: all, hook, e2e)" >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { echo "tests: at most one case group is accepted" >&2; exit 2; }
+
 if [ ! -r "$hook" ]; then echo "tests: cannot read $hook" >&2; exit 2; fi
 command -v git >/dev/null 2>&1 || { echo "tests: git is required" >&2; exit 2; }
 
@@ -181,6 +189,44 @@ case_block_typechange() {
   rm -f "$d/util.py"; ln -s /etc/passwd "$d/util.py"
   git -C "$d" add util.py
   expect_commit "swapping a reviewed file for a symlink is blocked" "REQ-HOOK-06" 1 "$d"
+}
+
+case_block_quoted_name_deletion() {
+  # `--name-only` without `-z` QUOTES any path that needs it (double-quoted, backslash-escaped),
+  # and core.quotePath cannot disable that for the characters that matter. The hook once fed those
+  # quoted names back into `git cat-file -e "HEAD:$p"`, which then asked about a path that does not
+  # exist - so a reviewed tracked file with a quoting-needing name was mistaken for an untracked
+  # scratch file and its deletion committed unreviewed.
+  local d; d="$(new_repo quoted)"
+  printf 'guard = True\n' > "$d/quote\"d.py"
+  printf 'guard = True\n' > "$d/back\\slash.py"
+  ( cd "$d" && git add -A && git -c commit.gpgsign=false commit -q --no-verify -m "chore: quoted" ) >/dev/null 2>&1
+  reset_case "$d"
+  review_here "$d"
+  git -C "$d" rm -q 'quote"d.py' 'back\slash.py'
+  expect_commit "deleting a reviewed file with a quoted name is blocked" "REQ-HOOK-24" 1 "$d"
+}
+
+case_block_gitlink_removal() {
+  # A submodule (gitlink) is not a blob, so `git cat-file -e "HEAD:path"` FAILS for it. An earlier
+  # per-path discriminator therefore classified a removed gitlink as "not tracked at HEAD" and let the
+  # removal through unreviewed. HEAD is now read with `ls-tree`, which lists gitlinks like any other
+  # entry. Only the gitlink itself is removed here, so `.gitmodules` cannot block for an unrelated
+  # reason.
+  local d; d="$(new_repo gitlink)"
+  local sub="$work/submodule-src"
+  mkdir -p "$sub"
+  ( cd "$sub" && git init -q -b main . && printf 'y = 1\n' > s.py \
+      && git add -A && git -c commit.gpgsign=false commit -q --no-verify -m "chore: sub" ) >/dev/null 2>&1
+  if ! git -C "$d" -c protocol.file.allow=always submodule add -q "$sub" sub >/dev/null 2>&1; then
+    skip "removing a gitlink without reviewing it is blocked" "submodule fixture unavailable"
+    reset_case "$d"; return
+  fi
+  ( cd "$d" && git add -A && git -c commit.gpgsign=false commit -q --no-verify -m "chore: sub" ) >/dev/null 2>&1
+  reset_case "$d"
+  review_here "$d"
+  git -C "$d" update-index --force-remove sub
+  expect_commit "removing a gitlink without reviewing it is blocked" "REQ-HOOK-25" 1 "$d"
 }
 
 case_pass_commit_a_with_scratch() {
@@ -469,6 +515,8 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_block_cached_remove \
     case_block_rename \
     case_block_typechange \
+    case_block_quoted_name_deletion \
+    case_block_gitlink_removal \
     case_pass_commit_a_with_scratch \
     case_pass_reviewed_deletion \
     case_pass_reviewed_rename \
@@ -496,4 +544,6 @@ fi
 
 say "$pass passed, $fail failed, $skipped skipped"
 [ "$fail" = 0 ] || exit 1
+# Nothing ran and nothing failed would be indistinguishable from success in a CI log.
+[ "$((pass + fail + skipped))" -gt 0 ] || { echo "tests: no cases ran" >&2; exit 2; }
 exit 0

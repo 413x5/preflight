@@ -116,7 +116,8 @@ git config core.hooksPath .githooks              # RELATIVE - required for workt
 - It is **content-based, not time-based** - a review counts only while it still covers what you commit.
 - It **never runs a review** and is **strictly read-only** (index, `HEAD` and working tree untouched).
 - Reviewed-but-uncommitted content is ignored, so `git commit -a` still works with untracked scratch files.
-- Deleting a reviewed file is blocked too (`git rm` included) - the review must cover the removal.
+- Deleting a reviewed file is blocked too (`git rm` included) - the review must cover the removal. A
+  submodule gitlink counts as a reviewed entry like any other, so removing one is blocked as well.
 - Renaming a reviewed file (`git mv`) or swapping one for a symlink is blocked as well.
 - The first commit in a repo with no history is allowed but not enforced; `preflight review` needs `HEAD`.
 - `PREFLIGHT_SCOPE=head` reviews cannot be enforced; use the default worktree scope.

@@ -20,10 +20,11 @@ Small, ready to do.
       `git commit --no-verify` / `PREFLIGHT_SKIP=1` bypass deliberately. Opt-in per repo, per clone, and it
       covers every worktree.
 - [x] **Test the commit hook.** `tests/run.sh` drives real repositories through the real hook files with
-      no framework and no network: 23 cases, one per requirement (`REQ-HOOK-01`..`23`, mapped in
-      `tests/README.md`). Every fix in the hook was reverted in turn to confirm the matching case fails,
-      and neutering the hook turns 14 cases red. Guards the four bypasses found while building it
-      (unreviewed deletions, renames, symlink typechanges, `git rm --cached`).
+      no framework and no network: 25 cases (24 offline plus one live end-to-end), one per requirement
+      (`REQ-HOOK-01`..`25`, mapped in `tests/README.md`). Every fix in the hook was reverted in turn to
+      confirm the matching case fails, and neutering the hook turns 16 offline cases red. Guards the six
+      bypasses found while building it (unreviewed deletions, renames, symlink typechanges,
+      `git rm --cached`, git's quoting of path names, and gitlinks).
 - [x] **Add CI.** `.github/workflows/ci.yml` runs shell syntax checks, an installer dry-run, a TOML check
       and the offline hook suite on Ubuntu and macOS for every PR and push to `main`, plus an `actionlint`
       job. The live-endpoint case stays out of CI so it never depends on a paid key.

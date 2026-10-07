@@ -45,10 +45,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `preflight hook` subcommand and `preflight-hook` helper; `install.sh` installs both plus the example
     hooks into `~/.config/preflight/`.
   - Covered by an integration suite in `tests/` (`./tests/run.sh`): real repositories, the real hook
-    files, no framework and no network. 23 cases, one per requirement (`REQ-HOOK-01`..`23`, mapped in
-    `tests/README.md`), each protecting a specific behaviour - including the four bypasses found while
-    building this (unreviewed deletions, renames, symlink typechanges, and `git rm --cached`). Every fix
-    was reverted in turn to confirm the matching case fails without it.
+    files, no framework and no network. 25 cases (24 offline plus one live end-to-end), one per
+    requirement (`REQ-HOOK-01`..`25`, mapped in `tests/README.md`), each protecting a specific behaviour -
+    including the six bypasses found while building this (unreviewed deletions, renames, symlink
+    typechanges, `git rm --cached`, reviewed files whose names git quotes, and gitlinks). Every fix was
+    reverted in turn to confirm the matching case fails without it; a neutered hook turns 16 offline
+    cases red.
+  - Path listings use `-z` and the paths are handled as raw bytes. `--name-only` without `-z` wraps any
+    path that needs quoting in double quotes and backslash-escapes it, and `core.quotePath` cannot
+    disable that for the characters that matter. Handing such a name back to git asks about a path that
+    does not exist, which made a reviewed file named `a"b.py`, `c\d.py` or `café.py` indistinguishable
+    from an untracked scratch file - so deleting it committed unreviewed.
+  - The tracked paths at `HEAD` are read with `git ls-tree` rather than by asking git about each
+    candidate path. `git cat-file -e "HEAD:sub"` fails for a **gitlink**, so a submodule removal was
+    classified as "not tracked at HEAD" and slipped through unreviewed.
 
 ### Changed
 

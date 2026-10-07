@@ -17,7 +17,9 @@ function that could be unit-tested:
 - a changed file type is `T`, with the same consequence;
 - a gitlink (submodule) is not a blob, so `cat-file -e "HEAD:sub"` fails for it;
 - an untracked scratch file appears as a **deletion** in the reviewed-to-staged comparison;
-- `git rm --cached` removes a path from the index while leaving the file on disk.
+- `git rm --cached` removes a path from the index while leaving the file on disk;
+- `--name-only` without `-z` **quotes** any path that needs it, so a name handed back to git belongs
+  to no file at all.
 
 So the tests drive **real repositories** through the **real hook files** in `files/`, and assert on the
 commit's exit code. Each test builds a throwaway repo from `tests/sample/`.
@@ -60,6 +62,8 @@ and every previously-fixed bug has a case that fails if the fix is reverted.
 | REQ-HOOK-21 | The hook enforces inside a linked worktree | an absolute `core.hooksPath` breaking worktrees |
 | REQ-HOOK-22 | A missing helper fails closed | the helper being absent letting commits through |
 | REQ-HOOK-23 | A real review then commit passes end to end | the simulated review drifting from the real one |
+| REQ-HOOK-24 | Deleting a reviewed file whose name needs quoting is blocked | `--name-only` without `-z` quoting the path turned a tracked file into a nonexistent one, so its deletion looked like an untracked scratch file |
+| REQ-HOOK-25 | Removing a reviewed gitlink (submodule) is blocked | `git cat-file -e "HEAD:sub"` failing for a gitlink, so a submodule removal counted as "not tracked at HEAD" |
 
 ## Mutation-checked
 
@@ -77,6 +81,8 @@ reverted in turn and the expected case was confirmed to fail:
 | the no-`HEAD` bootstrap allowance removed | REQ-HOOK-17 |
 | the `PREFLIGHT_SKIP` bypass removed | REQ-HOOK-15 |
 | the head-scope notice removed | REQ-HOOK-16 |
+| the `-z` deletion listing replaced by the quoted one | REQ-HOOK-24 |
+| the `ls-tree` discriminator replaced by per-path `cat-file` | REQ-HOOK-24, REQ-HOOK-25 |
 
 ## A trap worth knowing
 

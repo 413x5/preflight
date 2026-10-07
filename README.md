@@ -123,6 +123,8 @@ git config core.hooksPath .githooks              # RELATIVE - required for workt
 - The first commit in a repo with no history is allowed but not enforced; `preflight review` needs `HEAD`.
 - `PREFLIGHT_SCOPE=head` reviews cannot be enforced; use the default worktree scope.
 - One-off bypass: `git commit --no-verify` (or `PREFLIGHT_SKIP=1`).
+- The verifier's path is overridable with `PREFLIGHT_HOOK` (default `~/.config/preflight/preflight-hook`),
+  for a repo that vendors its own copy instead of relying on the installed one.
 
 Use the **relative** hooks path - an absolute one breaks git worktrees. See
 [`docs/DESIGN.md`](docs/DESIGN.md) for how the check works and why.

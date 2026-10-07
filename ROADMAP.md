@@ -20,10 +20,14 @@ Small, ready to do.
       `git commit --no-verify` / `PREFLIGHT_SKIP=1` bypass deliberately. Opt-in per repo, per clone, and it
       covers every worktree.
 - [x] **Test the commit hook.** `tests/run.sh` drives real repositories through the real hook files with
-      no framework and no network: 23 cases, one per requirement (`REQ-HOOK-01`..`23`, mapped in
-      `tests/README.md`). Every fix in the hook was reverted in turn to confirm the matching case fails,
-      and neutering the hook turns 14 cases red. Guards the four bypasses found while building it
-      (unreviewed deletions, renames, symlink typechanges, `git rm --cached`).
+      no framework and no network: 26 cases (25 offline plus one live end-to-end), one per requirement
+      (`REQ-HOOK-01`..`26`, mapped in `tests/README.md`). Every fix in the hook was reverted in turn to
+      confirm the matching case fails, and neutering the hook turns 16 offline cases red. Guards the seven
+      bypasses found while building it (unreviewed deletions, renames, symlink typechanges,
+      `git rm --cached`, git's quoting of path names, gitlinks, and an unset `HOME`).
+- [x] **Add `AGENTS.md`.** Instructions for agents changing this repo, as opposed to
+      `AGENTS-review-snippet.md`, which is the block pasted into a consuming repo. Records the hook's
+      invariants, the checks to run, and the traps already hit here.
 - [x] **Add CI.** `.github/workflows/ci.yml` runs shell syntax checks, an installer dry-run, a TOML check
       and the offline hook suite on Ubuntu and macOS for every PR and push to `main`, plus an `actionlint`
       job. The live-endpoint case stays out of CI so it never depends on a paid key.
@@ -70,7 +74,9 @@ Needs a decision or an external dependency.
 
 - [ ] **Layer 2 - post or update a PR comment from the CLI.** Needs a GitHub token. Today the loop is
       local-only; nothing is posted to GitHub.
-- [ ] **Layer 3 - GitHub Actions.** `github-action.example.yml` is staged but not activated.
+- [ ] **Layer 3 - GitHub Actions.** No example workflow is committed yet (an earlier note here referred to
+      a `github-action.example.yml` that does not exist). It would need the provider key as a repository
+      secret, and a review per push is token-heavy.
 - [ ] **Bot identity.** Decide between a dedicated bot account (works with the CLI), the
       `github-actions[bot]` identity (Actions only), or a GitHub App + webhook server (not
       CLI-compatible). Required before Layer 2/3 can post under its own name.

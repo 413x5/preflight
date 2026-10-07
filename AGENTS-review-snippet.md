@@ -73,6 +73,9 @@ What the hook does, and does not do:
 - `PREFLIGHT_SCOPE=head` reviews cannot be enforced (a head-scope review covers content that already
   exists, and a pre-commit hook runs before the commit it would cover). Use the default worktree scope.
 - Deliberate one-off bypass: `git commit --no-verify` (or `PREFLIGHT_SKIP=1`).
+- It calls the verifier at `$PREFLIGHT_HOOK`, defaulting to `~/.config/preflight/preflight-hook`. If that
+  helper is missing the commit is **refused**, not passed - so re-run the bundle's `install.sh` on a new
+  machine, or set `PREFLIGHT_HOOK` to a vendored copy.
 - `.preflight/` is left in place on a block so you can read `.preflight/review.md` for the detail. The
   verdict is also stored in `.preflight/review.meta.json`.
 

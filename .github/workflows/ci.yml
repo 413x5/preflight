@@ -113,6 +113,13 @@ jobs:
         # Offline cases only: the live-endpoint case needs a paid key, and CI must not depend on one.
         run: ./tests/run.sh hook
 
+      - name: Commit-hook selfcheck
+        shell: bash
+        # Re-runs the suite above against a neutered hook and requires that exactly the
+        # enforcement-sensitive cases fail. Without this, a case that claims to test enforcement but
+        # passes with the hook disabled would go unnoticed - the suite would still be green.
+        run: ./tests/run.sh selfcheck
+
   actionlint:
     name: workflow lint
     runs-on: ubuntu-latest

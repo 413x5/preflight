@@ -20,7 +20,11 @@ set -u
 # Installed by the preflight bundle's install.sh. A missing helper FAILS the commit rather than
 # letting an unverified commit through - the same stance prism takes with a missing toolchain.
 # That is the point of installing the hook; bypass deliberately with --no-verify when needed.
-helper="${PREFLIGHT_HOOK:-$HOME/.config/preflight/preflight-hook}"
+#
+# ${HOME:-} rather than $HOME: this script runs with `set -u`, so an unset HOME (a hermetic build
+# script, `env -u HOME git commit`, some CI runners) would abort the shell with "HOME: unbound
+# variable" and a confusing error instead of the message below.
+helper="${PREFLIGHT_HOOK:-${HOME:-}/.config/preflight/preflight-hook}"
 if [ ! -x "$helper" ]; then
   printf 'preflight: commit blocked: the preflight helper is missing (%s).\n' "$helper" >&2
   printf "preflight: install the preflight bundle (its install.sh), then commit again.\n" >&2

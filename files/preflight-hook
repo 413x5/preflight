@@ -105,22 +105,55 @@ staged=$(git write-tree 2>/dev/null) || fail "could not read the staged tree"
 # whether the path is tracked in HEAD: a D path that HEAD knows is tracked content genuinely being
 # deleted, while a D path that HEAD does not know was never part of the commit's history and is
 # simply not being committed. Only the former is a real change.
-changed=$(git diff-tree -r -M --diff-filter=ACMRTU --name-only "$pf_tree" "$staged" 2>/dev/null) || fail "could not compare the reviewed and staged trees"
-dlist=$(git diff-tree -r -M --diff-filter=D --name-only "$pf_tree" "$staged" 2>/dev/null) || fail "could not compare the reviewed and staged trees"
+#
+# Every listing here uses `-z`, and the paths are handled as raw bytes. `--name-only` without `-z`
+# QUOTES any path that needs it - enclosing it in double quotes and backslash-escaping it - and
+# `core.quotePath` cannot turn that off for the characters that matter (it only controls bytes
+# above 0x7f). Feeding a quoted name back into git asks about a path that does not exist, so a
+# reviewed tracked file named `a"b.py`, `c\d.py` or `café.py` was mistaken for an untracked scratch
+# file and its deletion committed unreviewed. `-z` emits the raw name, NUL-terminated.
+tmpd=$(mktemp -d) || fail "could not create a temporary directory"
+trap 'rm -rf "$tmpd"' EXIT
+trap 'rm -rf "$tmpd"; exit 1' HUP INT TERM
 
-deleted=''
-while IFS= read -r p; do
-  [ -n "$p" ] || continue
-  if git cat-file -e "HEAD:$p" 2>/dev/null; then deleted="$deleted$p
-"; fi
-done <<EOF
-$dlist
-EOF
+git diff-tree -r -M -z --diff-filter=ACMRTU --name-only "$pf_tree" "$staged" \
+  >"$tmpd/changed" 2>/dev/null || fail "could not compare the reviewed and staged trees"
+git diff-tree -r -M -z --diff-filter=D --name-only "$pf_tree" "$staged" \
+  >"$tmpd/removed" 2>/dev/null || fail "could not compare the reviewed and staged trees"
+# `ls-tree -r -z` WITHOUT `--name-only`: the latter only exists from git 2.38, and nothing else here
+# needs a git that new. Each record is "<mode> <type> <sha>\t<name>", so splitting on the FIRST tab is
+# unambiguous - with -z the name is raw and may itself contain a tab.
+git ls-tree -r -z HEAD >"$tmpd/tracked" 2>/dev/null \
+  || fail "could not read the tracked paths at HEAD"
 
-[ -n "$changed$deleted" ] || exit 0
+python3 - "$tmpd/tracked" "$tmpd/removed" "$tmpd/deleted" <<'PY' || fail "could not compare the reviewed and staged trees"
+import sys
 
-printf 'preflight: commit blocked: these paths changed after the review:\n' >&2
-[ -n "$changed" ] && printf '%s\n' "$changed" | sed 's/^/  /' >&2
-[ -n "$deleted" ] && printf '%s' "$deleted" | sed 's/^/  (deleted) /' >&2
-printf "preflight: run 'preflight review', then commit again.\n" >&2
-exit 1
+def readz(path):
+    with open(path, 'rb') as fh:
+        return [n for n in fh.read().split(b'\0') if n]
+
+# Records are "<mode> <type> <sha>\t<name>"; keep only the name.
+tracked = {rec.split(b'\t', 1)[1] for rec in readz(sys.argv[1]) if b'\t' in rec}
+with open(sys.argv[3], 'wb') as out:
+    out.write(b''.join(n + b'\0' for n in readz(sys.argv[2]) if n in tracked))
+PY
+
+if [ -s "$tmpd/changed" ] || [ -s "$tmpd/deleted" ]; then
+  printf 'preflight: commit blocked: these paths changed after the review:\n' >&2
+  python3 - "$tmpd/changed" "$tmpd/deleted" <<'PY' >&2
+import sys
+
+def show(path, prefix):
+    with open(path, 'rb') as fh:
+        for name in fh.read().split(b'\0'):
+            if name:
+                sys.stdout.buffer.write(b'  ' + prefix + name + b'\n')
+
+show(sys.argv[1], b'')
+show(sys.argv[2], b'(deleted) ')
+PY
+  printf "preflight: run 'preflight review', then commit again.\n" >&2
+  exit 1
+fi
+exit 0

@@ -21,6 +21,7 @@ is just the built-in default.
 
 ## Docs
 
+- [`AGENTS.md`](AGENTS.md) — instructions for AI agents **changing this repo** (invariants, checks, traps).
 - [`CHANGELOG.md`](CHANGELOG.md) — what changed, per version.
 - [`ROADMAP.md`](ROADMAP.md) — planned work and open decisions.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — how it works and why.
@@ -33,7 +34,7 @@ is just the built-in default.
 - macOS or Linux, and `git`.
 - [`uv`](https://astral.sh/uv) — installs PR-Agent in an isolated venv:
   `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- Python 3.12/3.13 (uv can fetch one).
+- Python 3.13 (the installer's default; `PREFLIGHT_PY` overrides it, and uv can fetch one).
 - Network access to an OpenAI-compatible endpoint (ClinePass by default, or your own).
 
 ## Install
@@ -116,11 +117,14 @@ git config core.hooksPath .githooks              # RELATIVE - required for workt
 - It is **content-based, not time-based** - a review counts only while it still covers what you commit.
 - It **never runs a review** and is **strictly read-only** (index, `HEAD` and working tree untouched).
 - Reviewed-but-uncommitted content is ignored, so `git commit -a` still works with untracked scratch files.
-- Deleting a reviewed file is blocked too (`git rm` included) - the review must cover the removal.
+- Deleting a reviewed file is blocked too (`git rm` included) - the review must cover the removal. A
+  submodule gitlink counts as a reviewed entry like any other, so removing one is blocked as well.
 - Renaming a reviewed file (`git mv`) or swapping one for a symlink is blocked as well.
 - The first commit in a repo with no history is allowed but not enforced; `preflight review` needs `HEAD`.
 - `PREFLIGHT_SCOPE=head` reviews cannot be enforced; use the default worktree scope.
 - One-off bypass: `git commit --no-verify` (or `PREFLIGHT_SKIP=1`).
+- The verifier's path is overridable with `PREFLIGHT_HOOK` (default `~/.config/preflight/preflight-hook`),
+  for a repo that vendors its own copy instead of relying on the installed one.
 
 Use the **relative** hooks path - an absolute one breaks git worktrees. See
 [`docs/DESIGN.md`](docs/DESIGN.md) for how the check works and why.
@@ -136,13 +140,18 @@ Use the **relative** hooks path - an absolute one breaks git worktrees. See
 ## Development
 
 CI runs on every pull request and on pushes to `main`, on Ubuntu and macOS: shell syntax, an installer
-dry-run into a throwaway prefix, a TOML check on the generated config, and the commit-hook integration
-suite. Everything it runs is available locally:
+dry-run into a throwaway prefix, a TOML check on the generated config, the commit-hook integration suite,
+and a selfcheck that re-runs that suite against a neutered hook. Everything it runs is available locally:
 
 ```sh
 ./tests/run.sh hook        # the offline hook tests, in seconds
+./tests/run.sh selfcheck   # re-runs them against a neutered hook
 actionlint                 # workflow lint
 ```
+
+The selfcheck catches a suite that passes for the wrong reason: stubbing the hook out entirely still
+satisfies the nine cases that assert *acceptance* rather than refusal, so "all green" alone would not
+prove the hook refuses anything.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full list and
 [`tests/README.md`](tests/README.md) for the requirement-to-case mapping.

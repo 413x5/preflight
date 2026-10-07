@@ -16,6 +16,7 @@ is a default, not an assumption.
 | `files/ensure-link.sh` | Re-links the secrets file after `uv tool upgrade` |
 | `files/secrets.toml.example` | The secrets template - **never** a real key |
 | `AGENTS-review-snippet.md` | The block pasted into a repo's `AGENTS.md` |
+| `AGENTS.md` | Instructions for agents changing **this** repo (not the snippet) |
 | `tests/` | Integration tests for the commit hook, plus the sample fixture they build on |
 
 ## Ground rules
@@ -43,10 +44,18 @@ run means a green CI run:
 | Installer deploys into a throwaway prefix | `PREFLIGHT_HOME=$(mktemp -d)/cfg ... ./install.sh` |
 | Generated config is valid TOML | `python3 -c 'import tomllib; tomllib.load(...)'` |
 | Commit-hook integration tests | `./tests/run.sh hook` |
+| Selfcheck: the suite re-run against a neutered hook | `./tests/run.sh selfcheck` |
 | Workflow lint (`actionlint`) | `actionlint .github/workflows/ci.yml` |
 
 The live-endpoint case (`./tests/run.sh e2e`) is **not** run in CI: it needs a paid key, and CI should
 not depend on one.
+
+The **selfcheck** exists because a green suite is not proof the hook enforces. Nine of the 25 offline
+cases pass with the hook stubbed out entirely - they assert acceptance (`commit -a`, a reviewed deletion,
+a reviewed rename) or exercise a deliberate bypass, so blocking nothing satisfies them. The selfcheck runs
+the whole suite against a neutered hook and requires exactly the enforcement-sensitive cases to fail, and
+it requires every case to be classified, so a newly added case cannot join the insensitive set by
+default. See [`tests/README.md`](tests/README.md) for the classification.
 
 Workflow actions are pinned to a **moving major tag** (`actions/checkout@v7`), and Dependabot
 (`.github/dependabot.yml`) proposes bumps weekly, grouped into one PR. If you add an action, pin the same
@@ -58,6 +67,7 @@ network. Refer to [`tests/README.md`](tests/README.md) for the requirement-to-ca
 
 ```sh
 ./tests/run.sh hook      # offline, seconds
+./tests/run.sh selfcheck # the suite against a neutered hook - see below
 ./tests/run.sh           # includes one live-endpoint case (needs a configured key)
 ```
 

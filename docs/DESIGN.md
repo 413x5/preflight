@@ -88,7 +88,7 @@ a later recomputation.
 At commit time the hook computes the **staged** tree (`git write-tree`) and compares:
 
 ```sh
-git diff-tree -r -M --diff-filter=ACMRTU --name-only "$reviewed_tree" "$staged_tree"
+git diff-tree -r -M -z --diff-filter=ACMRTU --name-only "$reviewed_tree" "$staged_tree"
 ```
 
 Empty output means every path being committed matches the reviewed tree. Anything printed names a path
@@ -103,7 +103,27 @@ A second comparison picks up removals, because deleting reviewed code is how a g
 unnoticed:
 
 ```sh
-git diff-tree -r -M --diff-filter=D --name-only "$reviewed_tree" "$staged_tree"
+git diff-tree -r -M -z --diff-filter=D --name-only "$reviewed_tree" "$staged_tree"
+```
+
+### Why every listing uses `-z`
+
+Without `-z`, `--name-only` **quotes** any path that needs it - wrapping it in double quotes and
+backslash-escaping it - and `core.quotePath` cannot turn that off for the characters that matter (it only
+controls bytes above `0x7f`). A quoted name is not a path: handing `"q\"uote.py"` back to git asks about a
+file that does not exist. The deletion discriminator below does exactly that, so a reviewed tracked file
+named `a"b.py`, `c\d.py` or `café.py` looked like an untracked scratch file and **its deletion committed
+unreviewed**. `-z` emits the raw name NUL-terminated, and the names are then handled as bytes rather than
+through the shell.
+
+The same reasoning rules out the obvious alternative for the deletion check - `git cat-file -e "HEAD:$path"`
+per candidate - for a second, independent reason: interpolating a path into a git argument is exactly the
+operation that breaks on a quoted name, and a **gitlink** (submodule) is not a blob, so `cat-file -e
+"HEAD:sub"` fails for it and a reviewed submodule removal counted as "not tracked at HEAD" and slipped
+through unreviewed. HEAD's paths are read once instead, which lists gitlinks like any other entry:
+
+```sh
+git ls-tree -r -z HEAD   # "<mode> <type> <sha>\t<name>", split on the first tab
 ```
 
 The comparison is **content-based, not time-based**, so there is no clock skew and no expiry window to
@@ -120,6 +140,7 @@ Both alternatives were measured on a real repo rather than reasoned about:
 | Delete a reviewed tracked file (`git rm`) | blocked | blocked | **passes - unsafe** |
 | Rename a reviewed file away (`git mv`) | blocked | blocked | **passes - unsafe** |
 | Swap a reviewed file for a symlink | blocked | blocked | **passes - unsafe** |
+| Delete a reviewed file whose name git would quote | blocked | blocked | **passes - unsafe** |
 | `git commit -a` with an untracked scratch file | **blocked - breaks a common idiom** | passes | passes |
 | Commit a subset of the reviewed files | blocked | passes | passes |
 | Delete, rename or retype as the review covered it | passes | passes | passes |
@@ -166,6 +187,13 @@ and if they change nothing the recorded verdict was already `fail`.
 
 Consequently the hook is **strictly read-only**: it never touches the index, `HEAD`, the working tree, or
 the artifacts. It needs no per-run state of its own.
+
+One limitation follows from that and is worth stating plainly: the recorded verdict is **not
+tamper-evident**. `review.meta.json` is an ordinary file, so anyone who can edit the working tree can edit
+it too and fabricate a `pass`. The hook defends against the realistic failure mode - a review being skipped
+or stale - not against a determined author who is willing to write their own sidecar. Making the verdict
+trustworthy needs a party that can sign or re-derive it (server-side review state, or a check that runs
+where the author has no write access), which is a different layer than this hook.
 
 ### Worktrees
 

@@ -1,0 +1,26 @@
+# Keep the workflow actions current.
+#
+# This file exists because the pins in .github/workflows/ci.yml went stale once already: the CI was added
+# with actions/checkout@v5 and actionlint 1.7.7 and nothing updated them. Dependabot fixes that class of
+# drift rather than relying on someone noticing.
+#
+# Scope is deliberately narrow. The bundle is shell plus git hooks, so there is nothing else to track:
+# no lockfiles and no pip/npm manifests. (install.sh does not pin pr-agent, which is a separate roadmap
+# item, not a Dependabot concern.)
+#
+# Schema: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      # Weekly, not daily: the only tracked dependency is the workflow actions, and daily updates would
+      # be noise out of proportion to the risk in a repo this small.
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for a routine "bump several actions" change, rather than one PR per action. A bump that
+      # breaks something is caught by the CI these actions run, which is the point of having it.
+      actions:
+        patterns: ["*"]

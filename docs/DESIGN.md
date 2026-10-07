@@ -88,11 +88,23 @@ a later recomputation.
 At commit time the hook computes the **staged** tree (`git write-tree`) and compares:
 
 ```sh
-git diff-tree -r -M --diff-filter=AM "$reviewed_tree" "$staged_tree"
+git diff-tree -r -M --diff-filter=ACMRTU --name-only "$reviewed_tree" "$staged_tree"
 ```
 
-Empty output means everything being committed was reviewed. Anything printed names a path that is being
-committed but was never reviewed.
+Empty output means every path being committed matches the reviewed tree. Anything printed names a path
+that is being committed but was never reviewed.
+
+The filter must be `ACMRTU`, not `AM`. With rename detection on, a moved file is neither added nor
+modified, and a changed file type (regular file to symlink, say) is `T` - so an `AM`-only filter reports
+**nothing** for `git mv auth.py auth_disabled.py` or for a file swapped for a symlink, and both would
+commit unreviewed.
+
+A second comparison picks up removals, because deleting reviewed code is how a guard disappears
+unnoticed:
+
+```sh
+git diff-tree -r -M --diff-filter=D --name-only "$reviewed_tree" "$staged_tree"
+```
 
 The comparison is **content-based, not time-based**, so there is no clock skew and no expiry window to
 reason about: a review counts exactly while the content it covered is what is being committed.
@@ -105,21 +117,45 @@ Both alternatives were measured on a real repo rather than reasoned about:
 |---|---|---|---|
 | Edit a file after review, then stage | blocked | blocked | blocked |
 | Stage a brand-new, never-reviewed file | blocked | blocked | **passes - unsafe** |
+| Delete a reviewed tracked file (`git rm`) | blocked | blocked | **passes - unsafe** |
+| Rename a reviewed file away (`git mv`) | blocked | blocked | **passes - unsafe** |
+| Swap a reviewed file for a symlink | blocked | blocked | **passes - unsafe** |
 | `git commit -a` with an untracked scratch file | **blocked - breaks a common idiom** | passes | passes |
 | Commit a subset of the reviewed files | blocked | passes | passes |
+| Delete, rename or retype as the review covered it | passes | passes | passes |
 
 - **Superset** (merely require the reviewed tree to cover the staged tree) is unsafe: it lets a brand-new,
-  never-reviewed file through.
+  never-reviewed file through, and equally lets reviewed content be deleted, renamed or retyped untouched
+  by any review.
 - **Strict equality** breaks `git commit -a`. `-a` stages tracked modifications but not untracked files,
   while the snapshot includes them, so any non-ignored scratch file or build artifact makes the trees
   differ and the commit fails. That is a common workflow, not a corner case.
-- **Containment** is the rule: every path being *committed* must equal that path in the *reviewed* tree,
-  and reviewed content that is not being committed is ignored. `D` records (reviewed but not committed)
-  are filtered out, which is what keeps `commit -a` working.
+- **Containment** is the rule: every path being *committed* must equal that path in the *reviewed* tree.
+  Reviewed content that is not being committed is ignored.
+
+`D` records need one refinement, and it matters. The comparison runs **reviewed -> staged**, where a `D`
+means "in the reviewed tree, absent from the staged tree". Two very different things produce that:
+
+- a **tracked file being deleted** - reviewed content going away, which is a change the reviewer never
+  saw and is exactly how a guard is removed without being noticed, so it is **blocked**; and
+- an **untracked scratch file** that was in the snapshot (the snapshot includes untracked files) and is
+  simply not being committed - blocking that would break `git commit -a`, the very thing this rule
+  exists to preserve.
+
+The discriminator is `HEAD`: a `D` path that `HEAD` knows is tracked content genuinely being deleted; a
+`D` path `HEAD` does not know was never part of the commit's history. Only the former blocks.
 
 Note what containment does **not** permit: committing only part of a reviewed *file* (for example the first
-half of its new content) is blocked, because that intermediate version was never reviewed. Only whole,
-reviewed versions of paths pass.
+half of its new content) is blocked, because that intermediate version was never reviewed. Deleting a whole
+reviewed file is blocked too, for the same reason. A deletion or rename that is *included in the review*
+passes normally - re-reviewing is the intended way to accept a removal.
+
+### The first commit is not enforced
+
+A repository with no commits has nothing to protect: the commit being made *is* the initial content, and
+`preflight review` cannot run at all before a first commit exists (it needs `HEAD` to diff against, and
+exits 3). Blocking there would deadlock adoption - the hook could never be installed before the commit
+that installs it. So with no `HEAD` the hook allows the commit and says it is not enforced.
 
 ### The state it needs, and the state it deliberately does not have
 

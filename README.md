@@ -1,5 +1,7 @@
 # preflight — a deployable, machine-local PR-Agent review setup
 
+[![CI](https://github.com/413x5/preflight/workflows/CI/badge.svg)](https://github.com/413x5/preflight/actions/workflows/ci.yml)
+
 One command deploys a **machine-local** PR-Agent that reviews your **working tree** (no commit, no GitHub round
 trip) and hands the findings back to whatever coding agent is editing the code. It works against **any
 OpenAI-compatible endpoint**; ClinePass (`openai/cline-pass/deepseek-v4.1-flash`, `https://api.cline.bot/api/v1`)
@@ -24,6 +26,7 @@ is just the built-in default.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — how it works and why.
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — symptoms and fixes.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — layout, ground rules, how to test changes.
+- [`tests/README.md`](tests/README.md) — the integration suite for the commit hook.
 
 ## Requirements
 
@@ -113,6 +116,9 @@ git config core.hooksPath .githooks              # RELATIVE - required for workt
 - It is **content-based, not time-based** - a review counts only while it still covers what you commit.
 - It **never runs a review** and is **strictly read-only** (index, `HEAD` and working tree untouched).
 - Reviewed-but-uncommitted content is ignored, so `git commit -a` still works with untracked scratch files.
+- Deleting a reviewed file is blocked too (`git rm` included) - the review must cover the removal.
+- Renaming a reviewed file (`git mv`) or swapping one for a symlink is blocked as well.
+- The first commit in a repo with no history is allowed but not enforced; `preflight review` needs `HEAD`.
 - `PREFLIGHT_SCOPE=head` reviews cannot be enforced; use the default worktree scope.
 - One-off bypass: `git commit --no-verify` (or `PREFLIGHT_SKIP=1`).
 
@@ -126,6 +132,22 @@ Use the **relative** hooks path - an absolute one breaks git worktrees. See
 - `~/.config/preflight/githooks/{pre-commit,post-commit}` — the example hooks to copy into a repo's `.githooks/`.
 - `~/.config/preflight/.secrets.toml` — created only if missing, chmod 600.
 - A symlink from that secrets file into the PR-Agent package's `settings/` dir.
+
+## Development
+
+CI runs on every pull request and on pushes to `main`, on Ubuntu and macOS: shell syntax, an installer
+dry-run into a throwaway prefix, a TOML check on the generated config, and the commit-hook integration
+suite. Everything it runs is available locally:
+
+```sh
+./tests/run.sh hook        # the offline hook tests, in seconds
+actionlint                 # workflow lint
+```
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full list and
+[`tests/README.md`](tests/README.md) for the requirement-to-case mapping.
+
+The CI badge in this README only renders for signed-in viewers, because the repository is private.
 
 ## Uninstall
 

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CI** (`.github/workflows/ci.yml`): on every pull request and on pushes to `main`, on both Ubuntu and
+  macOS, it checks shell syntax (`bash -n` for the helpers/installer, `sh -n` for the hooks and tests),
+  dry-runs `install.sh` into a throwaway prefix (including that it never clobbers an existing
+  `.secrets.toml`), validates the generated config as TOML, and runs the offline commit-hook suite. A
+  separate job lints the workflows with a pinned `actionlint`. The live-endpoint test is deliberately
+  excluded: it needs a paid key, and CI must not depend on one.
+- **Dependabot** (`.github/dependabot.yml`) keeps the workflow actions current, weekly and grouped into a
+  single pull request. The pins had already gone stale once (CI shipped with `actions/checkout@v5` and
+  `actionlint` 1.7.7), so this replaces "someone notices" with an automated bump whose PR is checked by
+  the CI it changes.
 - **A commit hook that refuses an unreviewed commit.** An agent (or human) could previously skip the review
   entirely; now a repo can make the commit itself fail. Copy the bundled `files/githooks/*` into the repo's
   own `.githooks/` and run `git config core.hooksPath .githooks` (relative - an absolute path breaks git
@@ -19,18 +29,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     file, blocks the commit and names the paths.
   - Reviewed-but-uncommitted content is ignored, so `git commit -a` keeps working with untracked scratch
     files. This is `containment` - deliberately not strict equality, which would break `commit -a`, and not
-    a superset check, which would let a brand-new unreviewed file through.
+    a superset check, which would let a brand-new unreviewed file - or the deletion of a reviewed one -
+    through. Deleting a whole reviewed file is blocked (`D` records that `HEAD` knows), while an untracked
+    scratch file that is merely not being committed is ignored. Renaming a reviewed file (`git mv`) and
+    swapping one for a symlink are blocked too - with rename detection on those are `R`/`T`, which an
+    `AM`-only filter reports as no change at all.
+  - The **first** commit in a repository with no history is allowed but not enforced: `preflight review`
+    cannot run before a first commit exists, so blocking would make the hook impossible to adopt.
   - It is **strictly read-only**: it never modifies the index, `HEAD`, the working tree, or the artifacts,
     and it fails closed when the helper is missing.
   - `PREFLIGHT_SCOPE=head` reviews cannot be enforced (they cover already-committed content), so the hook
     says so on stderr rather than pretending; a `post-commit` companion warns when enforcement did not apply.
   - `preflight review` now also writes `.preflight/review.meta.json`, recording the tree it reviewed and the
     `preflight-gate` verdict. `.preflight/` is left in place on a block so the findings can be inspected.
-  - New `preflight hook` subcommand and `preflight-hook` helper; `install.sh` installs both plus the example
+- New `preflight hook` subcommand and `preflight-hook` helper; `install.sh` installs both plus the example
     hooks into `~/.config/preflight/`.
+  - Covered by an integration suite in `tests/` (`./tests/run.sh`): real repositories, the real hook
+    files, no framework and no network. 23 cases, one per requirement (`REQ-HOOK-01`..`23`, mapped in
+    `tests/README.md`), each protecting a specific behaviour - including the four bypasses found while
+    building this (unreviewed deletions, renames, symlink typechanges, and `git rm --cached`). Every fix
+    was reverted in turn to confirm the matching case fails without it.
 
 ### Changed
 
+- CI actions updated to current: `actions/checkout` v5 to v7 and `actionlint` 1.7.7 to 1.7.12. They stay
+  pinned to a moving major tag, so patch releases arrive without an edit. Note that `checkout` v6 and later
+  run on Node 24, which the `ubuntu-latest` and `macos-latest` runner images already provide.
 - **Renamed the bundle from `pr-agent` to `preflight`**, so it no longer collides with the upstream
   PR-Agent project it wraps. After this change `pr-agent` means exactly one thing: the upstream tool.
   - Commands: `pra` → `preflight-pr`, `pral` → `preflight`, `pral-gate` → `preflight-gate`.

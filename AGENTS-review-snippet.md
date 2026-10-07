@@ -64,6 +64,12 @@ What the hook does, and does not do:
   covered is exactly what you are committing.
 - Reviewed content you are **not** committing is ignored, so `git commit -a` keeps working when untracked
   scratch files are around.
+- Deleting a reviewed file is blocked like any other change (`git rm` included): the review has to cover the
+  removal too. Re-run `preflight review` and the deletion commits normally.
+- Renaming a reviewed file away (`git mv`) and swapping a file for a symlink are blocked as well - both
+  leave a path present but no longer doing what the review saw.
+- The **first** commit in a repository with no history is allowed but not enforced - `preflight review`
+  cannot run before a first commit exists, so blocking would make the hook impossible to adopt.
 - `PREFLIGHT_SCOPE=head` reviews cannot be enforced (a head-scope review covers content that already
   exists, and a pre-commit hook runs before the commit it would cover). Use the default worktree scope.
 - Deliberate one-off bypass: `git commit --no-verify` (or `PREFLIGHT_SKIP=1`).

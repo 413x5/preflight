@@ -1,0 +1,8 @@
+# Sample project used by the integration tests.
+#
+# It exists to give the commit-hook tests something realistic to review: a couple of source files,
+# one of which holds an obvious "guard" so that deleting or renaming it away is a meaningful change
+# rather than a cosmetic one.
+
+# Review artifacts and the tests' scratch index must never land in a snapshot.
+.preflight/

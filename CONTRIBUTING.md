@@ -16,6 +16,7 @@ is a default, not an assumption.
 | `files/ensure-link.sh` | Re-links the secrets file after `uv tool upgrade` |
 | `files/secrets.toml.example` | The secrets template - **never** a real key |
 | `AGENTS-review-snippet.md` | The block pasted into a repo's `AGENTS.md` |
+| `tests/` | Integration tests for the commit hook, plus the sample fixture they build on |
 
 ## Ground rules
 
@@ -32,7 +33,35 @@ is a default, not an assumption.
 
 ## Testing changes
 
-`install.sh` is testable without touching your real setup - point it at throwaway dirs and skip the
+`.github/workflows/ci.yml` runs the whole check set on every pull request and on pushes to `main`, on
+both Ubuntu and macOS (the bundle claims both). It mirrors what you can run locally, so a green local
+run means a green CI run:
+
+| CI step | Run it locally |
+|---|---|
+| Shell syntax (`bash -n` / `sh -n`) | the loop below |
+| Installer deploys into a throwaway prefix | `PREFLIGHT_HOME=$(mktemp -d)/cfg ... ./install.sh` |
+| Generated config is valid TOML | `python3 -c 'import tomllib; tomllib.load(...)'` |
+| Commit-hook integration tests | `./tests/run.sh hook` |
+| Workflow lint (`actionlint`) | `actionlint .github/workflows/ci.yml` |
+
+The live-endpoint case (`./tests/run.sh e2e`) is **not** run in CI: it needs a paid key, and CI should
+not depend on one.
+
+Workflow actions are pinned to a **moving major tag** (`actions/checkout@v7`), and Dependabot
+(`.github/dependabot.yml`) proposes bumps weekly, grouped into one PR. If you add an action, pin the same
+way; Dependabot will pick it up. Its PRs run this CI, so a bump that breaks something fails the same
+checks a hand-written change would.
+
+`tests/run.sh` is the integration suite: real repositories, the real hook files, no framework and no
+network. Refer to [`tests/README.md`](tests/README.md) for the requirement-to-case mapping.
+
+```sh
+./tests/run.sh hook      # offline, seconds
+./tests/run.sh           # includes one live-endpoint case (needs a configured key)
+```
+
+`install.sh` is also testable without touching your real setup - point it at throwaway dirs and skip the
 parts that need `uv` or the network:
 
 ```sh
@@ -57,7 +86,7 @@ Sanity-check the shell (the hooks are POSIX `sh`, the helpers `bash`):
 for f in install.sh uninstall.sh files/preflight files/preflight-pr files/preflight-gate files/ensure-link.sh; do
   bash -n "$f" || echo "FAIL $f"
 done
-for f in files/preflight-hook files/githooks/pre-commit files/githooks/post-commit; do
+for f in files/preflight-hook files/githooks/pre-commit files/githooks/post-commit tests/run.sh; do
   sh -n "$f" || echo "FAIL $f"
 done
 ```

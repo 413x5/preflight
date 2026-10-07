@@ -46,3 +46,6 @@ Initial release: a deployable, machine-local PR-Agent review setup for the Cline
 - Snapshotting the working tree for review without touching the index or `HEAD`, using a temporary
   `GIT_INDEX_FILE` plus `git commit-tree` with `commit.gpgsign=false`, so a global `gpgsign = true`
   cannot break it.
+
+[Unreleased]: https://github.com/413x5/pr-agent/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/413x5/pr-agent/releases/tag/v0.1.0

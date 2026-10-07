@@ -6,14 +6,17 @@ Work that is agreed but not yet done, plus ideas worth keeping. Nothing here is 
 
 Small, ready to do.
 
-- [ ] **Publish the repo.** No remote yet:
-      `gh repo create pr-agent --private --source=. --remote=origin --push`.
-- [ ] **Sign the initial commits.** Both were created with `--no-gpg-sign`, so `--amend` alone only
-      fixes the tip; rebase both:
-      `git rebase --root --exec 'git commit --amend -S --no-edit'`.
-- [ ] **Add CHANGELOG comparison links** once a remote exists (the `[Unreleased]` / `[0.1.0]` refs).
+_Nothing outstanding — the initial packaging, publishing, and signing work is done._
 
 ## Done
+
+- [x] **Publish the repo.** Private: <https://github.com/413x5/pr-agent>, default branch `main`.
+      `gh repo create --source=.` does not work from a worktree session (no `.git` directory), so
+      the remote was added by hand and the branch pushed as `main`.
+- [x] **Sign the initial commits.** All three (plus the `v0.1.0` tag) are signed and GitHub shows
+      `verified: true`. The signed history replaces the earlier unsigned commits.
+- [x] **Add CHANGELOG comparison links.** Added link refs at the foot of `CHANGELOG.md`; requires
+      the signed `v0.1.0` tag, which is now pushed.
 
 - [x] **Fix `config.fallback_models`.** The upstream default `["gpt-5.6-terra"]` is a bare OpenAI id
       the endpoint rejects (`400 invalid model format` - ids must be `provider/model`; it serves this

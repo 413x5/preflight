@@ -17,9 +17,20 @@ Then confirm the symlink exists in the package `settings/` dir (`pra --help` re-
 
 ## `pral review` fails with "Failed to generate prediction with gpt-5.6-terra"
 
-That is the **fallback** model. The upstream default fallback is an OpenAI id, which does not exist on
-the ClinePass endpoint. Set `config.fallback_models` to a ClinePass model (or `[]`). See
-[ROADMAP](../ROADMAP.md).
+That is the **fallback** model. The upstream default fallback is the bare OpenAI id
+`gpt-5.6-terra`, which the ClinePass endpoint rejects outright - ids must be in `provider/model`
+form, so a bare id fails with `400 invalid model format. Expected format: modelType/model` (the
+endpoint serves this model as `openai/gpt-5.6-terra`). The config here pins a working fallback
+instead:
+
+```toml
+[config]
+fallback_models = ["openai/cline-pass/glm-5.3-flash"]
+```
+
+Set it to your own model, or to `[]` to disable fallback (a primary-model failure then fails hard
+rather than silently retrying). The id must be in the endpoint's `provider/model` form; `cline-pass/...`
+works too, while the `openai/` prefix above routes through LiteLLM's OpenAI-compatible transport.
 
 ## The review keeps finding 3 new issues every round (the "cascade")
 

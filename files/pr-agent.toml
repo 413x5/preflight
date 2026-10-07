@@ -2,6 +2,9 @@
 # This is a HOST-side layer (not a repo .pr_agent.toml), so token-budget keys are allowed here.
 [config]
 model = "openai/cline-pass/deepseek-v4.1-flash"
+# The upstream default is a bare OpenAI id ("gpt-5.6-terra") that this endpoint cannot route, so a
+# failed primary would retry against a dead model. Point the retry at a ClinePass-served model.
+fallback_models = ["openai/cline-pass/glm-5.3-flash"]
 custom_model_max_tokens = 1000000   # declares DeepSeek V4.1 Flash's 1M window (unknown to LiteLLM/MAX_TOKENS)
 max_model_tokens = 1000000          # raise the packing clamp (default 32000) so it isn't cut to 32k
 output_run_details = true           # show which model actually served the run

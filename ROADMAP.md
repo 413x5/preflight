@@ -6,16 +6,20 @@ Work that is agreed but not yet done, plus ideas worth keeping. Nothing here is 
 
 Small, ready to do.
 
-- [ ] **Fix `config.fallback_models`.** It is still the upstream default `["gpt-5.6-terra"]` - an
-      OpenAI model id. Against the ClinePass endpoint, if the primary model fails the retry uses that
-      id and gets a 401/404. Set it to a ClinePass model (e.g. `openai/cline-pass/glm-5.3-flash`) or
-      `[]` to disable, in **both** `files/pr-agent.toml` and the live
-      `~/.config/pr-agent/pr-agent.toml`.
 - [ ] **Publish the repo.** No remote yet:
       `gh repo create pr-agent --private --source=. --remote=origin --push`.
-- [ ] **Sign the initial commit** (it was created with `--no-gpg-sign`):
-      `git commit --amend -S --no-edit`.
+- [ ] **Sign the initial commits.** Both were created with `--no-gpg-sign`, so `--amend` alone only
+      fixes the tip; rebase both:
+      `git rebase --root --exec 'git commit --amend -S --no-edit'`.
 - [ ] **Add CHANGELOG comparison links** once a remote exists (the `[Unreleased]` / `[0.1.0]` refs).
+
+## Done
+
+- [x] **Fix `config.fallback_models`.** The upstream default `["gpt-5.6-terra"]` is a bare OpenAI id
+      the endpoint rejects (`400 invalid model format` - ids must be `provider/model`; it serves this
+      model as `openai/gpt-5.6-terra`), so a failed primary retried against a dead model. Now
+      `["openai/cline-pass/glm-5.3-flash"]` in both `files/pr-agent.toml` and the live
+      `~/.config/pr-agent/pr-agent.toml`.
 
 ## Next
 

@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet. Planned work lives in [ROADMAP.md](ROADMAP.md).
+### Fixed
+
+- `config.fallback_models` no longer points at a model the ClinePass endpoint cannot route. The
+  upstream default (`["gpt-5.6-terra"]`) is a bare id, which the endpoint rejects (ids must be
+  `provider/model`), so a failed primary model retried against a dead one; it is now
+  `["openai/cline-pass/glm-5.3-flash"]`.
 
 ## [0.1.0] - 2026-10-07
 

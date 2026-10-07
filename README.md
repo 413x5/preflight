@@ -1,4 +1,4 @@
-# pr-agent-bundle — a local, deployable PR-Agent review setup
+# pr-agent — a deployable, machine-local PR-Agent review setup
 
 One command deploys a **machine-local** PR-Agent that reviews your **working tree** (no commit, no GitHub round
  trip) and hands the findings back to whatever coding agent is editing the code. It talks to the ClinePass
@@ -16,6 +16,14 @@ endpoint by default (`openai/cline-pass/deepseek-v4.1-flash`).
 - Secrets live in `~/.config/pr-agent/.secrets.toml` (chmod 600), symlinked into the PR-Agent package. **Nothing
   secret ever goes into your shell environment.**
 
+## Docs
+
+- [`CHANGELOG.md`](CHANGELOG.md) — what changed, per version.
+- [`ROADMAP.md`](ROADMAP.md) — planned work and open decisions.
+- [`docs/DESIGN.md`](docs/DESIGN.md) — how it works and why.
+- [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — symptoms and fixes.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — layout, ground rules, how to test changes.
+
 ## Requirements
 
 - macOS or Linux, and `git`.
@@ -27,8 +35,8 @@ endpoint by default (`openai/cline-pass/deepseek-v4.1-flash`).
 ## Install
 
 ```sh
-git clone <this-bundle> ~/pr-agent-bundle    # or just copy the folder
-cd ~/pr-agent-bundle
+git clone <this-repo> ~/pr-agent             # or just copy the folder
+cd ~/pr-agent
 ./install.sh
 $EDITOR ~/.config/pr-agent/.secrets.toml      # paste the API key between the quotes
 ```

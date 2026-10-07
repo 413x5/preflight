@@ -1,0 +1,12 @@
+# Normalize line endings to LF in the repo and the working tree, so the helper
+# scripts run as-is on any machine after a clone.
+* text=auto eol=lf
+
+# The helpers are shell scripts: text, LF-only.
+*.sh            text eol=lf
+files/pra       text eol=lf
+files/pral      text eol=lf
+files/pral-gate text eol=lf
+
+*.toml text eol=lf
+*.md   text eol=lf

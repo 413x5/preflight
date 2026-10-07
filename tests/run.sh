@@ -20,7 +20,7 @@ set -u
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/.." && pwd)"
-hook="$repo_root/files/preflight-hook"
+hook="${PREFLIGHT_TEST_HOOK:-$repo_root/files/preflight-hook}"
 
 which_cases="${1:-all}"
 pass=0; fail=0; skipped=0
@@ -28,8 +28,8 @@ pass=0; fail=0; skipped=0
 # Reject an unrecognized group rather than running nothing and reporting success. A typo in a CI step
 # (`./tests/run.sh hok`) would otherwise exit 0 with "0 passed" and look green.
 case "$which_cases" in
-  all|hook|e2e) ;;
-  *) echo "tests: unknown case group '$which_cases' (expected one of: all, hook, e2e)" >&2; exit 2 ;;
+  all|hook|e2e|selfcheck) ;;
+  *) echo "tests: unknown case group '$which_cases' (expected one of: all, hook, e2e, selfcheck)" >&2; exit 2 ;;
 esac
 [ "$#" -le 1 ] || { echo "tests: at most one case group is accepted" >&2; exit 2; }
 
@@ -64,10 +64,20 @@ else
   c_pass=''; c_fail=''; c_skip=''; c_off=''
 fi
 
-ok()   { printf '  %sPASS%s  %s  [%s]\n' "$c_pass" "$c_off" "$1" "$2"; pass=$((pass+1)); }
+# Machine-readable per-case results, for the selfcheck. Off unless PREFLIGHT_TEST_RESULTS names a
+# file; the human output below is unchanged either way.
+record() {
+  [ -n "${PREFLIGHT_TEST_RESULTS:-}" ] || return 0
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$PREFLIGHT_TEST_RESULTS"
+}
+
+ok()   { printf '  %sPASS%s  %s  [%s]\n' "$c_pass" "$c_off" "$1" "$2"; pass=$((pass+1)); record PASS "$2" "$1"; }
 bad()  { printf '  %sFAIL%s  %s  [%s]\n        expected exit %s, got %s\n%s' \
-           "$c_fail" "$c_off" "$1" "$2" "$3" "$4" "${5:-}"; fail=$((fail+1)); }
-skip() { printf '  %sSKIP%s  %s  (%s)\n' "$c_skip" "$c_off" "$1" "$2"; skipped=$((skipped+1)); }
+           "$c_fail" "$c_off" "$1" "$2" "$3" "$4" "${5:-}"; fail=$((fail+1)); record FAIL "$2" "$1"; }
+# `skip NAME REQ REASON`. The REQ id is required so the selfcheck can tell that an enforcement case was
+# skipped - a guard that did not run proves nothing, which is the same reasoning that makes
+# `expect_commit` refuse a case that staged nothing.
+skip() { printf '  %sSKIP%s  %s  (%s)\n' "$c_skip" "$c_off" "$1" "$3"; skipped=$((skipped+1)); record SKIP "$2" "$1"; }
 
 # A fresh repository with the sample project committed and the hook enabled.
 new_repo() {
@@ -167,7 +177,7 @@ case_block_cached_remove() {
   reset_case "$d"
   review_here "$d"
   git -C "$d" rm -q --cached src/guard.py
-  [ -f "$d/src/guard.py" ] || { skip "git rm --cached of a nested reviewed file is blocked" "fixture"; return; }
+  [ -f "$d/src/guard.py" ] || { skip "git rm --cached of a nested reviewed file is blocked" "REQ-HOOK-04" "fixture"; return; }
   expect_commit "git rm --cached of a nested reviewed file is blocked" "REQ-HOOK-04" 1 "$d"
 }
 
@@ -219,7 +229,7 @@ case_block_gitlink_removal() {
   ( cd "$sub" && git init -q -b main . && printf 'y = 1\n' > s.py \
       && git add -A && git -c commit.gpgsign=false commit -q --no-verify -m "chore: sub" ) >/dev/null 2>&1
   if ! git -C "$d" -c protocol.file.allow=always submodule add -q "$sub" sub >/dev/null 2>&1; then
-    skip "removing a gitlink without reviewing it is blocked" "submodule fixture unavailable"
+    skip "removing a gitlink without reviewing it is blocked" "REQ-HOOK-25" "submodule fixture unavailable"
     reset_case "$d"; return
   fi
   ( cd "$d" && git add -A && git -c commit.gpgsign=false commit -q --no-verify -m "chore: sub" ) >/dev/null 2>&1
@@ -447,10 +457,10 @@ case_worktree_enforced() {
   reset_case "$d"
   local wt="$work/wt-checkout"
   if ! git -C "$d" worktree add -q "$wt" -b wtbranch >/dev/null 2>&1; then
-    skip "the hook enforces inside a linked worktree" "worktree unsupported here"; return
+    skip "the hook enforces inside a linked worktree" "REQ-HOOK-21" "worktree unsupported here"; return
   fi
   if [ ! -f "$wt/.githooks/pre-commit" ]; then
-    skip "the hook enforces inside a linked worktree" "hooks not present in the worktree"
+    skip "the hook enforces inside a linked worktree" "REQ-HOOK-21" "hooks not present in the worktree"
     git -C "$d" worktree remove --force "$wt" >/dev/null 2>&1; return
   fi
   printf '\n# unreviewed in the worktree\n' >> "$wt/util.py"
@@ -488,17 +498,17 @@ case_missing_helper_fails_closed() {
 
 case_e2e_real_review() {
   if ! command -v preflight >/dev/null 2>&1; then
-    skip "a real review then commit passes end to end" "preflight not on PATH"; return
+    skip "a real review then commit passes end to end" "REQ-HOOK-23" "preflight not on PATH"; return
   fi
   if [ ! -f "${PREFLIGHT_HOME:-$HOME/.config/preflight}/.secrets.toml" ]; then
-    skip "a real review then commit passes end to end" "no configured key"; return
+    skip "a real review then commit passes end to end" "REQ-HOOK-23" "no configured key"; return
   fi
   local d; d="$(new_repo e2e)"
   reset_case "$d"
   printf '\n\ndef sub(a, b):\n    return a - b\n' >> "$d/util.py"
   git -C "$d" add util.py
   if ! ( cd "$d" && preflight review ) >/dev/null 2>&1; then
-    skip "a real review then commit passes end to end" "review could not run"; return
+    skip "a real review then commit passes end to end" "REQ-HOOK-23" "review could not run"; return
   fi
   local verdict
   verdict="$(python3 - "$d/.preflight/review.meta.json" <<'PY'
@@ -507,13 +517,121 @@ print((json.load(open(sys.argv[1])).get("gate") or {}).get("verdict", ""))
 PY
 )"
   if [ "$verdict" != "pass" ]; then
-    skip "a real review then commit passes end to end" "review verdict was '$verdict'"
+    skip "a real review then commit passes end to end" "REQ-HOOK-23" "review verdict was '$verdict'"
     return
   fi
   local got
   git -C "$d" -c commit.gpgsign=false commit -m "feat: sub" >/dev/null 2>&1; got=$?
   if [ "$got" = 0 ]; then ok "a real review then commit passes end to end" "REQ-HOOK-23"
   else bad "a real review then commit passes end to end" "REQ-HOOK-23" 0 "$got" ""; fi
+}
+
+# ---------------------------------------------------------------------------- the selfcheck
+#
+# The suite's headline number answers "did every case pass", which is not the same question as "is the
+# hook enforcing". A hook that blocks nothing at all still satisfies every case that asserts *acceptance*
+# (a reviewed deletion, commit -a, a reviewed rename) and every case that tests a deliberate bypass, so
+# those pass whether or not the hook works.
+#
+# That is fine per case, but it means a green suite is not on its own evidence that the checks which are
+# supposed to refuse a commit still do. Nothing kept the enforcement cases sensitive: someone could add a
+# case labelled as an enforcement test that passes with the hook stubbed out, and no check would notice.
+#
+# `selfcheck` closes that by running this entire suite against a neutered hook (`exit 0`) and requiring
+# that exactly the enforcement-sensitive cases fail. It also requires every case to be classified below,
+# so a newly added case fails the selfcheck until its author says which kind it is.
+
+# REQ ids whose whole purpose is to catch an unreviewed commit, so a neutered hook must make them fail.
+sensitive='REQ-HOOK-01 REQ-HOOK-02 REQ-HOOK-03 REQ-HOOK-04 REQ-HOOK-05 REQ-HOOK-06 REQ-HOOK-11 REQ-HOOK-12
+REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK-24 REQ-HOOK-25'
+
+# Everything else, grouped by why a neutered hook cannot affect it. Listing them explicitly (rather than
+# treating "not sensitive" as a default) is deliberate: an unclassified case must be an error, not an
+# oversight that silently joins the insensitive set.
+#
+#   permissive-by-design  assert that something is NOT blocked, so blocking nothing trivially satisfies
+#                         them. They fail if the hook ever over-blocks.
+#   bypass                assert the documented escape hatches work.
+#   orthogonal            do not test blocking at all, or test a different file.
+insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
+REQ-HOOK-22 REQ-HOOK-26'
+
+case_selfcheck() {
+  # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
+  # to model "the hook does not enforce", however that came about.
+  local stub="$work/selfcheck/neutered-hook"
+  mkdir -p "$work/selfcheck"
+  printf '#!/bin/sh\nexit 0\n' >"$stub"
+
+  local results="$work/selfcheck/results.tsv" out rc
+  : >"$results"
+  # The child is invoked with the `hook` group, which never contains `selfcheck`, so this cannot recurse.
+  PREFLIGHT_TEST_HOOK="$stub" PREFLIGHT_TEST_RESULTS="$results" \
+    sh "$0" hook >"$work/selfcheck/log" 2>&1
+
+  # Ask python3 to do the set arithmetic: it is already a dependency of the suite, and the shell
+  # alternative (looping over two lists and grepping) is where this kind of check usually goes wrong.
+  out="$(python3 - "$results" "$sensitive" "$insensitive" <<'PY'
+import sys
+
+results, sensitive_blob, insensitive_blob = sys.argv[1:4]
+sensitive = set(sensitive_blob.split())
+insensitive = set(insensitive_blob.split())
+
+seen = {}
+try:
+    rows = open(results)
+except OSError:
+    rows = []
+
+for line in rows:
+    status, req, name = (line.rstrip("\n").split("\t") + ["", ""])[:3]
+    if req:
+        seen.setdefault(req, []).append((status, name))
+
+if not seen:
+    print("  the child run produced no case results - the suite did not run")
+    sys.exit(1)
+
+problems = []
+for req in sorted(sensitive):
+    entries = seen.get(req)
+    if entries is None:
+        problems.append(f"{req}: declared enforcement-sensitive but no case ran under that id")
+        continue
+    for status, name in entries:
+        if status == "PASS":
+            problems.append(f"{req}: enforcement-sensitive but PASSED with a neutered hook "
+                            f"({name}) - it does not actually test enforcement")
+        elif status == "SKIP":
+            problems.append(f"{req}: enforcement-sensitive but SKIPPED ({name}) - a guard that did "
+                            f"not run proves nothing")
+
+for req in sorted(insensitive):
+    for status, name in seen.get(req, []):
+        if status == "FAIL":
+            problems.append(f"{req}: expected to be insensitive to a neutered hook but FAILED "
+                            f"({name})")
+
+for req in sorted(set(seen) - sensitive - insensitive):
+    problems.append(f"{req}: unclassified - add it to the sensitive or insensitive list in run.sh "
+                    f"({'/'.join(n for _, n in seen[req])})")
+
+if problems:
+    print("\n".join(problems))
+    sys.exit(1)
+print(f"{len(sensitive)} enforcement-sensitive, {len(insensitive)} insensitive, "
+      f"{len(seen)} ids exercised")
+PY
+)"; rc=$?
+
+  if [ "$rc" = 0 ]; then
+    ok "a neutered hook fails exactly the enforcement-sensitive cases" "REQ-SELF-01"
+    printf '        %s\n' "$out"
+  else
+    bad "a neutered hook fails exactly the enforcement-sensitive cases" "REQ-SELF-01" "0" "$rc" \
+        "$(printf '%s\n' "$out" | sed 's/^/        | /')"
+  fi
 }
 
 # ---------------------------------------------------------------------------- run
@@ -565,6 +683,12 @@ fi
 if [ "$which_cases" = "all" ] || [ "$which_cases" = "e2e" ]; then
   say "live end-to-end (needs the installed helpers and a key)"
   run_group case_e2e_real_review
+  say ""
+fi
+
+if [ "$which_cases" = "all" ] || [ "$which_cases" = "selfcheck" ]; then
+  say "selfcheck (the enforcement cases must fail against a neutered hook)"
+  run_group case_selfcheck
   say ""
 fi
 

@@ -73,19 +73,29 @@ something that passes everything. For any behavioural change:
 
 1. Add or update the case in `tests/run.sh` and give it the next `REQ-HOOK-nn`.
 2. Add it to the `run_group` list **and** to the tables in `tests/README.md`.
-3. **Revert your fix and confirm the new case fails.** A case that cannot fail is worth nothing - one was
+3. **Classify it** in the `sensitive` or `insensitive` list beside `case_selfcheck`. An unclassified case
+   fails `./tests/run.sh selfcheck`; so does a case marked sensitive that passes with the hook neutered.
+   This is what stops a case from claiming to test enforcement without actually testing it.
+4. **Revert your fix and confirm the new case fails.** A case that cannot fail is worth nothing - one was
    written during this project, shown to be unfalsifiable, and deleted rather than kept as false coverage.
-4. If the change is a fix rather than a feature, add it to the containment table in `docs/DESIGN.md`.
+5. If the change is a fix rather than a feature, add it to the containment table in `docs/DESIGN.md`.
 
 ## Commands
 
 Everything CI runs is available locally; a green local run means a green CI run.
 
 ```sh
-./tests/run.sh hook     # the offline hook cases - seconds, no network, no key. Run this constantly.
-./tests/run.sh e2e      # one live case: needs the installed helpers and a real key
-./tests/run.sh          # everything
+./tests/run.sh hook        # the offline hook cases - seconds, no network, no key. Run this constantly.
+./tests/run.sh selfcheck   # re-runs the above against a neutered hook (see below)
+./tests/run.sh e2e         # one live case: needs the installed helpers and a real key
+./tests/run.sh             # everything
 ```
+
+`selfcheck` exists because a green suite is **not** proof the hook enforces: 9 of the 25 offline cases
+pass with the hook stubbed out entirely, because they assert acceptance (`commit -a`, a reviewed deletion,
+a reviewed rename) or test a deliberate bypass. The selfcheck runs the whole suite against a neutered hook
+and requires exactly the enforcement-sensitive cases to fail. It also **requires every case to be
+classified**, so a new case must be declared sensitive or insensitive or the selfcheck fails.
 
 | Check | Command |
 |---|---|
@@ -93,6 +103,8 @@ Everything CI runs is available locally; a green local run means a green CI run.
 | Syntax (hooks/tests are POSIX `sh`) | `for f in files/preflight-hook files/githooks/pre-commit files/githooks/post-commit tests/run.sh; do sh -n "$f" || echo "FAIL $f"; done` |
 | Installer into a throwaway prefix | `PREFLIGHT_HOME=$(mktemp -d)/cfg PREFLIGHT_BIN_DIR=$(mktemp -d) PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 ./install.sh` |
 | Generated config is valid TOML | `python3 -c "import tomllib;print(tomllib.load(open('CFG/preflight.toml','rb'))['config'])"` |
+| Commit-hook integration tests | `./tests/run.sh hook` |
+| Selfcheck (the suite against a neutered hook) | `./tests/run.sh selfcheck` |
 | Workflow lint | `actionlint .github/workflows/ci.yml` |
 
 Pass **one** file per `-n` invocation, as the loops above do. `bash -n a.sh b.sh` only parses `a.sh` - the

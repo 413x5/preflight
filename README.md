@@ -140,13 +140,18 @@ Use the **relative** hooks path - an absolute one breaks git worktrees. See
 ## Development
 
 CI runs on every pull request and on pushes to `main`, on Ubuntu and macOS: shell syntax, an installer
-dry-run into a throwaway prefix, a TOML check on the generated config, and the commit-hook integration
-suite. Everything it runs is available locally:
+dry-run into a throwaway prefix, a TOML check on the generated config, the commit-hook integration suite,
+and a selfcheck that re-runs that suite against a neutered hook. Everything it runs is available locally:
 
 ```sh
 ./tests/run.sh hook        # the offline hook tests, in seconds
+./tests/run.sh selfcheck   # re-runs them against a neutered hook
 actionlint                 # workflow lint
 ```
+
+The selfcheck catches a suite that passes for the wrong reason: stubbing the hook out entirely still
+satisfies the nine cases that assert *acceptance* rather than refusal, so "all green" alone would not
+prove the hook refuses anything.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full list and
 [`tests/README.md`](tests/README.md) for the requirement-to-case mapping.

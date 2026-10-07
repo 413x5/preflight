@@ -5,6 +5,7 @@ Integration tests for the preflight commit hook. No framework, no network, no AP
 ```sh
 ./tests/run.sh           # everything (~1–4 min; the live case needs a configured key)
 ./tests/run.sh hook      # hook enforcement only, fully offline (seconds)
+./tests/run.sh selfcheck # the suite re-run against a neutered hook (see below)
 ./tests/run.sh e2e       # the one case that calls the real endpoint
 ```
 
@@ -86,6 +87,47 @@ reverted in turn and the expected case was confirmed to fail:
 | the `ls-tree` discriminator replaced by per-path `cat-file` | REQ-HOOK-24, REQ-HOOK-25 |
 | `${HOME:-}` reverted to a bare `$HOME` in the example hook | REQ-HOOK-26 |
 
+This table is per-fix: it records which case guards which repair. It is **not** the same property as the
+selfcheck below, which asks about the whole hook at once.
+
+## The selfcheck, and why "all cases pass" is not enough
+
+A passing suite does not by itself mean the hook enforces anything. Stub the hook out entirely
+(`#!/bin/sh` + `exit 0`) and the suite is still green for **9 of its 25 offline cases**, because those
+cases do not depend on the hook refusing something:
+
+| Group | Cases | Why a neutered hook still passes them |
+|---|---|---|
+| permissive by design | REQ-HOOK-07, 08, 09, 10 | they assert something is **not** blocked (`commit -a` with a scratch file, a reviewed deletion, a reviewed rename, an empty commit), so blocking nothing satisfies them |
+| bypass hatches | REQ-HOOK-14, 15 | they assert `--no-verify` / `PREFLIGHT_SKIP=1` work |
+| orthogonal | REQ-HOOK-20, 22, 26 | `20` checks a file's presence rather than a block; `22` and `26` exercise the *example* hook in `files/githooks/`, a different file, which stubbing `files/preflight-hook` cannot affect |
+
+That is correct per case, but it leaves a hole: nothing stopped the **enforcement-sensitive** set from
+silently losing its teeth. A case could be added that is meant to catch an unreviewed commit, pass with
+the hook disabled, and no one would find out - the suite would report green either way.
+
+`./tests/run.sh selfcheck` closes it. It runs this whole suite against a neutered hook and requires that
+**exactly** the declared enforcement-sensitive cases fail, which has three consequences:
+
+- **Every case must be classified.** The sensitive and insensitive lists live in `run.sh` next to the
+  selfcheck. A new case that is in neither list fails the selfcheck, so its author has to state which kind
+  it is instead of joining the insensitive set by default.
+- **A sensitive case that passes** with the hook neutered fails the selfcheck, naming the case.
+- **A sensitive case that *skips*** also fails, because a guard that did not run proves nothing - the same
+  reasoning as `expect_commit` refusing a case that staged nothing. This is why `skip` takes
+  `skip NAME REQ REASON`: the REQ id is required, not optional, so a skipped enforcement case is visible to
+  the selfcheck rather than silently recorded as a pass.
+
+It reports the split, so drift is visible in the output:
+
+```
+  PASS  a neutered hook fails exactly the enforcement-sensitive cases  [REQ-SELF-01]
+        16 enforcement-sensitive, 9 insensitive, 25 ids exercised
+```
+
+The selfcheck is itself mutation-tested: adding a temporary case that passes with the hook neutered must
+fail it while unclassified, must still fail once marked sensitive, and must pass once marked insensitive.
+
 ## A trap worth knowing
 
 Two cases originally passed **for the wrong reason**: git refused the commit itself ("nothing to commit,
@@ -98,4 +140,10 @@ block, make sure something is staged **and** that the thing under test is the on
 
 1. Write `case_<name>()` following the existing shape, and give it the next `REQ-HOOK-nn`.
 2. Add it to the `run_group` list in `run.sh` and to the table above.
-3. If it guards a fix, revert the fix and confirm the case fails.
+3. **Classify it** in the `sensitive` or `insensitive` list near `case_selfcheck`. The selfcheck fails on
+   an unclassified case, so this is enforced rather than optional - and a case that claims to catch an
+   unreviewed commit but passes with the hook neutered will be caught here.
+4. If it guards a fix, revert the fix and confirm the case fails.
+
+Note the helper signatures the selfcheck depends on: `expect_commit NAME REQ EXPECTED_EXIT REPO` and
+`skip NAME REQ REASON`. The REQ id is part of the contract, not a comment.

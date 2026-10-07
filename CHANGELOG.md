@@ -8,7 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-
 - **CI** (`.github/workflows/ci.yml`): on every pull request and on pushes to `main`, on both Ubuntu and
   macOS, it checks shell syntax (`bash -n` for the helpers/installer, `sh -n` for the hooks and tests),
   dry-runs `install.sh` into a throwaway prefix (including that it never clobbers an existing
@@ -59,6 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The tracked paths at `HEAD` are read with `git ls-tree` rather than by asking git about each
     candidate path. `git cat-file -e "HEAD:sub"` fails for a **gitlink**, so a submodule removal was
     classified as "not tracked at HEAD" and slipped through unreviewed.
+- **A selfcheck for the hook test suite** (`./tests/run.sh selfcheck`, wired into CI). A green suite was
+  not evidence that the hook enforced anything: stubbing the hook out entirely still satisfied 9 of the 25
+  offline cases, because those assert *acceptance* (a reviewed deletion, `commit -a`, a reviewed rename),
+  exercise a deliberate bypass, or test the separate example hook. Nothing kept the enforcement-sensitive
+  cases sensitive, so a case claiming to catch an unreviewed commit could have passed with the hook
+  disabled and nobody would have known. The selfcheck re-runs the whole suite against a neutered hook and
+  requires exactly the declared enforcement-sensitive cases to fail, reports the split
+  (16 sensitive / 9 insensitive), and **requires every case to be classified** - an unclassified case, or
+  a sensitive case that passes or skips, fails it. The check is itself mutation-tested.
 
 ### Fixed
 

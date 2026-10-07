@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-# pra — run PR-Agent with the global ClinePass config.
-set -euo pipefail
-if [ -f "${HOME}/.config/pr-agent/ensure-link.sh" ]; then
-  . "${HOME}/.config/pr-agent/ensure-link.sh"
-fi
-exec pr-agent --extra_config_url "file://${HOME}/.config/pr-agent/pr-agent.toml" "$@"

@@ -1,15 +1,16 @@
 # Contributing
 
 This repo is a **portable bundle**: `install.sh` plus the files under `files/` are the source of
-truth for the machine-local PR-Agent setup. Keep it portable.
+truth for the machine-local PR-Agent setup. Keep it portable, and keep it provider-agnostic — ClinePass
+is a default, not an assumption.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
 | `install.sh` / `uninstall.sh` | Deploy / remove the setup on a machine |
-| `files/pr-agent.toml` | The global config (ClinePass model, streaming fix, review caps) |
-| `files/pra`, `files/pral`, `files/pral-gate` | The helpers installed into `~/.local/bin` |
+| `files/preflight.toml` | The global config (model, provider/streaming knobs, review caps) |
+| `files/preflight`, `files/preflight-pr`, `files/preflight-gate` | The helpers installed into `~/.local/bin` |
 | `files/ensure-link.sh` | Re-links the secrets file after `uv tool upgrade` |
 | `files/secrets.toml.example` | The secrets template - **never** a real key |
 | `AGENTS-review-snippet.md` | The block pasted into a repo's `AGENTS.md` |
@@ -19,8 +20,13 @@ truth for the machine-local PR-Agent setup. Keep it portable.
 - **No secrets, ever.** Only `files/secrets.toml.example` (with an empty key) is committed.
   `.gitignore` also blocks `.secrets.toml`.
 - **No machine-specific paths.** Everything derives from `$HOME` or the documented env vars.
+- **Provider-agnostic.** Do not hard-code a provider into the mechanism. Anything specific to one
+  endpoint (a model id, a streaming quirk, a token window) belongs in `files/preflight.toml` as an
+  overridable default, documented as provider-specific in both the file and `docs/DESIGN.md`.
 - **Idempotent installs.** `install.sh` must be safe to re-run and must never clobber an existing
-  `~/.config/pr-agent/.secrets.toml`.
+  `~/.config/preflight/.secrets.toml`.
+- **Keep `pr-agent` meaning one thing.** It is the upstream tool; this bundle is `preflight`. Do not
+  reintroduce `pra`/`pral`/`pral-gate` or a `pr-agent`-named config file.
 
 ## Testing changes
 
@@ -29,17 +35,24 @@ parts that need `uv` or the network:
 
 ```sh
 T="$(mktemp -d)"
-PRAGENT_HOME="$T/cfg" PRAGENT_BIN_DIR="$T/bin" \
-PRAGENT_SKIP_TOOL_INSTALL=1 PRAGENT_SKIP_PACKAGE_LINK=1 \
+PREFLIGHT_HOME="$T/cfg" PREFLIGHT_BIN_DIR="$T/bin" \
+PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 \
   ./install.sh
-ls "$T/bin"        # pra  pral  pral-gate
+ls "$T/bin"        # preflight  preflight-pr  preflight-gate
 rm -rf "$T"
+```
+
+Check the **default parity** invariant whenever you touch `files/preflight.toml` or the installer:
+with no overrides set, the generated config must still parse to the same values it did before.
+
+```sh
+python3 -c "import tomllib;print(tomllib.load(open('$T/cfg/preflight.toml','rb'))['config'])"
 ```
 
 Sanity-check the shell:
 
 ```sh
-for f in install.sh uninstall.sh files/pra files/pral files/pral-gate files/ensure-link.sh; do
+for f in install.sh uninstall.sh files/preflight files/preflight-pr files/preflight-gate files/ensure-link.sh; do
   bash -n "$f" || echo "FAIL $f"
 done
 ```
@@ -47,4 +60,5 @@ done
 ## Commits
 
 [Conventional Commits](https://www.conventionalcommits.org/) (`type(scope): subject`), one logical
-change per commit.
+change per commit. Call out breaking changes (renamed commands, renamed env vars) explicitly in both
+the commit body and `CHANGELOG.md`.

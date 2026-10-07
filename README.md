@@ -1,20 +1,21 @@
-# pr-agent — a deployable, machine-local PR-Agent review setup
+# preflight — a deployable, machine-local PR-Agent review setup
 
 One command deploys a **machine-local** PR-Agent that reviews your **working tree** (no commit, no GitHub round
- trip) and hands the findings back to whatever coding agent is editing the code. It talks to the ClinePass
-endpoint by default (`openai/cline-pass/deepseek-v4.1-flash`).
+trip) and hands the findings back to whatever coding agent is editing the code. It works against **any
+OpenAI-compatible endpoint**; ClinePass (`openai/cline-pass/deepseek-v4.1-flash`, `https://api.cline.bot/api/v1`)
+is just the built-in default.
 
 ## What you get
 
 | Command | What it does |
 |---|---|
-| `pral review` | Reviews the current branch's **working tree** vs the remote default branch; writes `.pr-agent/review.md` + `.pr-agent/review.json` |
-| `pral-gate` | Machine check over `review.json` (exit 0 = pass) |
-| `pra …` | PR-Agent with the global config (hosted/PR mode, needs a token) |
+| `preflight review` | Reviews the current branch's **working tree** vs the remote default branch; writes `.preflight/review.md` + `.preflight/review.json` |
+| `preflight-gate` | Machine check over `review.json` (exit 0 = pass) |
+| `preflight-pr …` | PR-Agent with the global config (hosted/PR mode, needs a token) |
 
 - Reviews include committed **plus uncommitted and untracked** changes — a review never needs a commit.
-- Secrets live in `~/.config/pr-agent/.secrets.toml` (chmod 600), symlinked into the PR-Agent package. **Nothing
-  secret ever goes into your shell environment.**
+- Secrets live in `~/.config/preflight/.secrets.toml` (chmod 600), symlinked into the PR-Agent package.
+  **Nothing secret ever goes into your shell environment.**
 
 ## Docs
 
@@ -30,58 +31,109 @@ endpoint by default (`openai/cline-pass/deepseek-v4.1-flash`).
 - [`uv`](https://astral.sh/uv) — installs PR-Agent in an isolated venv:
   `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Python 3.12/3.13 (uv can fetch one).
-- Network access to the ClinePass endpoint (or your own OpenAI-compatible one).
+- Network access to an OpenAI-compatible endpoint (ClinePass by default, or your own).
 
 ## Install
 
 ```sh
-git clone <this-repo> ~/pr-agent             # or just copy the folder
-cd ~/pr-agent
+git clone https://github.com/413x5/preflight ~/preflight
+cd ~/preflight
 ./install.sh
-$EDITOR ~/.config/pr-agent/.secrets.toml      # paste the API key between the quotes
+$EDITOR ~/.config/preflight/.secrets.toml      # paste the API key between the quotes
 ```
 
 Non-interactive:
 
 ```sh
-PR_AGENT_KEY=... ./install.sh
+PREFLIGHT_KEY=... ./install.sh
 ```
 
-Different endpoint or model? Set `PR_AGENT_API_BASE=...` (the installer also derives the streaming host from it),
-and edit `~/.config/pr-agent/pr-agent.toml` for `config.model`.
+## Using another provider
+
+Any OpenAI-compatible endpoint works. Point the installer at it and override whichever defaults you need —
+all of these are optional, and the defaults (ClinePass) are kept when unset:
+
+```sh
+PREFLIGHT_API_BASE=https://api.openai.com/v1 \
+PREFLIGHT_KEY=sk-... \
+PREFLIGHT_MODEL=gpt-4o \
+PREFLIGHT_FALLBACK_MODELS="openai/gpt-4o-mini" \
+PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS=0 \
+PREFLIGHT_MAX_MODEL_TOKENS=0 \
+  ./install.sh
+```
+
+| Variable | Meaning |
+|---|---|
+| `PREFLIGHT_API_BASE` | The endpoint base URL (also written into `.secrets.toml`) |
+| `PREFLIGHT_KEY` | The API key (written into `.secrets.toml`) |
+| `PREFLIGHT_MODEL` | Primary model id, in the endpoint's own id form |
+| `PREFLIGHT_FALLBACK_MODELS` | Comma-separated fallback ids; `none` disables fallback |
+| `PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS` | Context window for a model LiteLLM doesn't know; **`0` = ask LiteLLM** |
+| `PREFLIGHT_MAX_MODEL_TOKENS` | Packing clamp; **`0` = no clamp** |
+| `PREFLIGHT_FORCE_STREAMING_HOST` | Host needing the ClinePass streaming workaround (see below) |
+
+Two of these matter more than they look:
+
+- **Token budgets.** `cline-pass/*` is not in LiteLLM's model table, so nothing declares its context window and
+  the packing clamp would cut the diff to 32k — hence the explicit values. For a model LiteLLM *does* know, set
+  both to `0` and let it resolve the window itself rather than overriding it with a guess.
+- **Force-streaming.** ClinePass returns a wrapped non-streaming envelope (`{"data":…,"success":true}`) that
+  LiteLLM cannot parse, so the config forces streaming **for that host only**. The substring is matched against
+  your `api_base`, so for any other endpoint it simply never matches and the block stays inert.
 
 ## Use
 
 ```sh
 cd /any/repo
-pral review            # -> .pr-agent/review.md + .pr-agent/review.json
-pral-gate              # exit 0 = pass; 1 = changes required/issues; 2 = security concerns; 3 = no review
-pral describe          # or: pral improve ; pral ask "<question>"
+preflight review       # -> .preflight/review.md + .preflight/review.json
+preflight-gate         # exit 0 = pass; 1 = changes required/issues; 2 = security concerns; 3 = no review
+preflight describe     # or: preflight improve ; preflight ask "<question>"
 ```
 
 ## Teach your coding agents
 
 Paste `AGENTS-review-snippet.md` into the repo's `AGENTS.md` so every agent follows the loop: review → fix all
-findings in one pass → re-review → commit once when the gate is green.
+findings in one pass → re-review → commit once when the gate is green. The snippet also points at this repo, so
+an agent can look up current guidance as the bundle evolves.
 
 ## What install.sh writes
 
-- `~/.local/bin/{pra,pral,pral-gate}` — the helpers.
-- `~/.config/pr-agent/{pr-agent.toml,ensure-link.sh,AGENTS-review-snippet.md}` — config + helpers.
-- `~/.config/pr-agent/.secrets.toml` — created only if missing, chmod 600.
+- `~/.local/bin/{preflight,preflight-pr,preflight-gate}` — the helpers.
+- `~/.config/preflight/{preflight.toml,ensure-link.sh,AGENTS-review-snippet.md}` — config + helpers.
+- `~/.config/preflight/.secrets.toml` — created only if missing, chmod 600.
 - A symlink from that secrets file into the PR-Agent package's `settings/` dir.
 
 ## Uninstall
 
 ```sh
-./uninstall.sh                         # helpers + config (keeps the uv tool)
-PRAGENT_REMOVE_TOOL=1 ./uninstall.sh   # also removes the uv tool
+./uninstall.sh                            # helpers + config (keeps the uv tool)
+PREFLIGHT_REMOVE_TOOL=1 ./uninstall.sh    # also removes the uv tool
 ```
+
+`uninstall.sh` also cleans up a pre-rename install (`pra`/`pral`/`pral-gate` and `~/.config/pr-agent`), so
+nothing is left behind. Set `PREFLIGHT_KEEP_OLD_CONFIG=1` to keep the old config (its `.secrets.toml` holds your
+key) and migrate it by hand.
 
 ## Notes
 
-- `pral` adds `.pr-agent/` to each repo's `.git/info/exclude` automatically, so review output is never committed.
-- PR-Agent needs `custom_model_max_tokens` for `cline-pass/*` (not in LiteLLM's model table) and a **force-streaming**
-  workaround because ClinePass returns a wrapped non-streaming envelope LiteLLM cannot parse — both are pre-set in
-  `pr-agent.toml`.
-- Upgrading PR-Agent (`uv tool upgrade pr-agent`) recreates the venv; the wrappers re-link the secrets automatically.
+- `preflight` adds `.preflight/` to each repo's `.git/info/exclude` automatically, so review output is never
+  committed.
+- The helpers run the upstream **`pr-agent`** tool (installed by `uv`); "pr-agent" here always means that
+  upstream project, not this bundle.
+- Upgrading PR-Agent (`uv tool upgrade pr-agent`) recreates the venv; the wrappers re-link the secrets
+  automatically.
+
+## Upgrading from the old `pr-agent`-named bundle
+
+The commands and config path were renamed. To migrate without losing the key:
+
+```sh
+cd ~/preflight && ./install.sh                          # installs the new commands + ~/.config/preflight
+mv ~/.config/pr-agent/.secrets.toml ~/.config/preflight/.secrets.toml
+chmod 600 ~/.config/preflight/.secrets.toml
+./uninstall.sh                                          # removes old helpers, config dir and stale .toml
+```
+
+Then re-paste the updated `AGENTS-review-snippet.md` into any repo that still calls `pral` — that command no
+longer exists.

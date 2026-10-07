@@ -3,10 +3,10 @@
 * text=auto eol=lf
 
 # The helpers are shell scripts: text, LF-only.
-*.sh            text eol=lf
-files/pra       text eol=lf
-files/pral      text eol=lf
-files/pral-gate text eol=lf
+*.sh                 text eol=lf
+files/preflight      text eol=lf
+files/preflight-pr   text eol=lf
+files/preflight-gate text eol=lf
 
 *.toml text eol=lf
 *.md   text eol=lf

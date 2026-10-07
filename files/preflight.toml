@@ -1,0 +1,50 @@
+# preflight config — a HOST-side PR-Agent layer, loaded via --extra_config_url.
+#
+# This works against ANY OpenAI-compatible endpoint. The values below default to ClinePass
+# (openai/cline-pass/*), which is simply the endpoint this bundle was first built for; change the
+# model ids and the [litellm] block to target another provider. install.sh exposes an env override
+# for each of them, so a different provider needs no hand-editing:
+#
+#   PREFLIGHT_MODEL, PREFLIGHT_FALLBACK_MODELS, PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS,
+#   PREFLIGHT_MAX_MODEL_TOKENS, PREFLIGHT_FORCE_STREAMING_HOST
+#
+# Being a host-side layer (not a repo .pr_agent.toml), token-budget keys are allowed here.
+[config]
+model = "openai/cline-pass/deepseek-v4.1-flash"
+# The upstream default is a bare OpenAI id ("gpt-5.6-terra") that the ClinePass endpoint cannot
+# route, so a failed primary would retry against a dead model. Any fallback must be an id your own
+# endpoint serves, in its own provider/model form (or [] to disable fallback entirely).
+fallback_models = ["openai/cline-pass/glm-5.3-flash"]
+# Token budgets: needed when your provider's model is not in LiteLLM's model table (as cline-pass/*
+# is not), because then nothing declares the context window and the packing clamp cuts it to 32k.
+# For a model LiteLLM already knows, set 0 to let LiteLLM resolve it rather than overriding it here
+# with a guess — 0 means "look it up", not "no limit".
+custom_model_max_tokens = 1000000   # declares DeepSeek V4.1 Flash's 1M window (unknown to LiteLLM/MAX_TOKENS)
+max_model_tokens = 1000000          # raise the packing clamp (default 32000) so it isn't cut to 32k; 0 disables the clamp
+output_run_details = true           # show which model actually served the run
+# git_provider intentionally left unset -> defaults to 'github' (keeps GitHub Actions drop-in ready)
+
+[litellm]
+# CLINEPASS-SPECIFIC. ClinePass returns a wrapped non-streaming envelope ({data:..., success:true})
+# that LiteLLM cannot normalize, while its streaming returns standard SSE. Force streaming for that
+# host only. The substring below is matched against your request's api_base, so for any other
+# endpoint it simply never matches and this whole block stays inert — no need to delete it unless
+# you are also moving the api_base to a ClinePass-family host.
+# PREFLIGHT_FORCE_STREAMING_HOST replaces the host below if you point at ClinePass through a proxy.
+force_streaming_custom_llm_provider = "openai"
+force_streaming_api_base_substrings = ["api.cline.bot"]
+# Forward the provider so the force-streaming workaround engages. This is also correct for any other
+# OpenAI-compatible endpoint: it just tells LiteLLM to use its OpenAI transport.
+custom_llm_provider = "openai"
+
+[pr_reviewer]
+# Surface ALL findings in ONE review. Default is 3, which is the main cause of the
+# review->fix->review "cascade": the agent fixes 3 and the next run reveals 3 more.
+num_max_findings = 20
+# One clear go/no-go signal, in the same review (handy for preflight-gate):
+require_risk_assessment = true
+require_merge_recommendation = true
+
+[pr_code_suggestions]
+# Same idea for `preflight improve` (default is 3 suggestions per chunk):
+num_code_suggestions_per_chunk = 20

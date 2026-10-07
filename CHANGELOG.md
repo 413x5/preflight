@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Renamed the bundle from `pr-agent` to `preflight`**, so it no longer collides with the upstream
+  PR-Agent project it wraps. After this change `pr-agent` means exactly one thing: the upstream tool.
+  - Commands: `pra` → `preflight-pr`, `pral` → `preflight`, `pral-gate` → `preflight-gate`.
+  - Config: `~/.config/pr-agent/pr-agent.toml` → `~/.config/preflight/preflight.toml`.
+  - Artifacts: `.pr-agent/` → `.preflight/`.
+  - Env: `PRAGENT_*`/`PR_AGENT_*` → `PREFLIGHT_*`, and `PRAL_DIR`/`PRAL_SCOPE`/`PRAL_GATE_*` →
+    `PREFLIGHT_DIR`/`PREFLIGHT_SCOPE`/`PREFLIGHT_GATE_*`.
+  - Repo: `413x5/pr-agent` → `413x5/preflight` (GitHub redirects the old name).
+  - **Breaking.** Any repo whose `AGENTS.md` carries the old snippet calls `pral`, which no longer
+    exists - re-paste `AGENTS-review-snippet.md`. The secrets file is *moved*, not regenerated (a
+    fresh install would create an empty key). `uninstall.sh` cleans up the old names.
+- **Decoupled the bundle from ClinePass.** It now documents and supports any OpenAI-compatible
+  endpoint, with ClinePass as the built-in default rather than the premise. `install.sh` gains
+  `PREFLIGHT_MODEL`, `PREFLIGHT_FALLBACK_MODELS`, `PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS`,
+  `PREFLIGHT_MAX_MODEL_TOKENS`, and `PREFLIGHT_FORCE_STREAMING_HOST`.
+- The ClinePass force-streaming workaround is now keyed on the `api.cline.bot` literal instead of
+  whatever `api_base` is configured. Previously a non-ClinePass endpoint silently inherited a
+  ClinePass-specific quirk; now the block is inert unless the endpoint really is ClinePass.
+- `AGENTS-review-snippet.md` now points at this bundle's repository, so an agent working in another
+  repo can read current guidance (README, ROADMAP, design, troubleshooting, changelog) as the bundle
+  evolves.
+- `custom_model_max_tokens = 0` / `max_model_tokens = 0` are now documented as meaningful: `0` means
+  "let LiteLLM resolve the window" and "no clamp" respectively, rather than being unexplained.
+
 ### Fixed
 
 - `config.fallback_models` no longer points at a model the ClinePass endpoint cannot route. The
@@ -17,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-10-07
 
 Initial release: a deployable, machine-local PR-Agent review setup for the ClinePass endpoint.
+
+> The command/file/env names below are the ones this version shipped with; they were renamed in the
+> `[Unreleased]` entry above.
 
 ### Added
 
@@ -47,5 +76,5 @@ Initial release: a deployable, machine-local PR-Agent review setup for the Cline
   `GIT_INDEX_FILE` plus `git commit-tree` with `commit.gpgsign=false`, so a global `gpgsign = true`
   cannot break it.
 
-[Unreleased]: https://github.com/413x5/pr-agent/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/413x5/pr-agent/releases/tag/v0.1.0
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/413x5/preflight/releases/tag/v0.1.0

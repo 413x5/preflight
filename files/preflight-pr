@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# preflight-pr — run PR-Agent with the global preflight config (hosted/PR mode, needs a token).
+set -euo pipefail
+if [ -f "${HOME}/.config/preflight/ensure-link.sh" ]; then
+  . "${HOME}/.config/preflight/ensure-link.sh"
+fi
+exec pr-agent --extra_config_url "file://${HOME}/.config/preflight/preflight.toml" "$@"

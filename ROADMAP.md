@@ -19,6 +19,11 @@ Small, ready to do.
       uncommitted content is ignored so `git commit -a` still works. Strictly read-only, fails closed, and
       `git commit --no-verify` / `PREFLIGHT_SKIP=1` bypass deliberately. Opt-in per repo, per clone, and it
       covers every worktree.
+- [x] **Test the commit hook.** `tests/run.sh` drives real repositories through the real hook files with
+      no framework and no network: 23 cases, one per requirement (`REQ-HOOK-01`..`23`, mapped in
+      `tests/README.md`). Every fix in the hook was reverted in turn to confirm the matching case fails,
+      and neutering the hook turns 14 cases red. Guards the four bypasses found while building it
+      (unreviewed deletions, renames, symlink typechanges, `git rm --cached`).
 - [x] **Rename the bundle to `preflight`.** The old name collided with the upstream `pr-agent`
       project. Commands `pra`/`pral`/`pral-gate` → `preflight-pr`/`preflight`/`preflight-gate`,
       config `~/.config/preflight/preflight.toml`, artifacts `.preflight/`, env `PREFLIGHT_*`.

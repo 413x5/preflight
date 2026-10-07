@@ -24,6 +24,7 @@ is just the built-in default.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — how it works and why.
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — symptoms and fixes.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — layout, ground rules, how to test changes.
+- [`tests/README.md`](tests/README.md) — the integration suite for the commit hook.
 
 ## Requirements
 
@@ -113,6 +114,9 @@ git config core.hooksPath .githooks              # RELATIVE - required for workt
 - It is **content-based, not time-based** - a review counts only while it still covers what you commit.
 - It **never runs a review** and is **strictly read-only** (index, `HEAD` and working tree untouched).
 - Reviewed-but-uncommitted content is ignored, so `git commit -a` still works with untracked scratch files.
+- Deleting a reviewed file is blocked too (`git rm` included) - the review must cover the removal.
+- Renaming a reviewed file (`git mv`) or swapping one for a symlink is blocked as well.
+- The first commit in a repo with no history is allowed but not enforced; `preflight review` needs `HEAD`.
 - `PREFLIGHT_SCOPE=head` reviews cannot be enforced; use the default worktree scope.
 - One-off bypass: `git commit --no-verify` (or `PREFLIGHT_SKIP=1`).
 

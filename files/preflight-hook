@@ -30,6 +30,16 @@ fail() {
 # Fail closed on a missing interpreter rather than silently passing an unverified commit.
 command -v python3 >/dev/null 2>&1 || fail "python3 is required to read the review sidecar"
 
+# A repository with no commits has nothing to protect: the commit being made *is* the initial
+# content, and `preflight review` cannot run at all before a first commit exists (it needs HEAD to
+# diff against). Blocking here would deadlock adoption - the hook could never be installed before
+# the commit that installs it. Allow it and say so.
+git rev-parse --verify -q HEAD >/dev/null 2>&1 || {
+  printf 'preflight: not enforced: this repository has no commits yet.\n' >&2
+  printf "preflight: run 'preflight review' after this first commit to enforce later ones.\n" >&2
+  exit 0
+}
+
 meta="$dir/review.meta.json"
 [ -f "$meta" ] || fail "no review found for this repo"
 
@@ -73,12 +83,44 @@ fi
 # any real content change is already caught by the comparison below.
 staged=$(git write-tree 2>/dev/null) || fail "could not read the staged tree"
 
-# Containment: every path being committed must match the reviewed tree. Reviewed content that is
-# NOT being committed (status D) is ignored, which is what keeps `git commit -a` working when
-# untracked files are present.
-changed=$(git diff-tree -r -M --diff-filter=AM "$pf_tree" "$staged" 2>/dev/null)
-[ -n "$changed" ] || exit 0
+# Containment: every path being committed must match the reviewed tree. The comparison is read
+# REVIEWED -> STAGED, and each status means something specific about the commit being made:
+#
+#   A / M   added or modified relative to what was reviewed - unreviewed content.
+#   R       renamed. With rename detection on, a moved file is neither A nor M, so it has to be
+#           named explicitly: renaming a guard file away leaves it present but no longer invoked,
+#           which is a real change the reviewer never saw.
+#   T       a changed file type (regular file -> symlink or submodule, and the reverse). Contents
+#           can stay identical while the meaning changes completely.
+#   C       copied.
+#   D       in the reviewed tree but not in the staged tree, so reviewed content is going away. That
+#           is how a guard gets deleted without being noticed, so it is blocked too.
+#
+# The filter therefore has to be ACMRTU rather than AM. AM silently missed R and T - a renamed or
+# type-changed reviewed path passed unreviewed.
+#
+# D needs one refinement. An untracked scratch file is in the reviewed tree (the snapshot includes
+# untracked files) and not in the staged tree, so it also shows up as D - and blocking that would
+# break `git commit -a`, which is exactly what this rule exists to preserve. The difference is
+# whether the path is tracked in HEAD: a D path that HEAD knows is tracked content genuinely being
+# deleted, while a D path that HEAD does not know was never part of the commit's history and is
+# simply not being committed. Only the former is a real change.
+changed=$(git diff-tree -r -M --diff-filter=ACMRTU --name-only "$pf_tree" "$staged" 2>/dev/null) || fail "could not compare the reviewed and staged trees"
+dlist=$(git diff-tree -r -M --diff-filter=D --name-only "$pf_tree" "$staged" 2>/dev/null) || fail "could not compare the reviewed and staged trees"
+
+deleted=''
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  if git cat-file -e "HEAD:$p" 2>/dev/null; then deleted="$deleted$p
+"; fi
+done <<EOF
+$dlist
+EOF
+
+[ -n "$changed$deleted" ] || exit 0
+
 printf 'preflight: commit blocked: these paths changed after the review:\n' >&2
-printf '%s\n' "$changed" | awk -F'\t' 'NF>1 { printf "  %s\n", $2 }' >&2
+[ -n "$changed" ] && printf '%s\n' "$changed" | sed 's/^/  /' >&2
+[ -n "$deleted" ] && printf '%s' "$deleted" | sed 's/^/  (deleted) /' >&2
 printf "preflight: run 'preflight review', then commit again.\n" >&2
 exit 1

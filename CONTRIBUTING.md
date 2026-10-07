@@ -16,6 +16,7 @@ is a default, not an assumption.
 | `files/ensure-link.sh` | Re-links the secrets file after `uv tool upgrade` |
 | `files/secrets.toml.example` | The secrets template - **never** a real key |
 | `AGENTS-review-snippet.md` | The block pasted into a repo's `AGENTS.md` |
+| `tests/` | Integration tests for the commit hook, plus the sample fixture they build on |
 
 ## Ground rules
 
@@ -32,7 +33,15 @@ is a default, not an assumption.
 
 ## Testing changes
 
-`install.sh` is testable without touching your real setup - point it at throwaway dirs and skip the
+`tests/run.sh` is the integration suite: real repositories, the real hook files, no framework and no
+network. Refer to [`tests/README.md`](tests/README.md) for the requirement-to-case mapping.
+
+```sh
+./tests/run.sh hook      # offline, seconds
+./tests/run.sh           # includes one live-endpoint case (needs a configured key)
+```
+
+`install.sh` is also testable without touching your real setup - point it at throwaway dirs and skip the
 parts that need `uv` or the network:
 
 ```sh
@@ -57,7 +66,7 @@ Sanity-check the shell (the hooks are POSIX `sh`, the helpers `bash`):
 for f in install.sh uninstall.sh files/preflight files/preflight-pr files/preflight-gate files/ensure-link.sh; do
   bash -n "$f" || echo "FAIL $f"
 done
-for f in files/preflight-hook files/githooks/pre-commit files/githooks/post-commit; do
+for f in files/preflight-hook files/githooks/pre-commit files/githooks/post-commit tests/run.sh; do
   sh -n "$f" || echo "FAIL $f"
 done
 ```

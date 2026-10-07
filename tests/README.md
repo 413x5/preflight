@@ -64,6 +64,7 @@ and every previously-fixed bug has a case that fails if the fix is reverted.
 | REQ-HOOK-23 | A real review then commit passes end to end | the simulated review drifting from the real one |
 | REQ-HOOK-24 | Deleting a reviewed file whose name needs quoting is blocked | `--name-only` without `-z` quoting the path turned a tracked file into a nonexistent one, so its deletion looked like an untracked scratch file |
 | REQ-HOOK-25 | Removing a reviewed gitlink (submodule) is blocked | `git cat-file -e "HEAD:sub"` failing for a gitlink, so a submodule removal counted as "not tracked at HEAD" |
+| REQ-HOOK-26 | The example hook reports a missing helper when `HOME` is unset | `set -u` plus a bare `$HOME` aborting with "HOME: unbound variable" instead of the documented message |
 
 ## Mutation-checked
 
@@ -83,6 +84,7 @@ reverted in turn and the expected case was confirmed to fail:
 | the head-scope notice removed | REQ-HOOK-16 |
 | the `-z` deletion listing replaced by the quoted one | REQ-HOOK-24 |
 | the `ls-tree` discriminator replaced by per-path `cat-file` | REQ-HOOK-24, REQ-HOOK-25 |
+| `${HOME:-}` reverted to a bare `$HOME` in the example hook | REQ-HOOK-26 |
 
 ## A trap worth knowing
 

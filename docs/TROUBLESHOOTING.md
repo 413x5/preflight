@@ -97,9 +97,23 @@ The review ran but the gate verdict was not a pass - `preflight-gate` decides th
 security concerns, `changes_required`, or an effort over the limit). Read `.preflight/review.md`, fix the
 findings, and re-review. The artifacts are left in place on a block precisely so you can read them.
 
-If you disagree with a finding, opt out deliberately rather than defeating the hook: re-record the review
-with `PREFLIGHT_GATE_ALLOW_ISSUES=1 preflight-gate` semantics, or bypass once with
-`git commit --no-verify`.
+If you disagree with a finding, opt out deliberately rather than defeating the hook. The recorded verdict
+comes from the gate and is written **only** by `preflight review`, so to turn it into a pass you must
+re-run the review with the gate's opt-out exported:
+
+```sh
+PREFLIGHT_GATE_ALLOW_ISSUES=1 preflight review
+```
+
+Running `preflight-gate` on its own only prints an exit code - it never rewrites
+`.preflight/review.meta.json`, so `PREFLIGHT_GATE_ALLOW_ISSUES=1 preflight-gate` exits 0 but leaves the
+sidecar on `fail` and the commit still blocked. That re-review costs another full model run; for a single
+commit, `git commit --no-verify` is cheaper and leaves no trace.
+
+Note that `PREFLIGHT_GATE_ALLOW_ISSUES` relaxes **key issues only**. Security concerns and
+`merge_recommendation=changes_required` still fail the gate (see the header of `preflight-gate`), so a
+review that is blocked for one of those will stay blocked no matter how it is re-run. Genuinely
+disagreeing with *those* is a `--no-verify` decision, not an opt-out.
 
 ## `git commit` says "commit blocked: the preflight helper is missing"
 

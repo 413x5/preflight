@@ -16,6 +16,7 @@ is a default, not an assumption.
 | `files/ensure-link.sh` | Re-links the secrets file after `uv tool upgrade` |
 | `files/secrets.toml.example` | The secrets template - **never** a real key |
 | `AGENTS-review-snippet.md` | The block pasted into a repo's `AGENTS.md` |
+| `AGENTS.md` | Instructions for agents changing **this** repo (not the snippet) |
 | `tests/` | Integration tests for the commit hook, plus the sample fixture they build on |
 
 ## Ground rules

@@ -45,12 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `preflight hook` subcommand and `preflight-hook` helper; `install.sh` installs both plus the example
     hooks into `~/.config/preflight/`.
   - Covered by an integration suite in `tests/` (`./tests/run.sh`): real repositories, the real hook
-    files, no framework and no network. 25 cases (24 offline plus one live end-to-end), one per
-    requirement (`REQ-HOOK-01`..`25`, mapped in `tests/README.md`), each protecting a specific behaviour -
-    including the six bypasses found while building this (unreviewed deletions, renames, symlink
-    typechanges, `git rm --cached`, reviewed files whose names git quotes, and gitlinks). Every fix was
-    reverted in turn to confirm the matching case fails without it; a neutered hook turns 16 offline
-    cases red.
+    files, no framework and no network. 26 cases (25 offline plus one live end-to-end), one per
+    requirement (`REQ-HOOK-01`..`26`, mapped in `tests/README.md`), each protecting a specific behaviour -
+    including the seven bypasses found while building this (unreviewed deletions, renames, symlink
+    typechanges, `git rm --cached`, reviewed files whose names git quotes, gitlinks, and an unset `HOME`).
+    Every fix was reverted in turn to confirm the matching case fails without it; a neutered hook turns 16
+    offline cases red.
   - Path listings use `-z` and the paths are handled as raw bytes. `--name-only` without `-z` wraps any
     path that needs quoting in double quotes and backslash-escapes it, and `core.quotePath` cannot
     disable that for the characters that matter. Handing such a name back to git asks about a path that
@@ -60,7 +60,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     candidate path. `git cat-file -e "HEAD:sub"` fails for a **gitlink**, so a submodule removal was
     classified as "not tracked at HEAD" and slipped through unreviewed.
 
+### Fixed
+
+- `files/githooks/pre-commit` aborted with `HOME: unbound variable` when `HOME` was unset, because it ran
+  under `set -u` and expanded a bare `$HOME`. The commit was still refused - it failed closed - but with a
+  confusing shell error instead of the documented "the preflight helper is missing" message. Now
+  `${HOME:-}`, so an unset `HOME` degrades to the intended message. The live review of this repo reported
+  it, which is a good argument for running `preflight review` on the bundle itself.
+- `README.md` claimed "Python 3.12/3.13"; `install.sh` defaults to `PREFLIGHT_PY=3.13`.
+- `docs/TROUBLESHOOTING.md` told you to re-record a failed verdict with
+  `PREFLIGHT_GATE_ALLOW_ISSUES=1 preflight-gate`. That cannot work: the gate only prints and never rewrites
+  `.preflight/review.meta.json`, so the verdict stayed `fail` and the commit stayed blocked. It now shows
+  the command that does work (`PREFLIGHT_GATE_ALLOW_ISSUES=1 preflight review`) and notes that the opt-out
+  relaxes key issues only - security concerns and `merge_recommendation=changes_required` still fail.
+- `ROADMAP.md` referenced a `github-action.example.yml` staged for Layer 3 that has never existed in any
+  commit.
+
 ### Changed
+
+- **Added `AGENTS.md`** and linked it from `README.md` and `CONTRIBUTING.md`. It is instructions for agents
+  *changing this repo* - the hook's invariants, the checks to run, the traps that have already caught
+  someone - as opposed to `AGENTS-review-snippet.md`, which is the block pasted into a *consuming* repo.
 
 - CI actions updated to current: `actions/checkout` v5 to v7 and `actionlint` 1.7.7 to 1.7.12. They stay
   pinned to a moving major tag, so patch releases arrive without an edit. Note that `checkout` v6 and later

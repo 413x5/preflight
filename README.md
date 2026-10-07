@@ -21,6 +21,7 @@ is just the built-in default.
 
 ## Docs
 
+- [`AGENTS.md`](AGENTS.md) — instructions for AI agents **changing this repo** (invariants, checks, traps).
 - [`CHANGELOG.md`](CHANGELOG.md) — what changed, per version.
 - [`ROADMAP.md`](ROADMAP.md) — planned work and open decisions.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — how it works and why.
@@ -33,7 +34,7 @@ is just the built-in default.
 - macOS or Linux, and `git`.
 - [`uv`](https://astral.sh/uv) — installs PR-Agent in an isolated venv:
   `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- Python 3.12/3.13 (uv can fetch one).
+- Python 3.13 (the installer's default; `PREFLIGHT_PY` overrides it, and uv can fetch one).
 - Network access to an OpenAI-compatible endpoint (ClinePass by default, or your own).
 
 ## Install

@@ -229,6 +229,31 @@ case_block_gitlink_removal() {
   expect_commit "removing a gitlink without reviewing it is blocked" "REQ-HOOK-25" 1 "$d"
 }
 
+case_missing_helper_fails_closed_unset_home() {
+  # The example hook points at ${PREFLIGHT_HOOK:-${HOME:-}/.config/preflight/preflight-hook}. With
+  # `set -u` and an unset HOME, a bare $HOME aborts the shell with "HOME: unbound variable" - the
+  # commit was still refused, but by a shell error rather than the documented message. HOME unset is
+  # the deterministic case here: it makes the helper path absent regardless of what is installed on
+  # the machine running the suite, so this does not depend on the developer's setup.
+  local d; d="$(new_repo unset_home)"
+  reset_case "$d"
+  # AFTER reset_case: `git reset --hard` restores the committed .githooks/pre-commit, which would
+  # otherwise overwrite the example hook this case needs to test.
+  cp "$repo_root/files/githooks/pre-commit" "$d/.githooks/pre-commit"
+  chmod +x "$d/.githooks/pre-commit"
+  printf '\n# unreviewed\n' >> "$d/util.py"
+  git -C "$d" add util.py
+  local out got
+  out="$(env -u HOME -u PREFLIGHT_HOOK git -C "$d" -c commit.gpgsign=false commit -m x 2>&1)"; got=$?
+  if [ "$got" = 1 ] && printf '%s' "$out" | grep -q 'helper is missing' \
+     && ! printf '%s' "$out" | grep -q 'unbound variable'; then
+    ok "the example hook reports a missing helper when HOME is unset" "REQ-HOOK-26"
+  else
+    bad "the example hook reports a missing helper when HOME is unset" "REQ-HOOK-26" \
+        "1 + 'helper is missing'" "$got" "$(printf '%s\n' "$out" | sed 's/^/        | /')"
+  fi
+}
+
 case_pass_commit_a_with_scratch() {
   # The case that rules out strict tree equality: `commit -a` stages tracked changes but not
   # untracked files, while the reviewed snapshot includes them.
@@ -532,7 +557,8 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_hook_is_read_only \
     case_artifacts_survive_a_block \
     case_worktree_enforced \
-    case_missing_helper_fails_closed
+    case_missing_helper_fails_closed \
+    case_missing_helper_fails_closed_unset_home
   say ""
 fi
 

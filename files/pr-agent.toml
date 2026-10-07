@@ -1,0 +1,27 @@
+# PR-Agent global config — loaded by pra/pral via --extra_config_url.
+# This is a HOST-side layer (not a repo .pr_agent.toml), so token-budget keys are allowed here.
+[config]
+model = "openai/cline-pass/deepseek-v4.1-flash"
+custom_model_max_tokens = 1000000   # declares DeepSeek V4.1 Flash's 1M window (unknown to LiteLLM/MAX_TOKENS)
+max_model_tokens = 1000000          # raise the packing clamp (default 32000) so it isn't cut to 32k
+output_run_details = true           # show which model actually served the run
+# git_provider intentionally left unset -> defaults to 'github' (keeps GitHub Actions drop-in ready)
+
+[litellm]
+# ClinePass returns a wrapped non-streaming envelope ({data:..., success:true}) that LiteLLM
+# cannot normalize; streaming returns standard SSE. Force streaming for this endpoint.
+force_streaming_custom_llm_provider = "openai"
+force_streaming_api_base_substrings = ["__API_HOST__"]
+custom_llm_provider = "openai"   # forward the provider so the force-streaming workaround engages
+
+[pr_reviewer]
+# Surface ALL findings in ONE review. Default is 3, which is the main cause of the
+# review->fix->review "cascade": the agent fixes 3 and the next run reveals 3 more.
+num_max_findings = 20
+# One clear go/no-go signal, in the same review (handy for pral-gate):
+require_risk_assessment = true
+require_merge_recommendation = true
+
+[pr_code_suggestions]
+# Same idea for `pral improve` (default is 3 suggestions per chunk):
+num_code_suggestions_per_chunk = 20

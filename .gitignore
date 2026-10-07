@@ -1,0 +1,4 @@
+.DS_Store
+*.swp
+# never commit a real secrets file (the bundle ships only secrets.toml.example)
+.secrets.toml

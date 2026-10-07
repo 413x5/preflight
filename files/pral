@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# pral — local PR-style review of the current branch vs the remote default branch.
+#
+# Usage:  pral [command] [args...]
+#   command : review (default) | describe | improve | ask "<question>"
+#
+# Scope (PRAL_SCOPE):
+#   worktree (default) — reviews committed + UNCOMMITTED + untracked changes, so you can
+#                        iterate in the working tree and commit only once, when it's clean.
+#   head               — reviews committed changes only (base...HEAD).
+#
+# Artifacts (dir = PRAL_DIR, default .pr-agent), auto-excluded from git:
+#   review -> review.md + review.json | describe -> description.md
+#   improve -> improve.md            | ask -> answer.md
+#
+# Plain-diff mode: prints to stdout and writes the files above. Never modifies your
+# index/HEAD/history, and never posts to GitHub.
+set -euo pipefail
+
+if [ -f "${HOME}/.config/pr-agent/ensure-link.sh" ]; then
+  . "${HOME}/.config/pr-agent/ensure-link.sh"
+fi
+
+cmd="review"
+if [ "$#" -gt 0 ]; then cmd="$1"; shift; fi
+dir="${PRAL_DIR:-.pr-agent}"
+scope="${PRAL_SCOPE:-worktree}"
+
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo 'pral: not inside a git repository' >&2; exit 1; }
+cd "$root"
+git rev-parse --verify -q HEAD >/dev/null 2>&1 || { echo 'pral: repository has no commits yet' >&2; exit 3; }
+git fetch --quiet origin 2>/dev/null || echo 'pral: warning: could not fetch origin' >&2
+base="$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || true)"
+case "$base" in ''|'origin/HEAD') base='origin/main' ;; esac
+git rev-parse --verify -q "$base" >/dev/null 2>&1 || base='main'
+
+# Ensure the artifact dir is git-ignored in THIS repo (per-repo git metadata, never committed),
+# so the worktree snapshot below can't sweep the artifacts into the reviewed diff.
+case "$dir" in
+  /*|..|../*|*/../*|*/..) : ;;  # absolute or escaping path: leave excludes alone
+  *)
+    excl="$(git rev-parse --git-path info/exclude 2>/dev/null || true)"
+    if [ -n "$excl" ] && ! grep -qxF "${dir}/" "$excl" 2>/dev/null; then
+      printf '\n# PR-Agent local review artifacts\n%s/\n' "$dir" >> "$excl" 2>/dev/null || true
+    fi
+    ;;
+esac
+
+idxf=''
+cleanup() { if [ -n "$idxf" ]; then rm -f "$idxf"; fi; }
+trap cleanup EXIT
+if [ "$scope" = 'head' ]; then
+  diff_ref="${base}...HEAD"
+else
+  idxf="$(mktemp)"; rm -f "$idxf"
+  GIT_INDEX_FILE="$idxf" git read-tree HEAD
+  GIT_INDEX_FILE="$idxf" git add -A
+  tree="$(GIT_INDEX_FILE="$idxf" git write-tree)"
+  synth="$(GIT_AUTHOR_NAME=pral GIT_AUTHOR_EMAIL=pral@localhost \
+            GIT_COMMITTER_NAME=pral GIT_COMMITTER_EMAIL=pral@localhost \
+            git -c commit.gpgsign=false commit-tree "$tree" -p HEAD -m 'pral worktree snapshot')"
+  diff_ref="${base}...${synth}"
+fi
+
+case "$cmd" in
+  review|review_pr)     out_md="$dir/review.md";      out_json="$dir/review.json" ;;
+  describe|describe_pr) out_md="$dir/description.md"; out_json='' ;;
+  improve|improve_code) out_md="$dir/improve.md";     out_json='' ;;
+  ask|ask_question)     out_md="$dir/answer.md";      out_json='' ;;
+  *) echo "pral: unknown command '$cmd' (use review|describe|improve|ask)" >&2; exit 2 ;;
+esac
+
+mkdir -p "$dir"
+cfg="file://${HOME}/.config/pr-agent/pr-agent.toml"
+echo "pral: ${cmd} (scope=${scope}) — $(git rev-parse --abbrev-ref HEAD) vs ${base} -> ${dir}/" >&2
+
+if [ -n "$out_json" ]; then
+  git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
+    --output "$out_md" --json-output "$out_json" "$cmd" "$@"
+else
+  git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
+    --output "$out_md" "$cmd" "$@"
+fi
+
+echo "pral: wrote ${out_md}${out_json:+ and ${out_json}}" >&2
+if [ -n "$out_json" ] && [ -f "$out_json" ]; then
+  python3 - "$out_json" <<'PY' >&2 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+r = d.get('review') or {}
+issues = r.get('key_issues_to_review') or []
+sec = (r.get('security_concerns') or '').strip()
+print(f"pral: issues={len(issues)} security={sec or 'n/a'} effort={r.get('estimated_effort_to_review_[1-5]')} tokens={(d.get('usage') or {}).get('total_tokens')}")
+PY
+fi

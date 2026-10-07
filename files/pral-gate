@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# pral-gate — machine-checkable gate over the latest PR-Agent review.
+#
+#   pral-gate [path-to-review.json]     (default: ${PRAL_DIR:-.pr-agent}/review.json)
+#
+# Exit: 0 = pass | 1 = changes required / key issues | 2 = security concerns | 3 = no review
+# Env:  PRAL_GATE_ALLOW_ISSUES=1   ignore key issues (security/merge-rec still apply)
+#       PRAL_GATE_MAX_EFFORT=N     fail when estimated_effort_to_review exceeds N
+set -euo pipefail
+json="${1:-${PRAL_DIR:-.pr-agent}/review.json}"
+if [ ! -f "$json" ]; then echo "pral-gate: no review at $json (run 'pral review' first)" >&2; exit 3; fi
+python3 - "$json" <<'PY'
+import json, os, sys
+d = json.load(open(sys.argv[1]))
+r = d.get('review') or {}
+eff = r.get('estimated_effort_to_review_[1-5]')
+risk = (r.get('risk_level') or '').strip()
+rec = (r.get('merge_recommendation') or '').strip()
+tests = (r.get('relevant_tests') or '').strip()
+issues = r.get('key_issues_to_review') or []
+sec = (r.get('security_concerns') or '').strip()
+is_no = lambda v: v.lower() in ('', 'no', 'none', 'n/a')
+print(f"pral-gate: effort={eff} risk={risk or 'n/a'} merge={rec or 'n/a'} tests={tests or 'n/a'} issues={len(issues)} security={'yes' if not is_no(sec) else 'no'}")
+for it in issues:
+    print(f"pral-gate:   - {(it.get('relevant_file') or '').strip()}: {(it.get('issue_header') or '').strip()}")
+me = os.environ.get('PRAL_GATE_MAX_EFFORT')
+if me and eff is not None and int(eff) > int(me):
+    print(f"pral-gate: FAIL effort {eff} > {me}"); sys.exit(1)
+if not is_no(sec):
+    print('pral-gate: FAIL security concerns present'); sys.exit(2)
+if rec.lower() == 'changes_required':
+    print('pral-gate: FAIL merge_recommendation=changes_required'); sys.exit(1)
+if issues and os.environ.get('PRAL_GATE_ALLOW_ISSUES', '') not in ('1', 'true', 'yes'):
+    print('pral-gate: FAIL key issues present'); sys.exit(1)
+print('pral-gate: PASS'); sys.exit(0)
+PY

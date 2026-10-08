@@ -67,6 +67,7 @@ the selfcheck itself is `REQ-SELF-nn`, listed in its own table below.
 | REQ-HOOK-24 | Deleting a reviewed file whose name needs quoting is blocked | `--name-only` without `-z` quoting the path turned a tracked file into a nonexistent one, so its deletion looked like an untracked scratch file |
 | REQ-HOOK-25 | Removing a reviewed gitlink (submodule) is blocked | `git cat-file -e "HEAD:sub"` failing for a gitlink, so a submodule removal counted as "not tracked at HEAD" |
 | REQ-HOOK-26 | The example hook reports a missing helper when `HOME` is unset | `set -u` plus a bare `$HOME` aborting with "HOME: unbound variable" instead of the documented message |
+| REQ-HOOK-27 | The `post-commit` advisory warns when it cannot read the review sidecar | the advisory exiting 0 on a missing `python3` or a malformed/scope-less sidecar, making it silent in exactly the case it exists to report |
 
 The selfcheck is its own requirement, since it checks the suite rather than the hook:
 
@@ -93,6 +94,7 @@ reverted in turn and the expected case was confirmed to fail:
 | the `-z` deletion listing replaced by the quoted one | REQ-HOOK-24 |
 | the `ls-tree` discriminator replaced by per-path `cat-file` | REQ-HOOK-24, REQ-HOOK-25 |
 | `${HOME:-}` reverted to a bare `$HOME` in the example hook | REQ-HOOK-26 |
+| the `post-commit` advisory's unreadable-sidecar guards restored to `exit 0` | REQ-HOOK-27 |
 
 This table is per-fix: it records which case guards which repair. It is **not** the same property as the
 selfcheck below, which asks about the whole hook at once.
@@ -100,14 +102,14 @@ selfcheck below, which asks about the whole hook at once.
 ## The selfcheck, and why "all cases pass" is not enough
 
 A passing suite does not by itself mean the hook enforces anything. Stub the hook out entirely
-(`#!/bin/sh` + `exit 0`) and the suite is still green for **9 of its 25 offline cases**, because those
+(`#!/bin/sh` + `exit 0`) and the suite is still green for **10 of its 26 offline cases**, because those
 cases do not depend on the hook refusing something:
 
 | Group | Cases | Why a neutered hook still passes them |
 |---|---|---|
 | permissive by design | REQ-HOOK-07, 08, 09, 10 | they assert something is **not** blocked (`commit -a` with a scratch file, a reviewed deletion, a reviewed rename, an empty commit), so blocking nothing satisfies them |
 | bypass hatches | REQ-HOOK-14, 15 | they assert `--no-verify` / `PREFLIGHT_SKIP=1` work |
-| orthogonal | REQ-HOOK-20, 22, 26 | `20` checks a file's presence rather than a block; `22` and `26` exercise the *example* hook in `files/githooks/`, a different file, which stubbing `files/preflight-hook` cannot affect |
+| orthogonal | REQ-HOOK-20, 22, 26, 27 | `20` checks a file's presence rather than a block; `22`, `26` and `27` exercise the *example* hooks in `files/githooks/`, different files, which stubbing `files/preflight-hook` cannot affect |
 
 That is correct per case, but it leaves a hole: nothing stopped the **enforcement-sensitive** set from
 silently losing its teeth. A case could be added that is meant to catch an unreviewed commit, pass with
@@ -129,7 +131,7 @@ It reports the split, so drift is visible in the output:
 
 ```
   PASS  a neutered hook fails exactly the enforcement-sensitive cases  [REQ-SELF-01]
-        16 enforcement-sensitive, 9 insensitive, 25 ids exercised
+        16 enforcement-sensitive, 10 insensitive, 26 ids exercised
 ```
 
 The selfcheck is itself mutation-tested: adding a temporary case that passes with the hook neutered must

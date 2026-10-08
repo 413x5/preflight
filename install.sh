@@ -100,6 +100,7 @@ say "==> installing helpers into $bindir"
 install -m 0755 "$files/preflight-pr"   "$bindir/preflight-pr"
 install -m 0755 "$files/preflight"      "$bindir/preflight"
 install -m 0755 "$files/preflight-gate" "$bindir/preflight-gate"
+install -m 0644 "$files/VERSION"        "$cfg/VERSION"
 install -m 0644 "$files/ensure-link.sh" "$cfg/ensure-link.sh"
 # preflight-hook is what a repo's committed .githooks/pre-commit calls (via $PREFLIGHT_HOOK or
 # ~/.config/preflight/preflight-hook), so it lives with the config rather than on PATH.
@@ -137,8 +138,13 @@ fi
 case ":$PATH:" in *":$bindir:"*) : ;; *) say "!! $bindir is not on your PATH - add it, e.g. export PATH=\"\$PATH:$bindir\"" ;; esac
 
 say ""
-say "Done."
-if [ -z "$key" ]; then say "NEXT: paste your API key into $cfg/.secrets.toml (it is chmod 600)"; fi
+say "Done. Installed bundle version: $(head -n1 "$files/VERSION" 2>/dev/null || printf 'unknown')"
+# Only ask for a key that is actually missing. On a refresh install the file is usually already
+# configured, and telling that user to paste a key they set months ago trains them to ignore the
+# line - which is the line they need to read on a genuinely new machine.
+if [ -z "$key" ] && ! grep -qE '^[[:space:]]*key[[:space:]]*=[[:space:]]*"[^"]' "$cfg/.secrets.toml" 2>/dev/null; then
+  say "NEXT: paste your API key into $cfg/.secrets.toml (it is chmod 600)"
+fi
 say "TRY:  cd <repo> && preflight review"
 say ""
 say "To make a repo REFUSE a commit that was not reviewed, commit the hooks and point git at them:"

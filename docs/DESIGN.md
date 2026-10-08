@@ -17,14 +17,25 @@ PR-Agent's plain-diff mode only sees what you hand it as a diff. To review *unco
 3. `git add -A` stages the working tree (tracked edits **and** untracked files) into it;
 4. `git write-tree` + `git commit-tree` turn it into a synthetic commit (authored as
    `preflight <preflight@localhost>`), with `commit.gpgsign=false` so a global `gpgsign = true` cannot break it;
-5. that commit is diffed against the remote default branch.
+5. that commit is diffed against the base branch.
 
 The real index, `HEAD`, and history are never touched - the scratch index is deleted on exit.
-`PREFLIGHT_SCOPE=head` skips all of this and diffs `origin/main...HEAD` instead.
+`PREFLIGHT_SCOPE=head` skips all of this and diffs `base...HEAD` instead.
 
-`preflight` also fetches `origin` first (so it never diffs a stale base), resolves the default branch from
-`origin/HEAD`, and appends `.preflight/` to the repo's `.git/info/exclude` (per-clone metadata, shared
-by every worktree, never committed).
+`preflight` also fetches `origin` first, so it never diffs a stale base. The base is the first of these
+that resolves to a commit: `PREFLIGHT_BASE` (the explicit override), `origin/HEAD`, the remote's own
+`HEAD` (`git ls-remote --symref origin HEAD`, needed because a `--single-branch` clone and a hand-added
+remote never create the local `origin/HEAD` symref), then `origin/main`, `origin/master`, `main`,
+`master`. If none resolves it fails with exit 4 and names the candidates rather than guessing.
+
+That ordering is not decoration. The earlier version fell through to a bare `main` unchecked, so in a
+repository whose default branch was anything else `git diff main...HEAD` was fatal, pr-agent exited 2
+with "No diff content received", and the artifact dir was left **empty** - which the commit hook reads
+as "no review found" and turns into a block on every later commit. A base-resolution failure has to be
+loud, because its silent form is indistinguishable from an unreviewed tree.
+
+Finally it appends `.preflight/` to the repo's `.git/info/exclude` (per-clone metadata, shared by every
+worktree, never committed).
 
 ## The ClinePass streaming workaround (provider-specific)
 

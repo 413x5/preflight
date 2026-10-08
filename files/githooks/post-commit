@@ -9,9 +9,24 @@
 # Without this, a head-scope user would see every commit go through and reasonably assume the hook
 # was enforcing. It is not. This says so, once per commit, until the review uses worktree scope.
 #
+# Being unable to READ the sidecar is reported too, and that is deliberate. The advisory decides from
+# the sidecar's `scope` field whether the commit was covered; `exit 0` on a sidecar it cannot read
+# would make it silent in exactly the situation it exists to speak about, and silence here is
+# indistinguishable from "verified". So a missing `python3` or an unreadable sidecar warns as well.
+# (A sidecar that is simply ABSENT is not a failure - see below.)
+#
 # Install alongside pre-commit, once per clone:  git config core.hooksPath .githooks
 set -u
 
+# PREFLIGHT_SKIP=1 silences this advisory (the same switch that bypasses the pre-commit check).
+#
+# What this reports, and what it deliberately does not: it is for SILENT non-enforcement. A
+# `git commit --no-verify` also skips the pre-commit check (it bypasses pre-commit and commit-msg;
+# this hook still runs after it), but that is a deliberate, self-announcing bypass - the flag the
+# author typed is its own notice - so it is not reported. Likewise an ABSENT sidecar needs no
+# warning: it means no review has run, and pre-commit would have refused the commit long before this
+# hook ran (the one exception is a repository's first commit, which is allowed unenforced by design).
+# What cannot be allowed to pass quietly is a sidecar that is present and unreadable.
 [ "${PREFLIGHT_SKIP:-0}" = "1" ] && exit 0
 
 dir="${PREFLIGHT_DIR:-.preflight}"
@@ -21,7 +36,13 @@ cd "$root" || exit 0
 meta="$dir/review.meta.json"
 [ -f "$meta" ] || exit 0
 
-command -v python3 >/dev/null 2>&1 || exit 0
+warn_unreadable() {
+  printf 'preflight: advisory: cannot read %s (%s), so this commit was NOT verified by the hook.\n' "$meta" "$1" >&2
+  printf "preflight: run 'preflight review' with the default worktree scope to make the hook enforce commits.\n" >&2
+  exit 0
+}
+
+command -v python3 >/dev/null 2>&1 || warn_unreadable 'python3 not found'
 
 scope=$(python3 - "$meta" <<'PY' 2>/dev/null
 import json, sys
@@ -34,7 +55,9 @@ except Exception:
 PY
 )
 
-[ -n "$scope" ] || exit 0
+# An empty scope means the file is not the sidecar it claims to be (malformed JSON, or no `scope`
+# key). Both are unreadable for this hook's purposes, so both are reported rather than passed over.
+[ -n "$scope" ] || warn_unreadable 'malformed sidecar or missing scope'
 [ "$scope" = "worktree" ] && exit 0
 
 printf 'preflight: advisory: the last review used scope=%s, so this commit was NOT verified by the hook.\n' "$scope" >&2

@@ -93,7 +93,14 @@ cd /any/repo
 preflight review       # -> .preflight/review.md + .preflight/review.json
 preflight-gate         # exit 0 = pass; 1 = changes required/issues; 2 = security concerns; 3 = no review
 preflight describe     # or: preflight improve ; preflight ask "<question>"
+preflight --help       # every command and environment variable
+preflight --version    # the installed bundle version
 ```
+
+The review diffs the working tree against the remote's default branch, resolved as `origin/HEAD`, then the
+remote's own `HEAD`, then `origin/main|master`, then `main|master`. Set `PREFLIGHT_BASE=<ref>` to target
+something else (a release branch, a fork's trunk); if nothing resolves, `preflight` says so and exits 4
+rather than guessing a ref that does not exist.
 
 ## Teach your coding agents
 
@@ -122,6 +129,9 @@ git config core.hooksPath .githooks              # RELATIVE - required for workt
 - Renaming a reviewed file (`git mv`) or swapping one for a symlink is blocked as well.
 - The first commit in a repo with no history is allowed but not enforced; `preflight review` needs `HEAD`.
 - `PREFLIGHT_SCOPE=head` reviews cannot be enforced; use the default worktree scope.
+- `post-commit` is advisory and cannot block: it warns when the last review used `head` scope (so no commit
+  was actually verified), and when it cannot read the review sidecar at all - a missing `python3`, or a
+  malformed/`scope`-less sidecar. Silence is reserved for "verified" and "no review has run yet".
 - One-off bypass: `git commit --no-verify` (or `PREFLIGHT_SKIP=1`).
 - The verifier's path is overridable with `PREFLIGHT_HOOK` (default `~/.config/preflight/preflight-hook`),
   for a repo that vendors its own copy instead of relying on the installed one.
@@ -132,6 +142,7 @@ Use the **relative** hooks path - an absolute one breaks git worktrees. See
 ## What install.sh writes
 
 - `~/.local/bin/{preflight,preflight-pr,preflight-gate}` — the helpers.
+- `~/.config/preflight/VERSION` — the installed bundle version (`preflight --version` reads it).
 - `~/.config/preflight/{preflight.toml,ensure-link.sh,AGENTS-review-snippet.md,preflight-hook}` — config + helpers.
 - `~/.config/preflight/githooks/{pre-commit,post-commit}` — the example hooks to copy into a repo's `.githooks/`.
 - `~/.config/preflight/.secrets.toml` — created only if missing, chmod 600.

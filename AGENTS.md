@@ -33,6 +33,7 @@ the file itself and in `docs/DESIGN.md`. The CI and the tests must never require
 | `files/preflight-pr`, `files/preflight-gate` | Hosted/PR mode; the machine-checkable verdict |
 | `files/preflight-hook` | The commit-time verifier - **see below before touching it** |
 | `files/githooks/` | The example hooks a *consuming* repo copies into its own `.githooks/` |
+| `files/VERSION` | The bundle version, single source of truth. `preflight --version` and `install.sh` read it; CI fails if it, the `CHANGELOG` heading, and `--version` disagree |
 | `files/preflight.toml` | The global config template (model, provider knobs, review caps) |
 | `files/ensure-link.sh`, `files/secrets.toml.example` | Secrets relink helper; template with an empty key |
 | `AGENTS-review-snippet.md` | The block pasted into a *consumer* repo's `AGENTS.md` |
@@ -41,18 +42,25 @@ the file itself and in `docs/DESIGN.md`. The CI and the tests must never require
 
 Full contract and ground rules: [`CONTRIBUTING.md`](CONTRIBUTING.md). Read it before changing `files/`.
 
-## `files/preflight-hook` is the sharp edge
+## `files/preflight-hook` and `files/githooks/post-commit` are the sharp edges
 
-This ~160-line POSIX `sh` script is the highest-risk file here: it is the only thing that makes the review
-loop enforceable, and its whole job is to be *hard to bypass*. Read
-[`docs/DESIGN.md`](docs/DESIGN.md) (the containment section) and
-[`tests/README.md`](tests/README.md) before editing it. Invariants that must survive any change:
+`preflight-hook` is a ~160-line POSIX `sh` script and the highest-risk file here: it is the only thing that
+makes the review loop enforceable, and its whole job is to be *hard to bypass*. `files/githooks/post-commit`
+is the *opposite* kind of sharp edge - it cannot block anything, so a bug in it is silent by construction.
+Read [`docs/DESIGN.md`](docs/DESIGN.md) (the containment section) and
+[`tests/README.md`](tests/README.md) before editing either. Invariants that must survive any change:
 
 - **It verifies; it never triggers.** It never runs a review, never stages anything, and never writes to
   the index, `HEAD`, the working tree, or `.preflight/`. It is strictly read-only.
 - **It fails closed.** Any inability to check - missing `python3`, missing helper, unreadable sidecar,
   comparison that cannot run - must **block**, because "no output" is indistinguishable from "no
   differences" and would pass an unverified commit.
+- **The advisory fails loud, not silent.** The twin rule for `post-commit`: it cannot block, so its failure
+  mode is *saying nothing*. An unreadable sidecar (missing `python3`, malformed JSON, no `scope` key) must
+  warn, because silence there is indistinguishable from "verified". An *absent* sidecar is the one case
+  that stays quiet - `pre-commit` refuses a missing review first (bar a repository's first commit, allowed
+  unenforced by design). The two hooks reading the same sidecar with opposite stances is deliberate, not an
+  inconsistency: one guards the commit, the other guards the *belief* that the commit was guarded.
 - **The binding is content, not time.** A review counts exactly while the content it covered is what is
   committed. Never add a clock, an expiry, or a check that the recorded `HEAD` still equals `HEAD` -
   committing moves `HEAD`, so that would invalidate the sidecar after every commit for no gain.
@@ -91,7 +99,7 @@ Everything CI runs is available locally; a green local run means a green CI run.
 ./tests/run.sh             # everything
 ```
 
-`selfcheck` exists because a green suite is **not** proof the hook enforces: 9 of the 25 offline cases
+`selfcheck` exists because a green suite is **not** proof the hook enforces: 10 of the 26 offline cases
 pass with the hook stubbed out entirely, because they assert acceptance (`commit -a`, a reviewed deletion,
 a reviewed rename) or test a deliberate bypass. The selfcheck runs the whole suite against a neutered hook
 and requires exactly the enforcement-sensitive cases to fail. It also **requires every case to be
@@ -105,6 +113,7 @@ classified**, so a new case must be declared sensitive or insensitive or the sel
 | Generated config is valid TOML | `python3 -c "import tomllib;print(tomllib.load(open('CFG/preflight.toml','rb'))['config'])"` |
 | Commit-hook integration tests | `./tests/run.sh hook` |
 | Selfcheck (the suite against a neutered hook) | `./tests/run.sh selfcheck` |
+| Version is consistent | `v=$(head -n1 files/VERSION); grep -q "^## \[$v\]" CHANGELOG.md && ./files/preflight --version` |
 | Workflow lint | `actionlint .github/workflows/ci.yml` |
 
 Pass **one** file per `-n` invocation, as the loops above do. `bash -n a.sh b.sh` only parses `a.sh` - the
@@ -129,6 +138,14 @@ Ruby's built-in Psych if you need to inspect config.
 - **Never hand-edit a `.preflight/review.meta.json`** in a test to fake the *real* review path. The suite
   deliberately simulates a review by writing a sidecar (`review_here`); that is a fixture, not a shortcut
   for production code. `preflight review` is the only thing that may write it.
+- **Never let base resolution silently guess.** The base is resolved by *verifying* each candidate
+  (`PREFLIGHT_BASE`, `origin/HEAD`, `ls-remote --symref origin HEAD`, then `origin/main|master`, `main|master`)
+  and failing with exit 4 when none resolves. The old unchecked fallback to a bare `main` produced a fatal
+  `git diff` and an **empty** artifact dir, which the hook reports as "no review found" - turning a base
+  problem into an unexplainable block on every commit.
+- **Never make the `post-commit` advisory exit 0 on a sidecar it cannot read.** It is the only thing that
+  reports silent non-enforcement, so a malformed sidecar or a missing `python3` must warn. An *absent*
+  sidecar stays quiet (no review has run, and `pre-commit` refuses first).
 
 ## This machine has the bundle installed
 

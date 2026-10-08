@@ -143,6 +143,34 @@ whichever checkout the path names, instead of its own. Use the relative form:
 git config core.hooksPath .githooks
 ```
 
+## `preflight review` says "cannot tell which branch to diff against" (exit 4)
+
+No candidate base resolved. That is deliberate rather than a fallback: diffing a branch that does not
+exist is a fatal git error, and the old code reduced the resulting empty review to a bare `main` guess
+that failed far from its cause. Name the base explicitly:
+
+```sh
+PREFLIGHT_BASE=origin/develop preflight review
+```
+
+If the repository has no remote at all, any local ref works (`PREFLIGHT_BASE=main`). If it does have one,
+`git fetch` first - the base is resolved from refs you actually have, and a branch that only exists on the
+remote is not one of them until it is fetched.
+
+## `preflight review` leaves `.preflight/` empty and every commit is blocked
+
+The old symptom of the failure above: pr-agent never ran, so no `review.json` or `review.meta.json` was
+written, and the hook reports a missing sidecar as "no review found for this repo" - so *every* commit is
+blocked, however small. Check the review command's own output for the real cause (the base, a missing key,
+or a provider error) rather than the hook's message, which can only see that the artifacts are absent.
+Fixed in this version: an unresolvable base now fails with exit 4 before pr-agent is invoked.
+
+## `preflight --version` says "unknown"
+
+The helper could not find `files/VERSION` next to itself or in the config dir (`PREFLIGHT_HOME`, default
+`~/.config/preflight`). Re-run the bundle's `install.sh`. The version is used to answer "is this machine's
+bundle current?", so if it matters, re-install rather than guessing from file mtimes.
+
 ## `preflight-pr` / `preflight` print "relinked secrets" on every run
 
 Normal after a `uv tool upgrade` (the venv, and the symlink, are recreated). It is a one-time message

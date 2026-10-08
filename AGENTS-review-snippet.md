@@ -5,9 +5,12 @@ review. The reviewer is a machine-local PR-Agent run over the **working tree** -
 commit required:
 
 ```sh
-preflight review   # working tree vs the remote default branch -> .preflight/review.md + .preflight/review.json
+preflight review   # working tree vs the base branch -> .preflight/review.md + .preflight/review.json
 preflight-gate     # exit 0 = pass, 1 = changes required or key issues, 2 = security concerns, 3 = no review yet
 ```
+
+`preflight --help` lists every command and the environment variables; `preflight --version` reports the
+installed bundle version (useful when you are not sure this machine has the current bundle).
 
 `preflight review` reviews what is on disk: committed work **plus uncommitted and untracked changes**. Its diff
 comes from a throwaway snapshot of the working tree, so reviewing never stages, commits or rewrites anything -
@@ -72,6 +75,11 @@ What the hook does, and does not do:
   cannot run before a first commit exists, so blocking would make the hook impossible to adopt.
 - `PREFLIGHT_SCOPE=head` reviews cannot be enforced (a head-scope review covers content that already
   exists, and a pre-commit hook runs before the commit it would cover). Use the default worktree scope.
+- A second hook, `post-commit`, is **advisory** - it cannot block, since the commit already exists. It
+  exists to break the silence when enforcement did not apply, and it reports two things: a review that
+  used `head` scope (nothing you have committed since was verified), and a review sidecar it cannot read
+  (a missing `python3`, or a malformed/`scope`-less `.preflight/review.meta.json`). Silence is reserved for
+  "verified" and for "no review has run yet", so a warning here means *check*, not *panic*.
 - Deliberate one-off bypass: `git commit --no-verify` (or `PREFLIGHT_SKIP=1`).
 - It calls the verifier at `$PREFLIGHT_HOOK`, defaulting to `~/.config/preflight/preflight-hook`. If that
   helper is missing the commit is **refused**, not passed - so re-run the bundle's `install.sh` on a new

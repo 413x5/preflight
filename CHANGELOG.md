@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`preflight --help` and `preflight --version`** (plus `-h`/`-V` and `preflight-gate --help`). Both are
+  answered before anything touches git or the config, so they work outside a repository too (`--help` is
+  the first thing a new user runs, and it must not need a repo or a configured key). `--version`
+  reports the installed bundle version, read from a single source of truth (`files/VERSION`, installed as
+  `~/.config/preflight/VERSION`); `install.sh` prints the same number. An installed copy previously had no
+  way to say what it was, which made "is the bundle current on this machine?" unanswerable except by
+  re-running the installer - the exact question a real session got stuck on. CI fails if `files/VERSION`,
+  the `CHANGELOG` heading for it, and what `--version` prints ever disagree.
+- **`PREFLIGHT_HOME` is now honoured by the helpers, not just the installer.** `preflight`, `preflight-pr`
+  and `ensure-link.sh` all resolve the config dir the same way (`PREFLIGHT_HOME`, else
+  `~/.config/preflight`), so the version lookup, the secrets relink, the hook helper and the review's
+  `--extra_config_url` can no longer point at different trees. On a machine installed under a
+  `PREFLIGHT_HOME` prefix, `review` previously read `~/.config/preflight` while `--version` read the
+  prefix.
+- **`PREFLIGHT_BASE`** overrides the ref the review diffs against.
 - **CI** (`.github/workflows/ci.yml`): on every pull request and on pushes to `main`, on both Ubuntu and
   macOS, it checks shell syntax (`bash -n` for the helpers/installer, `sh -n` for the hooks and tests),
   dry-runs `install.sh` into a throwaway prefix (including that it never clobbers an existing
@@ -44,8 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `preflight hook` subcommand and `preflight-hook` helper; `install.sh` installs both plus the example
     hooks into `~/.config/preflight/`.
   - Covered by an integration suite in `tests/` (`./tests/run.sh`): real repositories, the real hook
-    files, no framework and no network. 26 cases (25 offline plus one live end-to-end), one per
-    requirement (`REQ-HOOK-01`..`26`, mapped in `tests/README.md`), each protecting a specific behaviour -
+    files, no framework and no network. 27 cases (26 offline plus one live end-to-end), one per
+    requirement (`REQ-HOOK-01`..`27`, mapped in `tests/README.md`), each protecting a specific behaviour -
     including the seven bypasses found while building this (unreviewed deletions, renames, symlink
     typechanges, `git rm --cached`, reviewed files whose names git quotes, gitlinks, and an unset `HOME`).
     Every fix was reverted in turn to confirm the matching case fails without it; a neutered hook turns 16
@@ -59,17 +74,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     candidate path. `git cat-file -e "HEAD:sub"` fails for a **gitlink**, so a submodule removal was
     classified as "not tracked at HEAD" and slipped through unreviewed.
 - **A selfcheck for the hook test suite** (`./tests/run.sh selfcheck`, wired into CI). A green suite was
-  not evidence that the hook enforced anything: stubbing the hook out entirely still satisfied 9 of the 25
+  not evidence that the hook enforced anything: stubbing the hook out entirely still satisfied 10 of the 26
   offline cases, because those assert *acceptance* (a reviewed deletion, `commit -a`, a reviewed rename),
-  exercise a deliberate bypass, or test the separate example hook. Nothing kept the enforcement-sensitive
+  exercise a deliberate bypass, or test the separate example hooks. Nothing kept the enforcement-sensitive
   cases sensitive, so a case claiming to catch an unreviewed commit could have passed with the hook
   disabled and nobody would have known. The selfcheck re-runs the whole suite against a neutered hook and
   requires exactly the declared enforcement-sensitive cases to fail, reports the split
-  (16 sensitive / 9 insensitive), and **requires every case to be classified** - an unclassified case, or
+  (16 sensitive / 10 insensitive), and **requires every case to be classified** - an unclassified case, or
   a sensitive case that passes or skips, fails it. The check is itself mutation-tested.
 
 ### Fixed
 
+- **`preflight review` blocked every commit on Debian/Ubuntu.** The helper ran the gate with `sh
+  "$gate_bin"`, but `preflight-gate` is a **bash** script (`set -euo pipefail`) and on Debian/Ubuntu
+  `/bin/sh` is dash, which rejects `pipefail` on the first line. The gate died with exit 2, and since
+  `preflight review` records the gate's exit as the sidecar verdict, that was stored as `fail` - so
+  `preflight-hook` then refused *every* commit with "the last review did not pass", for a reason that
+  had nothing to do with the review. It now executes the gate directly, honouring its shebang, with no
+  `|| sh` fallback (which would reintroduce the silently-wrong verdict). macOS hid this: its `/bin/sh`
+  is bash and accepts `pipefail`, so only the Ubuntu half of CI could have caught it - and nothing
+  exercised the helper's own gate launch.
+- **`preflight-gate` crashed with a traceback whenever a review field had the wrong type or shape.** The
+  review is model output, so any field can arrive as something other than what the code assumed, and each
+  such case was an uncaught traceback - which is **not** a neutral failure: the commit hook reads any
+  non-zero exit as "the review did not pass", and `preflight review` records that exit as the sidecar
+  verdict, so a perfectly clean review was stored as `fail` and then blocked every commit. Four separate
+  shapes did it: a boolean where text was assumed (`"relevant_tests": true`, which the model produces
+  often), a non-object `review.json` or non-object `review`, a non-list `key_issues_to_review` (`true` or
+  `3`, which broke `len()` and iteration), and a non-finite effort (`1e999` parses to `inf`, and
+  `int(float('inf'))` raises `OverflowError`, not `ValueError`). Every field is now coerced or
+  shape-checked, an unreadable or wrong-shaped `review.json` exits 3 with a message (3 is "no usable
+  review", which is what it amounts to), and `PREFLIGHT_GATE_MAX_EFFORT` is compared numerically whether
+  the effort arrives as an int, a float or a string. CI now exercises all of these shapes, because
+  nothing in the commit-hook suite covers the gate at all - which is how they survived.
+- **`preflight --version` aborted with `HOME: unbound variable` when `HOME` was unset.** Bash expands
+  every word of a `for` list before the loop runs, so the config-dir fallback evaluated a bare `$HOME`
+  even when `files/VERSION` beside the script had already matched - and the script runs under `set -u`.
+  The same trap was in the gate-lookup loop, where it was worse: the abort landed *after* pr-agent had
+  run but *before* the verdict was recorded, so the artifact dir was left without a usable sidecar and
+  `preflight-hook` then reported "no review found" and blocked every later commit. Both are now
+  `${HOME:-}`, the same guard the example hook uses (REQ-HOOK-26), plus an undocumented
+  `PREFLIGHT_HOME` override on the lookup so a throwaway-prefix install reports its own version. Found by
+  this repo's own review loop, on the first version of this very change.
+- **Base-branch resolution.** The base is now the first of `PREFLIGHT_BASE`, `origin/HEAD`, the remote's
+  own `HEAD` (`ls-remote --symref`, needed because a `--single-branch` clone and a hand-added remote never
+  create the local `origin/HEAD` symref), then `origin/main|master`, `main|master`. Before, an unresolvable
+  `origin/HEAD` fell through to a bare `main` **without being checked**: in a repository whose default
+  branch was anything else, `git diff main...HEAD` was fatal, pr-agent exited 2 with "No diff content
+  received", and the artifact dir was left empty - which the commit hook reads as "no review found", so
+  every later commit was blocked for a reason unrelated to the commit. It now fails with exit 4 and names
+  the candidates instead. This is the one item here that was not found by a review of this repo; it was
+  reproduced from a report of a session in another repository.
+- **The `post-commit` advisory is no longer silent when it cannot read the review sidecar.** It decides
+  whether a commit was covered by reading `scope` out of `.preflight/review.meta.json`, and it used to
+  `exit 0` when `python3` was missing or the sidecar was malformed or lacked `scope`. That made it mute in
+  exactly the case it exists to report, where silence and "verified" are indistinguishable - and a
+  consuming repository had already patched its vendored copy to say so. An **absent** sidecar still stays
+  quiet, which is correct: no review has run, and `pre-commit` would have refused the commit first (bar a
+  repository's first commit, which is allowed unenforced by design).
+- **`install.sh` no longer tells you to paste an API key you already have.** The `NEXT:` line was printed
+  whenever `PREFLIGHT_KEY` was unset, including on a refresh install of a machine configured months
+  earlier; it now checks the secrets file for a real key first.
 - `files/githooks/pre-commit` aborted with `HOME: unbound variable` when `HOME` was unset, because it ran
   under `set -u` and expanded a bare `$HOME`. The commit was still refused - it failed closed - but with a
   confusing shell error instead of the documented "the preflight helper is missing" message. Now
@@ -86,6 +151,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The `post-commit` companion hook is now covered by the suite (`REQ-HOOK-27`; classified insensitive,
+  since a post-commit hook cannot block) - it previously had only a `sh -n` syntax check, which is why the
+  silent-sidecar defect above survived.
 - **Added `AGENTS.md`** and linked it from `README.md` and `CONTRIBUTING.md`. It is instructions for agents
   *changing this repo* - the hook's invariants, the checks to run, the traps that have already caught
   someone - as opposed to `AGENTS-review-snippet.md`, which is the block pasted into a *consuming* repo.

@@ -204,8 +204,9 @@ case "$dir" in
 esac
 
 idxf=''
+prev_json=''
 hook_tree=''
-cleanup() { if [ -n "$idxf" ]; then rm -f "$idxf"; fi; }
+cleanup() { if [ -n "$idxf" ]; then rm -f "$idxf"; fi; if [ -n "$prev_json" ]; then rm -f "$prev_json"; fi; }
 trap cleanup EXIT
 if [ "$scope" = 'head' ]; then
   diff_ref="${base}...HEAD"
@@ -234,6 +235,23 @@ esac
 mkdir -p "$dir"
 cfg="file://${cfgdir}/preflight.toml"
 echo "preflight: ${cmd} (scope=${scope}) — $(git rev-parse --abbrev-ref HEAD) vs ${base} -> ${dir}/" >&2
+
+# Set the PREVIOUS review aside before this run overwrites it, so the summary can report whether the
+# run surfaced anything NEW. This is the loop's convergence signal. The loop's failure mode is not
+# "the model misses bugs" - it is "the model keeps reporting concerns that are already answered",
+# because each round reviews the text the previous round wrote (comments, docs, guards) and a reviewer
+# cannot tell a deliberate, documented trade-off from an oversight. Without a new-vs-repeat count the
+# agent cannot distinguish "the change is clean now" from "the same two findings came back reworded",
+# so it re-runs forever. Counting only what is genuinely new gives it a stopping rule.
+# review is the only command that writes a json artifact, so this is inert for describe/improve/ask.
+prev_json=''
+if [ -n "$out_json" ] && [ -f "$out_json" ]; then
+  # Assign only after a SUCCESSFUL copy: `mktemp` already created the file, so clearing the variable on
+  # a failed copy (`|| prev_json=''`) would leave the file behind and the EXIT trap - which tests for a
+  # non-empty path - would never remove it, leaking one temp file per failure.
+  cand="$(mktemp)"
+  if cp "$out_json" "$cand" 2>/dev/null; then prev_json="$cand"; else rm -f "$cand"; fi
+fi
 
 if [ -n "$out_json" ]; then
   git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
@@ -295,8 +313,8 @@ PY
   fi
 fi
 if [ -n "$out_json" ] && [ -f "$out_json" ]; then
-  python3 - "$out_json" "$out_md" <<'PY' >&2 2>/dev/null || true
-import json, re, sys
+  PREFLIGHT_PREV_JSON="$prev_json" python3 - "$out_json" "$out_md" <<'PY' >&2 2>/dev/null || true
+import json, os, re, sys
 d = json.load(open(sys.argv[1]))
 r = d.get('review') or {}
 issues = r.get('key_issues_to_review') or []
@@ -360,6 +378,51 @@ except OSError:
 tail = md[md.rfind('</table>') + len('</table>'):] if '</table>' in md else md
 if COVERAGE_RE.search(tail):
     line += " coverage=PARTIAL (token budget left files out - see review.md)"
+
+# How many findings are NEW since the previous review, and how many repeat one already answered here.
+# This is the loop's stopping rule, and it is deliberately mechanical: the failures that keep this loop
+# alive are the ones a reviewer cannot distinguish from a real defect - it re-reports a documented
+# trade-off, or re-words a finding the previous round already raised, because it has no memory of that
+# round. Both look like fresh findings in a single review.
+#
+# Two things make "repeat" decidable without guessing:
+#   - identity is (file, header, content) per pr-agent's own dedupe key, so a genuinely different issue
+#     in the same file still counts as new;
+#   - `files/preflight.toml` pins `temperature`, and the prompt is deterministic, so a re-review of
+#     unchanged content tends to reproduce the same text rather than a paraphrase.
+# A reworded repeat can therefore still read as new, which is the honest limit: the count is a strong
+# hint, not a verdict. `new=0` with issues>0 is the signal to stop and read the findings, not to fix
+# them; `new=N` means there is something the last round did not see.
+#
+# Gated on "a previous review was LOADED", not on "it had findings": a clean previous review makes every
+# current finding new, and suppressing the count there would remove the signal in the one round that
+# follows a clean pass - the round most likely to be re-running for no reason.
+new = None
+prev_path = os.environ.get('PREFLIGHT_PREV_JSON') or ''
+if prev_path and os.path.isfile(prev_path):
+    def key(issue):
+        if not isinstance(issue, dict):
+            return ('', '', str(issue))
+
+        def norm(value):
+            return ' '.join(str(value or '').split()).lower()
+
+        return (norm(issue.get('relevant_file')), norm(issue.get('issue_header')),
+                norm(issue.get('issue_content')))
+    try:
+        with open(prev_path, encoding='utf-8') as fh:
+            prev = json.load(fh).get('review') or {}
+        seen = {key(i) for i in (prev.get('key_issues_to_review') or [])}
+        new = sum(1 for i in issues if key(i) not in seen)
+    except Exception:
+        new = None
+if new is not None:
+    line += f" new={new}/{len(issues)}"
+    if issues and new == 0:
+        # "repeats the previous review" is a statement about the text, not a verdict that the finding is
+        # handled: an agent that deliberately deferred one (judged it wrong, or ran out of time) will see
+        # it again here. The wording therefore points at the judgement to make rather than declaring done.
+        line += " (unchanged since the previous review: judge each, do not re-fix blind)"
 print(line)
 PY
 fi

@@ -295,3 +295,55 @@ table assumption is exercised against real output.
 
 The real budget lever is `config.max_model_tokens` / `custom_model_max_tokens`: raise those and the whole
 diff fits in a single call. Chunking is the fallback for when it does not.
+
+## Why the loop converges: new findings, not a clean review
+
+The loop is `review → fix → re-review`, and the section above makes one review report everything it was
+*shown*. That is necessary but not sufficient: a loop can satisfy it and still never end. The failure is
+not that the reviewer misses bugs - it is that a reviewer reading a diff **cannot tell a deliberate,
+documented trade-off from an oversight**, and each round necessarily reviews the code, comments and docs
+the previous round wrote. Re-running therefore produces findings that were already considered, arriving
+as fresh issues because a single review has no memory of the last one. Chasing those is what turns the
+loop into a treadmill, and it is expensive: a round is a full model call.
+
+The fix is to make the distinction mechanical and put it on the line the agent already reads. Each run
+compares its findings against the previous run's (saved before the artifacts are overwritten) and reports
+how many are new:
+
+```
+preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
+```
+
+`new=N/M` means N of the M findings were not in the previous review. Identity is the tuple pr-agent
+itself uses to dedupe - `(relevant_file, issue_header, issue_content)`, whitespace- and case-normalised -
+so a different issue in the same file is still new while the same sentence is not. `files/preflight.toml`
+pins `temperature` and the prompt is fixed, so a re-review of unchanged content tends to reproduce the
+same text rather than a paraphrase.
+
+`new=0` is the stopping signal: **judge, do not re-fix**. Each finding is one of three things, and only
+the first is work:
+
+| The finding is | What to do |
+|---|---|
+| a real defect | fix it - this is the case the loop exists for |
+| already answered (a limit, trade-off or alternative the code/comment/docs already address) | write the reasoning down once if it is not recorded, and do not rewrite the design to satisfy a preference |
+| wrong | say so; `preflight-gate` is the check, not agreement with the model |
+
+Two rounds of `new=0` is the hand-off point, whatever remains, with the judgements recorded in the pull
+request so a human sees the reasoning instead of the loop's history.
+
+**The honest limits.** This is text matching over model output, so a lightly reworded repeat can still
+count as new - the count is a strong hint, not a verdict, and the `new=` field is absent on a first
+review or when the previous one is unreadable (judge the findings yourself then). It also compares
+against the previous *run*, not against what you decided: deferring a real finding (judged wrong, or out
+of time) makes it look like a repeat next round, which is why the hint says *judge*, not *done*. And the
+signal is only as good as the reviewer's wording being stable - a provider whose model paraphrases freely
+gets less from it, which is why the identity key is the reviewer's own rather than a fuzzy match we
+invented.
+
+A related hazard, and the reason the loop must not be driven blindly: `preflight review` has been observed
+completing a review and writing both artifacts, then **never exiting** because pr-agent's post-run
+callback drain blocked on a stalled socket. The artifacts are complete and correct - only the exit hangs -
+so a scripted loop that waits for the process would stall forever. If a review appears to hang, check
+whether `.preflight/review.json` was already written; if it was, the review is usable and the process can
+be stopped. See `docs/TROUBLESHOOTING.md`.

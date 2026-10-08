@@ -69,13 +69,15 @@ most real diffs have several. List them all, most severe first.
 # review silently covers a slice of the tree - and the next run, with different content, surfaces findings
 # that were there all along. That reads exactly like a loop that will not converge.
 #
-# Turning chunking on changes the fallback from "review a slice, drop the rest" to "split the diff, review
-# every chunk, union the findings into one review", so one run reports everything. It is inert unless the
-# budget actually leaves files out, so a normal diff still costs exactly one AI call; only a genuinely
-# oversized change pays for extra calls, and it pays them to avoid an unbounded fix/re-review loop.
+# Turning chunking on changes the fallback from "review a slice, drop the rest" to "split the diff,
+# review it in chunks and union the findings into one review". It is inert unless the budget actually
+# leaves files out, so a normal diff still costs exactly one AI call.
 enable_large_pr_chunking = true
-# Bound on those extra calls. A merge over the chunks' findings is a union, so this caps cost without
-# discarding a chunk's issues; any files still left out are named in the review's coverage footer.
+# How many chunks may be REVIEWED, not merely how much output is kept: a diff needing more chunks than
+# this has the extra chunks never sent to the model, so their findings are never produced at all. The
+# remaining files are then listed in the review's coverage footer, which is what `coverage=PARTIAL` on
+# the summary line points at - that line is the signal, not the cap. Raise this to cover a larger diff;
+# raising `config.max_model_tokens` instead lets the whole diff fit in one call.
 max_number_of_calls = 3
 
 [pr_code_suggestions]

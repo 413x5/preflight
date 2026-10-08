@@ -24,12 +24,12 @@ provider into a mechanism: anything endpoint-specific - a model id, a streaming 
 belongs in `files/preflight.toml` as an overridable default, and must be documented as provider-specific in
 the file itself and in `docs/DESIGN.md`. The CI and the tests must never require a paid key or the network.
 
-## One review must report everything
+## One review must report everything, and the loop must be able to end
 
 The product's central promise is that the loop converges: review once, fix **all** the findings, re-review.
 If a review reports one finding and the next run hands you another, the bundle has failed at the one thing
-it exists to do. There are two independent ways to break that promise, and they look identical from the
-outside - fix one and the loop is still slow.
+it exists to do. There are **three** independent ways to break that promise, and they look identical from
+the outside - fix one and the loop is still slow.
 
 1. **What the model reports.** `pr_reviewer.num_max_findings` (upstream default 3) and
    `pr_reviewer.extra_instructions`. Lowering either re-creates the cascade.
@@ -37,12 +37,21 @@ outside - fix one and the loop is still slow.
    the first patch unless `pr_reviewer.enable_large_pr_chunking` is on - so a "complete" review can cover a
    slice of the tree. **This is the one that is easy to miss**, because every finding in a partial review is
    a real finding; the missing coverage is invisible.
+3. **That the findings are *new*.** A reviewer cannot distinguish a deliberate, documented trade-off from
+   an oversight, and each round reviews the code and comments the previous round wrote - so re-running
+   keeps raising concerns already answered, at a full model call per round. `preflight` reports
+   `new=N/M` on the summary line for exactly this reason, and `new=0` is the stopping signal.
 
 `files/preflight.toml` sets every completeness key, CI asserts each one (so adding a key means adding its
 assertion too), and `preflight` prints `coverage=PARTIAL` when anything was left out. Do not weaken any
 of it to save tokens: a partial review is what turns a two-round loop into an unbounded one, and silent
 partial coverage has the same shape as the other failures this repo guards against - an inability to
 check that is indistinguishable from a pass.
+
+`new=` is the counterweight, and it must stay honest: it compares against the previous *run*, not against
+what the agent decided, so it never claims a finding is resolved - only that it is unchanged. Do not
+"improve" it by suppressing repeats or by treating `new=0` as a pass; the gate decides pass, and the loop
+stops on judgement, not on silence.
 
 "Everything" is bounded, and the docs should say so rather than overclaim. The finding cap is a prompt
 instruction, not a hard truncation, but it is still a ceiling; the coverage line is a text heuristic, so a

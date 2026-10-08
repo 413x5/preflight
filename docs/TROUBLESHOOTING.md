@@ -71,7 +71,7 @@ therefore sets `enable_large_pr_chunking = true` (with `max_number_of_calls = 3`
 is split, up to `max_number_of_calls` chunks are reviewed, and the findings are unioned into one review. It is inert unless the
 budget actually leaves files out, so a normal diff still costs exactly one AI call.
 
-If a review could not cover everything, it says so: the summary line ends with
+If a review could not cover everything, it says so: the summary line contains
 `coverage=PARTIAL (token budget left files out - see review.md)`, and `review.md` names the omitted
 files. Treat that as "there may be more here" and do **not** read a low `issues=` count on a partial
 review as "the change is nearly clean". Raise `config.max_model_tokens` / `custom_model_max_tokens` if
@@ -196,3 +196,20 @@ bundle current?", so if it matters, re-install rather than guessing from file mt
 Normal after a `uv tool upgrade` (the venv, and the symlink, are recreated). It is a one-time message
 per upgrade; if it happens every run, the symlink target is being deleted - check
 `~/.config/preflight/.secrets.toml` exists.
+
+## `preflight review` prints nothing more and never exits
+
+Check `.preflight/review.json` first. If it exists, is recent, and parses, the review **finished** - the
+artifacts are written before pr-agent's shutdown step - and only the exit is stuck. Stop the process; the
+review is usable, so continue with `preflight-gate` and carry on.
+
+Cause: pr-agent waits after the run for litellm's deferred callbacks to flush, and that wait has been
+observed to block indefinitely on a stalled socket read (`select` with no data arriving). `ai_timeout`
+(`config.ai_timeout`, default 120s) bounds the model *request*, not this shutdown wait, so it does not
+cover it.
+
+Do not "fix" this by wrapping the call in a short timeout: a timeout that cuts off a slow but valid
+review is the silent-truncation failure this project works hardest to avoid, and a review is expensive
+enough that losing one is worse than waiting. If it becomes routine, set `config.callback_timeout_seconds`
+(the shutdown wait's own budget) rather than bounding the whole command, and treat any output that
+appears after it as suspect.

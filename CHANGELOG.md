@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A convergence signal on the summary line: `new=N/M`.** Reporting every finding in one pass is not
+  enough to make the loop end, because a reviewer cannot tell a deliberate, documented trade-off from an
+  oversight - and each round necessarily reviews the code, comments and docs the previous round wrote, so
+  re-running keeps producing findings that were already considered. Chasing those is what turns the loop
+  into a treadmill, at a full model call per round. Each run now compares its findings against the
+  previous run's and reports how many are new:
+
+  ```
+  preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
+  ```
+
+  Identity is pr-agent's own dedupe key - `(relevant_file, issue_header, issue_content)`, normalised - so
+  a different issue in the same file is still new. `new=0` is the stopping signal: judge each finding as a
+  real defect, already answered, or wrong, and fix only the first. The hint deliberately does not say
+  "done": it compares against the previous *run*, not against what you decided, so a deferred finding
+  looks like a repeat. Text matching means a lightly reworded repeat can still read as new - a strong
+  hint, not a verdict, absent on a first review or when the previous one is unreadable.
+  `AGENTS-review-snippet.md` documents the stop condition, and `docs/DESIGN.md` the reasoning and limits.
 - **One review now reports everything, instead of one finding at a time.** The `review → fix → re-review`
   loop was slow because it had two independent causes, and only one of them was configured for.
   `pr_reviewer.num_max_findings` caps how many findings a review *returns* (upstream default 3), and it
@@ -114,6 +132,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `new=` count was suppressed after a clean review.** It was computed only when the previous
+  review had findings, so a run following a clean pass reported no convergence signal - the one round
+  most likely to be re-running for no reason. It is now computed whenever a previous review was *loaded*,
+  and a clean previous review correctly makes every current finding new.
+- **The temp file used to compare against the previous review could leak.** `mktemp` created it, but a
+  failed copy cleared the variable, so the exit trap no longer knew to remove the file. The path is now
+  assigned only after a successful copy.
+- **`REQ-HOOK-30` could vanish instead of failing.** It asserted on `.preflight/review.md` inside an
+  `if [ -f ... ]`, so a review that reported a pass without writing the file produced neither a pass nor
+  a failure - the requirement silently retired, which is exactly the "a guard that did not run proves
+  nothing" rule the selfcheck applies to skips. A missing `review.md` now fails the case.
+- **`max_number_of_calls` was documented as capping cost without losing findings.** It caps how many
+  chunks are *reviewed*: a diff needing more chunks has the excess never sent to the model, so their
+  findings are never produced and the files appear only in the coverage footer. The comment now says so
+  instead of implying chunking always covers the whole diff.
 - **`preflight review` blocked every commit on Debian/Ubuntu.** The helper ran the gate with `sh
   "$gate_bin"`, but `preflight-gate` is a **bash** script (`set -euo pipefail`) and on Debian/Ubuntu
   `/bin/sh` is dash, which rejects `pipefail` on the first line. The gate died with exit 2, and since
@@ -220,6 +253,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream default (`["gpt-5.6-terra"]`) is a bare id, which the endpoint rejects (ids must be
   `provider/model`), so a failed primary model retried against a dead one; it is now
   `["openai/cline-pass/glm-5.3-flash"]`.
+
+### Known issue
+
+- **`preflight review` can complete and then never exit.** Observed repeatedly in one session: both
+  artifacts are written, then pr-agent's post-run wait for litellm callbacks blocks indefinitely on a
+  stalled socket read. The review itself is finished and correct - only the exit hangs - so a scripted
+  loop that waits on the process would stall forever. `config.ai_timeout` bounds the model request, not
+  this shutdown wait, so it does not cover it. If a run appears to hang, check whether
+  `.preflight/review.json` was written; if it was, stop the process and use the review. Not fixed by
+  wrapping the command in a shorter timeout, which would risk cutting off a slow but valid review - the
+  silent-truncation failure this project works hardest to avoid. See `docs/TROUBLESHOOTING.md`.
 
 ## [0.1.0] - 2026-10-07
 

@@ -734,14 +734,20 @@ PY
   # the assumption that plain-diff mode renders one. Every other check feeds synthetic tables, so a real
   # review.md is the only place that assumption can be falsified - and if it breaks, the marker goes
   # inert and a partial review reads as complete. Cheap to assert here, where a real review already ran.
-  if [ -f "$d/.preflight/review.md" ]; then
-    if grep -q '</table>' "$d/.preflight/review.md"; then
-      ok "a real review renders the table the coverage marker relies on" "REQ-HOOK-30"
-    else
-      bad "a real review renders the table the coverage marker relies on" "REQ-HOOK-30" \
-          "a </table> in review.md" "absent" \
-          "the coverage marker's structural restriction is inert on real output; re-check files/preflight's COVERAGE_RE handling"
-    fi
+  #
+  # An ABSENT review.md is a failure, not a skip: this id exists only to make the assumption falsifiable,
+  # and a version that reports nothing when the artifact is missing would silently retire the requirement
+  # - the same "a guard that did not run proves nothing" rule the selfcheck applies to skips.
+  if [ ! -f "$d/.preflight/review.md" ]; then
+    bad "a real review renders the table the coverage marker relies on" "REQ-HOOK-30" \
+        "a review.md to inspect" "no review.md written" \
+        "the review reported a pass but wrote no review.md, so the marker's structural assumption cannot be checked"
+  elif grep -q '</table>' "$d/.preflight/review.md"; then
+    ok "a real review renders the table the coverage marker relies on" "REQ-HOOK-30"
+  else
+    bad "a real review renders the table the coverage marker relies on" "REQ-HOOK-30" \
+        "a </table> in review.md" "absent" \
+        "the coverage marker's structural restriction is inert on real output; re-check files/preflight's COVERAGE_RE handling"
   fi
 }
 

@@ -80,6 +80,38 @@ Shipped on `main`; kept for the reasoning behind each change, not as work to pic
 Wanted; needs a little design. `[x]` here means shipped; where a `**Still open**` paragraph follows, that
 paragraph is the remaining work - not every `[x]` item has one, and an item without it is simply done.
 
+- [ ] **The review is not stable enough to converge on a prose-heavy diff (MEASURED).** A convergence test
+      over this branch - five passes, then re-runs on unchanged content - never reached the target of
+      passing in 2-3 passes. Every pass reported all-NEW findings (`new=N/N`), never a repeat:
+
+      | pass | findings | what they were about |
+      |---|---|---|
+      | 1 | 1 | stale `--help` text (code) |
+      | 2 | 1 | `security_concerns: true` crashed the summary (code) |
+      | 3 | 1 | untracked files unreviewed but accepted by the hook (code, real bypass) |
+      | 4 | 1 | `REQ-HOOK-37` rows missing from `tests/README.md` (docs) |
+      | 5 | **0** | clean; gate pass |
+      | re-run A | 2 | ROADMAP and CI comments (docs) |
+      | re-run B | 1 | the container guard added in pass 2's fix (code) |
+
+      **The re-runs were on byte-identical content and returned 0, then 2, then 1 findings** - different
+      findings each time, so this is generation variance, not a stale comparison. `temperature` is 0.2 and
+      `reasoning_effort` is unset (pr-agent's `medium`), so a large diff samples a different subset of
+      plausible concerns per run.
+
+      The consequence: **`new=N/M` cannot work as a stopping signal while the finding set itself is
+      unstable.** Fixing a round's findings does not reduce the next round's count, because the next round
+      is largely re-rolling rather than re-checking. The test did show the config changes working - passes
+      stayed at ONE finding instead of cascading, and the loop reached a genuine `issues=0`.
+
+      Untested, cheapest first: (1) `[config] seed` to pin sampling, trading coverage for reproducibility -
+      the one lever that directly attacks this; (2) smaller diffs per review, since the variance may scale
+      with size and `commit`-scope reviews are far smaller; (3) `temperature` of 0.
+
+      **A caveat on this test's own validity:** the branch is ~750 insertions with a high prose-to-code
+      ratio, and two re-runs found issues in prose written minutes earlier - the worst case for stability,
+      not the average one.
+
 - [ ] **Decide what replaces the removed `extra_instructions` (OPEN EXPERIMENT).** The injected text was
       removed because capturing the literal prompt showed it arguing against pr-agent's own guidance in
       the same system prompt (which says "prefer not reporting over guessing" and "an empty list is

@@ -196,6 +196,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `commit` scope never showed untracked files to the model, while the hook accepted them as
+  reviewed.** The diff handed to pr-agent was a bare `git diff HEAD`, but the scope's own comment said
+  `git diff HEAD <tree>`. The snapshot tree is built with `git add -A` and stored as `reviewed_tree`,
+  which is what the pre-commit hook compares against - so a new file was simultaneously never reviewed and
+  accepted as reviewed, and a defect in it could be committed with the containment check passing. Verified
+  before the fix: with a new file containing a divide-by-zero the model was handed no diff for it at all,
+  while `ls-tree reviewed_tree` listed it. The diff is now taken against the snapshot tree with an explicit
+  `HEAD` base. `REQ-HOOK-37` records what the stub `pr-agent` received, and reverting fails it.
+- **A malformed review took the whole summary line with it.** The line's fields are read by an agent, so
+  each now degrades to `n/a` instead of raising: `security_concerns` was still coerced with a raw
+  `.strip()`, so a JSON boolean (which the model returns, and which `preflight-gate` has its own guard for)
+  raised `AttributeError`; `key_issues_to_review` fed `len()` directly, so `"no issues"` reported
+  `issues=9`; and a `review` or `usage` that was not an object raised before any field was read. The gate's
+  verdict is unchanged - it still exits 3 on a malformed review - this only keeps `issues=`, `new=` and
+  `coverage=` visible. `REQ-HOOK-35` covers all three shapes.
 - **The `post-commit` advisory warned on every default-scope commit, and named a scope that no longer
   exists.** It recognised only `scope=worktree` as enforced, but `commit` became the default scope - and
   `files/preflight-hook` accepts `commit|worktree`. So the common case printed *"the last review used

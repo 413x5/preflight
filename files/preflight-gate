@@ -8,24 +8,115 @@
 #       PREFLIGHT_GATE_MAX_EFFORT=N    fail when estimated_effort_to_review exceeds N
 set -euo pipefail
 json="${1:-${PREFLIGHT_DIR:-.preflight}/review.json}"
+
+# The gate is what a coding agent loops on, so its exits and its two opt-outs have to be answerable
+# from the command itself rather than only from the bundle's docs.
+case "${1:-}" in
+  -h|--help|help)
+    cat <<'EOF'
+preflight-gate — machine check over the latest review (default .preflight/review.json).
+
+Usage:  preflight-gate [review.json]
+
+Exit:   0  pass
+        1  changes required, or key issues present
+        2  security concerns present
+        3  no review yet (run 'preflight review' first)
+
+Environment:
+  PREFLIGHT_GATE_ALLOW_ISSUES=1   ignore key issues (security and merge_recommendation still fail)
+  PREFLIGHT_GATE_MAX_EFFORT=N     fail when estimated_effort_to_review exceeds N
+EOF
+    exit 0 ;;
+esac
+
 if [ ! -f "$json" ]; then echo "preflight-gate: no review at $json (run 'preflight review' first)" >&2; exit 3; fi
 python3 - "$json" <<'PY'
 import json, os, sys
-d = json.load(open(sys.argv[1]))
-r = d.get('review') or {}
+
+# The review is model output, so each field's JSON type is whatever the model chose. `security_concerns`
+# and `relevant_tests` come back as real booleans often enough to matter, and a bare `.strip()` on a
+# bool crashed the gate with a traceback instead of reporting a verdict. A crash here is not a neutral
+# failure: the commit hook reads any non-zero exit as "the review did not pass", and `preflight review`
+# records that exit as the sidecar verdict - so a type quirk silently turned a clean review into a
+# verdict of `fail` and blocked commits. Coerce every field to text.
+def as_text(v):
+    if v is None:
+        return ''
+    if isinstance(v, bool):
+        return 'yes' if v else 'no'
+    # A falsy non-bool (0, [], {}) means "nothing here", which is what the pre-existing
+    # `(field or '')` idiom encoded. Without this, `security_concerns: 0` became the STRING '0',
+    # which `is_no` does not recognise - so a clean review was read as having security concerns,
+    # exited 2, and was recorded as `fail`, blocking every commit. Preserve the old semantics.
+    if not v:
+        return ''
+    return str(v).strip()
+
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+except Exception as exc:
+    # Exit 3 is "no usable review", which is what an unreadable one amounts to; a traceback would be
+    # indistinguishable from a genuine gate failure.
+    print(f'preflight-gate: cannot read {sys.argv[1]}: {exc}', file=sys.stderr)
+    sys.exit(3)
+
+# Guard the SHAPE as well as the parse. Valid JSON that is not a review object (`[1,2,3]`, or
+# `"review": "..."`) still crashed with an AttributeError, which has the same effect as the bool
+# crash described above: a non-zero exit that the hook and `preflight review` both read as a failed
+# verdict. A wholly ABSENT `review` key keeps its long-standing meaning (no findings, fields n/a), but
+# a key that is present and not an object - including an explicit `null` - is malformed and is
+# reported rather than passed over: this is the enforcement gate, so "the model returned no review
+# object" must not read as "the review was clean".
+if not isinstance(d, dict):
+    print(f'preflight-gate: {sys.argv[1]} is not a review object (JSON {type(d).__name__})', file=sys.stderr)
+    sys.exit(3)
+if 'review' in d:
+    r = d['review']
+    if not isinstance(r, dict):
+        print(f'preflight-gate: {sys.argv[1]} has a non-object "review" (JSON {type(r).__name__})', file=sys.stderr)
+        sys.exit(3)
+else:
+    r = {}
 eff = r.get('estimated_effort_to_review_[1-5]')
-risk = (r.get('risk_level') or '').strip()
-rec = (r.get('merge_recommendation') or '').strip()
-tests = (r.get('relevant_tests') or '').strip()
-issues = r.get('key_issues_to_review') or []
-sec = (r.get('security_concerns') or '').strip()
-is_no = lambda v: v.lower() in ('', 'no', 'none', 'n/a')
+risk = as_text(r.get('risk_level'))
+rec = as_text(r.get('merge_recommendation'))
+tests = as_text(r.get('relevant_tests'))
+issues = r.get('key_issues_to_review')
+# The last field without a guard, and the one this file's whole stance is about: a truthy non-list
+# (`true`, `3`) survives `or []` and then breaks `len()` and the loop below, which is another
+# uncaught traceback - and therefore another clean review recorded as `fail` that blocks commits.
+# Absent or empty keeps its long-standing meaning; anything that is not a list is reported, not
+# iterated.
+if issues is None:
+    issues = []
+if not isinstance(issues, list):
+    print(f'preflight-gate: {sys.argv[1]} has a non-list "key_issues_to_review" ({type(issues).__name__})', file=sys.stderr)
+    sys.exit(3)
+sec = as_text(r.get('security_concerns'))
+is_no = lambda v: v.lower() in ('', 'no', 'none', 'n/a', 'false')
 print(f"preflight-gate: effort={eff} risk={risk or 'n/a'} merge={rec or 'n/a'} tests={tests or 'n/a'} issues={len(issues)} security={'yes' if not is_no(sec) else 'no'}")
 for it in issues:
-    print(f"preflight-gate:   - {(it.get('relevant_file') or '').strip()}: {(it.get('issue_header') or '').strip()}")
-me = os.environ.get('PREFLIGHT_GATE_MAX_EFFORT')
-if me and eff is not None and int(eff) > int(me):
-    print(f"preflight-gate: FAIL effort {eff} > {me}"); sys.exit(1)
+    if isinstance(it, dict):
+        print(f"preflight-gate:   - {as_text(it.get('relevant_file'))}: {as_text(it.get('issue_header'))}")
+    else:
+        print(f"preflight-gate:   - {as_text(it)}")
+# Effort can arrive as an int, a float or a numeric string; anything else is simply not comparable, so
+# the clamp is skipped rather than crashing the gate. OverflowError is in the tuple because JSON has
+# no infinity: a literal like 1e999 (or a 400-digit integer) parses to a non-finite float, and
+# `int(float('inf'))` raises OverflowError, not ValueError - which would be an uncaught traceback, the
+# very failure class this file works to avoid.
+try:
+    eff_n = int(float(eff))
+except (TypeError, ValueError, OverflowError):
+    eff_n = None
+try:
+    me = int(os.environ['PREFLIGHT_GATE_MAX_EFFORT']) if os.environ.get('PREFLIGHT_GATE_MAX_EFFORT') else None
+except ValueError:
+    me = None
+if me is not None and eff_n is not None and eff_n > me:
+    print(f"preflight-gate: FAIL effort {eff_n} > {me}"); sys.exit(1)
 if not is_no(sec):
     print('preflight-gate: FAIL security concerns present'); sys.exit(2)
 if rec.lower() == 'changes_required':

@@ -495,6 +495,76 @@ case_missing_helper_fails_closed() {
   else bad "a missing helper fails the commit closed" "REQ-HOOK-22" 1 "$got" ""; fi
 }
 
+case_post_commit_advisory() {
+  # The second bundled hook (files/githooks/post-commit). It cannot block anything - a post-commit
+  # hook runs after the commit exists - so its only job is to SPEAK when enforcement silently did not
+  # apply, and its own failure mode is silence. It decides by reading `scope` out of the sidecar, so a
+  # sidecar it cannot read must warn rather than pass quietly: "could not read it" and "it was
+  # verified" look identical from the outside otherwise.
+  #
+  # Driven by invoking the committed hook with `sh` from the repo root, which is how git invokes it.
+  # A real commit cannot reach this state: the pre-commit hook reads the same sidecar and fails closed,
+  # so a malformed one is blocked long before post-commit runs. Testing the hook directly is the only
+  # way to cover its own logic.
+  local d; d="$(new_repo postcommit)"
+  reset_case "$d"
+  cp "$repo_root/files/githooks/post-commit" "$d/.githooks/post-commit"
+  chmod +x "$d/.githooks/post-commit"
+  local post="$d/.githooks/post-commit" meta="$d/.preflight/review.meta.json"
+
+  run_post() { ( cd "$d" && sh "$post" ) 2>&1; }
+  set_meta() { mkdir -p "$d/.preflight"; printf '%s\n' "$1" > "$meta"; }
+
+  local problems='' out
+
+  # Absent sidecar: no review has run, and pre-commit would have refused the commit first - so this is
+  # the one unreadable case that must stay quiet, or every fresh clone would warn on its first commit.
+  rm -rf "$d/.preflight"
+  out="$(run_post)"
+  [ -z "$out" ] || problems="$problems
+        | absent sidecar should be silent, got: $out"
+
+  # A worktree-scope review is the enforced case, so nothing to say.
+  set_meta '{"scope": "worktree", "reviewed_tree": "abc"}'
+  out="$(run_post)"
+  [ -z "$out" ] || problems="$problems
+        | worktree scope should be silent, got: $out"
+
+  # A head-scope review covers already-committed content, so it cannot vouch for this commit.
+  set_meta '{"scope": "head", "reviewed_tree": ""}'
+  out="$(run_post)"
+  printf '%s' "$out" | grep -q 'scope=head' || problems="$problems
+        | head scope should warn about scope=head, got: $out"
+
+  # Not JSON at all: the reader cannot tell whether this commit was covered, so it must not be silent.
+  set_meta '{ this is not json'
+  out="$(run_post)"
+  printf '%s' "$out" | grep -q 'cannot read' || problems="$problems
+        | malformed sidecar should warn, got: $out"
+
+  # Valid JSON with no `scope` key - the shape a review from an older or different bundle could leave.
+  set_meta '{"reviewed_tree": "abc"}'
+  out="$(run_post)"
+  printf '%s' "$out" | grep -q 'cannot read' || problems="$problems
+        | scope-less sidecar should warn, got: $out"
+
+  # No python3: same reasoning, and the case that was actually hit in the field. git must stay on PATH
+  # or the hook exits early at `git rev-parse` and the warning is never reached - which is the
+  # difference between testing this branch and testing nothing.
+  set_meta '{"scope": "worktree"}'
+  local nopy="$work/postcommit-nopy" gitbin; gitbin="$(command -v git)"
+  mkdir -p "$nopy"
+  ln -sf "$gitbin" "$nopy/git"
+  out="$( cd "$d" && env PATH="$nopy" /bin/sh "$post" 2>&1 )"
+  printf '%s' "$out" | grep -q 'python3 not found' || problems="$problems
+        | missing python3 should warn, got: $out"
+
+  if [ -z "$problems" ]; then ok "the post-commit advisory speaks up when it cannot read the sidecar" "REQ-HOOK-27"
+  else bad "the post-commit advisory speaks up when it cannot read the sidecar" "REQ-HOOK-27" \
+        "silent-or-warn as listed" "see below" "$problems
+"; fi
+}
+
 # ---------------------------------------------------------------------------- live end-to-end
 # Needs the installed helpers and an API key, so it is skipped when either is absent.
 
@@ -556,7 +626,7 @@ REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK
 #   bypass                assert the documented escape hatches work.
 #   orthogonal            do not test blocking at all, or test a different file.
 insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
-REQ-HOOK-22 REQ-HOOK-26'
+REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -678,7 +748,8 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_artifacts_survive_a_block \
     case_worktree_enforced \
     case_missing_helper_fails_closed \
-    case_missing_helper_fails_closed_unset_home
+    case_missing_helper_fails_closed_unset_home \
+    case_post_commit_advisory
   say ""
 fi
 

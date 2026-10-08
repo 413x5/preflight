@@ -3,9 +3,14 @@
 #
 # Usage:  preflight [command] [args...]
 #   command : review (default) | describe | improve | ask "<question>" | hook
+#             --help / -h and --version / -V are handled before anything else.
 #
 #   hook    — verify that the content being committed was already reviewed. This is what a repo's
 #             .githooks/pre-commit calls; it is read-only and never runs a review. See docs/DESIGN.md.
+#
+# Base (PREFLIGHT_BASE):
+#   the ref the diff is taken against. Unset, it is resolved as origin/HEAD, then the remote's own
+#   HEAD, then origin/main|master, then main|master. Set it to target anything else.
 #
 # Scope (PREFLIGHT_SCOPE):
 #   worktree (default) — reviews committed + UNCOMMITTED + untracked changes, so you can
@@ -22,23 +27,111 @@
 # Never modifies your index/HEAD/history, and never posts to GitHub.
 set -euo pipefail
 
-if [ -f "${HOME}/.config/preflight/ensure-link.sh" ]; then
-  . "${HOME}/.config/preflight/ensure-link.sh"
-fi
+here="$(cd "$(dirname "$0")" && pwd)"
+
+# The config directory, honouring PREFLIGHT_HOME exactly as install.sh defines it. Defining it once
+# matters: the version lookup, the secrets relink, the hook helper and the review config URL all live
+# here, and if only some of them honoured the override they could read different directories - the
+# version from one tree, the config from another.
+cfgdir="${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}"
+
+# An installed copy has no way to tell you what it is, which makes "did the bundle update on this
+# machine?" unanswerable except by re-running install.sh and hoping. There was a real session where
+# exactly that question went unanswered. One source of truth: files/VERSION, installed next to the
+# config. Looked up beside the script first (a checkout, or a vendored copy) and then in the config
+# dir - PREFLIGHT_HOME overrides that dir exactly as it does in install.sh, so a throwaway-prefix
+# install can still report its version. `unknown` rather than an error: a missing VERSION should not
+# make the tool unusable.
+#
+# ${HOME:-} and not $HOME: bash expands every word of the `for` list before the loop starts, so a
+# bare $HOME is evaluated even when the FIRST candidate would have matched - and under `set -u` an
+# unset HOME (`env -u HOME preflight --version`) would abort instead of printing a version. The
+# example hook guards HOME for the same reason (REQ-HOOK-26); this is the same trap one level up.
+bundle_version() {
+  local cand
+  for cand in "$here/VERSION" "$cfgdir/VERSION"; do
+    if [ -f "$cand" ]; then
+      head -n1 "$cand" 2>/dev/null || true
+      return 0
+    fi
+  done
+  printf 'unknown\n'
+}
+
+usage() {
+  cat <<'EOF'
+preflight — review the working tree (no commit, no GitHub round trip).
+
+Usage:  preflight [command] [args...]
+
+Commands:
+  review (default)     review the working tree vs the base branch
+                       -> .preflight/review.md + .preflight/review.json
+  describe             generate a PR description -> .preflight/description.md
+  improve              suggest concrete code changes -> .preflight/improve.md
+  ask "<question>"     ask about the diff -> .preflight/answer.md
+  hook                 verify that the content being committed was reviewed (used by the
+                       repo's own .githooks/pre-commit; read-only, never runs a review)
+
+Options:
+  -h, --help           this text
+  -V, --version        the installed bundle version
+
+Environment:
+  PREFLIGHT_BASE       ref to diff against (default: origin/HEAD, then the remote's HEAD,
+                       then origin/main|master, then main|master)
+  PREFLIGHT_SCOPE      worktree (default) | head  (head cannot be enforced by the hook)
+  PREFLIGHT_DIR        artifact dir (default .preflight)
+  PREFLIGHT_HOME       config dir (default ~/.config/preflight) - the toml, the
+                       secrets relink and the hook helper are all read from here
+  PREFLIGHT_SKIP=1     (hook only) bypass the commit check once
+
+Config:  <dir>/preflight.toml, where <dir> is PREFLIGHT_HOME or ~/.config/preflight
+         (any OpenAI-compatible endpoint; see README "Using another provider")
+Loop:    preflight review && preflight-gate   (exit 0 = pass)
+         preflight-gate --help                for the gate's exits and options
+Docs:    https://github.com/413x5/preflight
+EOF
+}
 
 cmd="review"
 if [ "$#" -gt 0 ]; then cmd="$1"; shift; fi
+
+# Answered before anything touches git or the config - including before ensure-link.sh is sourced
+# below - so `preflight --help` works anywhere: outside a repository, and on a machine where the
+# secrets relink helper wants to print something first. The ordering matters here because this is the
+# first command a new user runs after installing.
+case "$cmd" in
+  -h|--help|help)          usage; exit 0 ;;
+  -V|--version|version)    printf 'preflight %s\n' "$(bundle_version)"; exit 0 ;;
+esac
+
+if [ -f "${cfgdir}/ensure-link.sh" ]; then
+  . "${cfgdir}/ensure-link.sh"
+fi
+
+# Reject an unknown command BEFORE resolving the base or touching git: otherwise a typo prints a
+# base-resolution line and possibly a fetch first, which buries the one line that matters.
+case "$cmd" in
+  review|review_pr|describe|describe_pr|improve|improve_code|ask|ask_question|hook) ;;
+  *) echo "preflight: unknown command '$cmd' (use review|describe|improve|ask; 'preflight --help' for the full list)" >&2; exit 2 ;;
+esac
+
 dir="${PREFLIGHT_DIR:-.preflight}"
 scope="${PREFLIGHT_SCOPE:-worktree}"
 
 # `hook` is a verifier, not a review: it must not fetch, snapshot or require a config. Dispatch it
 # before any of that, because it runs on every commit.
+#
+# ${HOME:-} here and above, for the reason bundle_version documents: this script runs under `set -u`,
+# and an unset HOME (`env -u HOME git commit` - the case REQ-HOOK-26 guards in the example hook) must
+# degrade to "helper not found" and refuse the commit, not abort with "HOME: unbound variable". A
+# bare $HOME made the outer helper panic before it could reach the guard the inner one has.
 if [ "${cmd:-review}" = "hook" ]; then
-  here="$(cd "$(dirname "$0")" && pwd)"
-  for cand in "$here/preflight-hook" "${HOME}/.config/preflight/preflight-hook"; do
+  for cand in "$here/preflight-hook" "${cfgdir}/preflight-hook"; do
     if [ -f "$cand" ]; then exec sh "$cand" "$@"; fi
   done
-  echo "preflight: hook: preflight-hook not found (looked next to this script and in ~/.config/preflight)" >&2
+  echo "preflight: hook: preflight-hook not found (looked next to this script and in ${cfgdir})" >&2
   exit 1
 fi
 
@@ -46,9 +139,57 @@ root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo 'preflight: not in
 cd "$root"
 git rev-parse --verify -q HEAD >/dev/null 2>&1 || { echo 'preflight: repository has no commits yet' >&2; exit 3; }
 git fetch --quiet origin 2>/dev/null || echo 'preflight: warning: could not fetch origin' >&2
-base="$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || true)"
-case "$base" in ''|'origin/HEAD') base='origin/main' ;; esac
-git rev-parse --verify -q "$base" >/dev/null 2>&1 || base='main'
+
+# The base to diff against. First candidate that resolves to a commit wins:
+#
+#   1. PREFLIGHT_BASE, when set - the override, and the only way to deliberately target another ref.
+#   2. origin/HEAD, the remote's own record of its default branch (a full clone creates it).
+#   3. the remote's HEAD asked directly, because a `--single-branch` clone and a hand-added remote
+#      never create the LOCAL origin/HEAD symref, so step 2 silently has nothing to read.
+#   4. origin/main, origin/master, then main, master - the conventional names, remote first.
+#
+# Falling through to a bare `main` without checking (the old behaviour) was a real failure: in a
+# repository whose default branch is not `main`, `git diff main...HEAD` was fatal, pr-agent exited 2
+# with "No diff content received", and - worst of it - the artifact dir was left EMPTY. An empty
+# artifact dir is exactly what the commit hook reports as "no review found", so a base-resolution
+# failure turned into every later commit being blocked for a reason that had nothing to do with the
+# commit. Failing here, loudly, is the difference between a wrong answer and a wrong answer with
+# nothing to look at.
+resolve_base() {
+  local cand
+  if [ -n "${PREFLIGHT_BASE:-}" ]; then
+    if git rev-parse --verify -q "${PREFLIGHT_BASE}^{commit}" >/dev/null 2>&1; then
+      printf '%s\n' "${PREFLIGHT_BASE}"; return 0
+    fi
+    echo "preflight: PREFLIGHT_BASE='${PREFLIGHT_BASE}' does not resolve to a commit" >&2
+    return 1
+  fi
+  cand="$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || true)"
+  case "$cand" in ''|'origin/HEAD') cand='' ;; esac
+  if [ -z "$cand" ]; then
+    # `ls-remote --symref` prints "ref: refs/heads/<default>\tHEAD" without needing the local symref.
+    # Any failure (no network, no remote) simply falls through to the conventional names below.
+    cand="$(git ls-remote --symref origin HEAD 2>/dev/null \
+             | awk '/^ref:/ { sub("refs/heads/", "", $2); print "origin/" $2; exit }')" || cand=''
+  fi
+  if [ -n "$cand" ] && git rev-parse --verify -q "${cand}^{commit}" >/dev/null 2>&1; then
+    printf '%s\n' "$cand"; return 0
+  fi
+  for cand in origin/main origin/master main master; do
+    if git rev-parse --verify -q "${cand}^{commit}" >/dev/null 2>&1; then
+      printf '%s\n' "$cand"; return 0
+    fi
+  done
+  return 1
+}
+
+base="$(resolve_base)" || {
+  echo 'preflight: cannot tell which branch to diff against.' >&2
+  echo 'preflight: looked for PREFLIGHT_BASE, origin/HEAD, the remote HEAD, then origin/main|master and main|master.' >&2
+  echo 'preflight: name it explicitly, e.g.  PREFLIGHT_BASE=origin/develop preflight review' >&2
+  exit 4
+}
+echo "preflight: base=${base}" >&2
 
 # Ensure the artifact dir is git-ignored in THIS repo (per-repo git metadata, never committed),
 # so the worktree snapshot below can't sweep the artifacts into the reviewed diff.
@@ -87,11 +228,11 @@ case "$cmd" in
   describe|describe_pr) out_md="$dir/description.md"; out_json='' ;;
   improve|improve_code) out_md="$dir/improve.md";     out_json='' ;;
   ask|ask_question)     out_md="$dir/answer.md";      out_json='' ;;
-  *) echo "preflight: unknown command '$cmd' (use review|describe|improve|ask)" >&2; exit 2 ;;
+  *) echo "preflight: unknown command '$cmd' (use review|describe|improve|ask; 'preflight --help' for the full list)" >&2; exit 2 ;;
 esac
 
 mkdir -p "$dir"
-cfg="file://${HOME}/.config/preflight/preflight.toml"
+cfg="file://${cfgdir}/preflight.toml"
 echo "preflight: ${cmd} (scope=${scope}) — $(git rev-parse --abbrev-ref HEAD) vs ${base} -> ${dir}/" >&2
 
 if [ -n "$out_json" ]; then
@@ -111,11 +252,20 @@ if [ "$cmd" = 'review' ] || [ "$cmd" = 'review_pr' ]; then
     verdict="fail"
     gate_code=0
     gate_bin=''
-    for cand in "$(cd "$(dirname "$0")" && pwd)/preflight-gate" "${HOME}/.local/bin/preflight-gate"; do
+    for cand in "$(cd "$(dirname "$0")" && pwd)/preflight-gate" "${HOME:-}/.local/bin/preflight-gate"; do
       if [ -f "$cand" ]; then gate_bin="$cand"; break; fi
     done
     if [ -n "$gate_bin" ]; then
-      PREFLIGHT_DIR="$dir" sh "$gate_bin" >/dev/null 2>&1 || gate_code=$?
+      # Run it with the interpreter its shebang names, NOT `sh`. preflight-gate is bash (`set -o
+      # pipefail`), and on Debian/Ubuntu /bin/sh is dash, which rejects pipefail outright - the gate
+      # died on its first line, the exit code was read as a failed verdict, and every commit was then
+      # blocked with "the last review did not pass" for a reason unrelated to the review. Executing it
+      # directly honours the shebang, and there is deliberately no `|| sh` fallback: that would
+      # reintroduce exactly this silently-wrong verdict on any host where the shebang cannot be used.
+      PREFLIGHT_DIR="$dir" "$gate_bin" >/dev/null 2>&1 || gate_code=$?
+      if [ "$gate_code" = 126 ] || [ "$gate_code" = 127 ]; then
+        echo "preflight: warning: could not execute ${gate_bin}; the gate verdict is unknown" >&2
+      fi
     else
       gate_code=127
     fi

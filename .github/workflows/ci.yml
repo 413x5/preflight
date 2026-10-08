@@ -75,7 +75,7 @@ jobs:
           for f in preflight preflight-pr preflight-gate; do
             [ -x "$tmp/bin/$f" ] || { echo "installer did not install $f"; rc=1; }
           done
-          for f in preflight.toml preflight-hook ensure-link.sh; do
+          for f in preflight.toml preflight-hook ensure-link.sh VERSION; do
             [ -f "$tmp/cfg/$f" ] || { echo "installer did not write $f"; rc=1; }
           done
           [ -x "$tmp/cfg/preflight-hook" ] || { echo "preflight-hook is not executable"; rc=1; }
@@ -112,6 +112,109 @@ jobs:
         shell: bash
         # Offline cases only: the live-endpoint case needs a paid key, and CI must not depend on one.
         run: ./tests/run.sh hook
+
+      - name: Version is single-sourced and documented
+        shell: bash
+        # `preflight --version` and install.sh both read files/VERSION, so an installed copy can say
+        # what it is. Three things have to agree or the number is a lie: the file, the CHANGELOG's
+        # released heading for it, and the help text's promise that -V reports it. The trigger was a
+        # real session that could not answer "is the bundle current on this machine?" - which is the
+        # question this exists to make answerable.
+        #
+        # A version bump therefore lands with its CHANGELOG heading in the SAME commit, which is
+        # Keep-a-Changelog discipline anyway. `--version` reports the release the tree is based on
+        # (0.1.0 plus unreleased changes reads as 0.1.0, as a checkout-based version always does).
+        run: |
+          rc=0
+          v="$(head -n1 files/VERSION)"
+          case "$v" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "files/VERSION does not look like x.y.z: '$v'"; rc=1 ;;
+          esac
+          grep -q "^## \[$v\]" CHANGELOG.md \
+            || { echo "CHANGELOG.md has no released '## [$v]' heading"; rc=1; }
+          ./files/preflight --version | grep -q "$v" \
+            || { echo "'preflight --version' does not report $v"; rc=1; }
+          [ "$rc" = 0 ] && echo "version $v is consistent"
+          exit "$rc"
+
+      - name: Gate tolerates the review's real JSON shapes
+        shell: bash
+        # A regression guard for a crash that turned a clean review into a blocked commit: the gate
+        # called .strip() on fields that arrive as JSON booleans ("relevant_tests": true), tracebacked,
+        # and the commit hook read the non-zero exit as "the review did not pass" - recording `fail`
+        # as the sidecar verdict. No case in tests/run.sh covers preflight-gate, so this checks the
+        # shapes the model actually produces, plus that a genuinely failing review still fails.
+        #
+        # `if ! <cmd>`, never `cmd; [ "$?" = N ]`: Actions runs this with `bash -e`, so a command that
+        # exits non-zero (which is the point of several checks here) aborts the step before $? is read.
+        run: |
+          rc=0
+          d="$(mktemp -d)"
+          gate="$PWD/files/preflight-gate"
+          inside() { ( cd "$d" && PREFLIGHT_DIR=.preflight bash "$gate" ); }
+          put() { mkdir -p "$d/.preflight"; printf '%s' "$1" > "$d/.preflight/review.json"; }
+
+          # Booleans where a string was assumed: this is the shape that used to traceback.
+          put '{"review":{"estimated_effort_to_review_[1-5]":3,"risk_level":"low","merge_recommendation":"safe_to_merge","relevant_tests":true,"security_concerns":false,"key_issues_to_review":[]}}'
+          out="$(inside 2>&1)" || rc=1
+          case "$out" in *Traceback*) echo "gate tracebacked on boolean fields"; rc=1 ;; esac
+          echo "$out" | grep -q 'PASS' || { echo "gate did not PASS a clean review: $out"; rc=1; }
+
+          # A real security concern expressed as a boolean must still fail, with exit 2.
+          put '{"review":{"security_concerns":true,"key_issues_to_review":[]}}'
+          # Capture the status FIRST: inside the `elif` body `$?` would be the status of the
+          # preceding `[ ... ]` test (0), not the gate's, so the diagnostic would always read
+          # "exited 0".
+          st=0; inside >/dev/null 2>&1 || st=$?
+          if [ "$st" = 0 ]; then echo "bool security_concerns did not fail"; rc=1
+          elif [ "$st" != 2 ]; then echo "bool security_concerns exited $st, expected 2"; rc=1; fi
+
+          # Malformed JSON is "no usable review" (exit 3), not a traceback. Exit 3 is the expected
+          # outcome here, so it must not be treated as a failure of this check.
+          put '{ not json'
+          out="$(inside 2>&1)" || true
+          case "$out" in *Traceback*) echo "gate tracebacked on malformed json"; rc=1 ;; esac
+          echo "$out" | grep -q 'cannot read' || { echo "malformed json was not reported: $out"; rc=1; }
+
+          # Valid JSON with the wrong SHAPE: a top-level array, or a "review" that is not an object.
+          # Both used to AttributeError - the same non-zero-exit-becomes-a-failed-verdict trap.
+          for shape in '[]' '"x"' '{"review":"nope"}' '{"review":[1,2]}' '{"review":null}' \
+                       '{"review":{"key_issues_to_review":true}}' \
+                       '{"review":{"key_issues_to_review":3}}' \
+                       '{"review":{"estimated_effort_to_review_[1-5]":1e999}}'; do
+            put "$shape"
+            out="$(inside 2>&1)" || true
+            case "$out" in *Traceback*) echo "gate tracebacked on shape $shape"; rc=1 ;; esac
+            echo "$out" | grep -q 'preflight-gate: ' || { echo "shape $shape was not reported"; rc=1; }
+          done
+
+          # Falsy values that are NOT booleans must still read as "no concern". `0`/`[]`/`{}` became
+          # their textual form ('0', '[]') and were read as a concern, failing a clean review with
+          # exit 2 - which the sidecar then recorded as a blocked verdict.
+          for falsy in '0' '[]' '{}' '""' 'null' '"No"' '"n/a"'; do
+            put "{\"review\":{\"security_concerns\":$falsy,\"key_issues_to_review\":[]}}"
+            out="$(inside 2>&1)" || true
+            case "$out" in *Traceback*) echo "gate tracebacked on security_concerns=$falsy"; rc=1 ;; esac
+            echo "$out" | grep -q 'PASS' || { echo "security_concerns=$falsy was not treated as no concern: $out"; rc=1; }
+          done
+
+          # ...while a real concern, however expressed, must still fail.
+          for truthy in 'true' '1' '"SQL injection"'; do
+            put "{\"review\":{\"security_concerns\":$truthy,\"key_issues_to_review\":[]}}"
+            if inside >/dev/null 2>&1; then echo "security_concerns=$truthy did not fail"; rc=1
+            else st=$?; [ "$st" = 2 ] || { echo "security_concerns=$truthy exited $st, expected 2"; rc=1; }; fi
+          done
+
+          # The effort clamp still parses a numeric field.
+          put '{"review":{"estimated_effort_to_review_[1-5]":5,"key_issues_to_review":[]}}'
+          if ( cd "$d" && PREFLIGHT_DIR=.preflight PREFLIGHT_GATE_MAX_EFFORT=3 bash "$gate" ) >/dev/null 2>&1; then
+            echo "effort clamp did not fail at 5 > 3"; rc=1
+          fi
+
+          rm -rf "$d"
+          [ "$rc" = 0 ] && echo "gate field shapes OK"
+          exit "$rc"
 
       - name: Commit-hook selfcheck
         shell: bash

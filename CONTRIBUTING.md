@@ -13,6 +13,7 @@ is a default, not an assumption.
 | `files/preflight`, `files/preflight-pr`, `files/preflight-gate` | The helpers installed into `~/.local/bin` |
 | `files/preflight-hook` | The commit-time verifier; a repo's `.githooks/pre-commit` calls it |
 | `files/githooks/` | Example hooks a repo copies into its own `.githooks/` |
+| `files/VERSION` | The bundle version, the single source of truth for `preflight --version` and `install.sh` |
 | `files/ensure-link.sh` | Re-links the secrets file after `uv tool upgrade` |
 | `files/secrets.toml.example` | The secrets template - **never** a real key |
 | `AGENTS-review-snippet.md` | The block pasted into a repo's `AGENTS.md` |
@@ -50,7 +51,7 @@ run means a green CI run:
 The live-endpoint case (`./tests/run.sh e2e`) is **not** run in CI: it needs a paid key, and CI should
 not depend on one.
 
-The **selfcheck** exists because a green suite is not proof the hook enforces. Nine of the 25 offline
+The **selfcheck** exists because a green suite is not proof the hook enforces. Ten of the 26 offline
 cases pass with the hook stubbed out entirely - they assert acceptance (`commit -a`, a reviewed deletion,
 a reviewed rename) or exercise a deliberate bypass, so blocking nothing satisfies them. The selfcheck runs
 the whole suite against a neutered hook and requires exactly the enforcement-sensitive cases to fail, and

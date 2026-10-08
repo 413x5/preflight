@@ -12,6 +12,18 @@ Small, ready to do.
 
 ## Done
 
+- [x] **Make the bundle's version answerable, and stop two silent failures** (found by reviewing a
+      consuming repo's session log). `preflight --version` / `--help` (and `preflight-gate --help`), with
+      the version single-sourced in `files/VERSION` and CI failing if it, the `CHANGELOG` heading and
+      `--version` disagree. Fixed base-ref resolution, which used to fall through to an unchecked bare
+      `main`: in a repo whose default branch was anything else the diff was fatal, pr-agent exited 2, and
+      the **empty** artifact dir then made the commit hook report "no review found" for every later commit
+      (now a verified candidate list, `PREFLIGHT_BASE` override, and a loud exit 4). Fixed the
+      `post-commit` advisory exiting 0 on a sidecar it could not read - silent in exactly the case it
+      exists to report, and already patched by hand in one consuming repo. `install.sh` no longer tells
+      you to paste a key you already have. The advisory now has a case (`REQ-HOOK-27`), which it did not
+      before, and CI runs a version-consistency check.
+
 - [x] **Enforce the review at commit time.** A repo can now refuse a commit whose content was never
       reviewed: bundled `files/githooks/*` copied into its own `.githooks/` plus a **relative**
       `git config core.hooksPath .githooks`. Content-based (not time-based) binding via tree comparison,
@@ -20,8 +32,8 @@ Small, ready to do.
       `git commit --no-verify` / `PREFLIGHT_SKIP=1` bypass deliberately. Opt-in per repo, per clone, and it
       covers every worktree.
 - [x] **Test the commit hook.** `tests/run.sh` drives real repositories through the real hook files with
-      no framework and no network: 26 cases (25 offline plus one live end-to-end), one per requirement
-      (`REQ-HOOK-01`..`26`, mapped in `tests/README.md`). Every fix in the hook was reverted in turn to
+      no framework and no network: 27 cases (26 offline plus one live end-to-end), one per requirement
+      (`REQ-HOOK-01`..`27`, mapped in `tests/README.md`). Every fix in the hook was reverted in turn to
       confirm the matching case fails, and neutering the hook turns 16 offline cases red. Guards the seven
       bypasses found while building it (unreviewed deletions, renames, symlink typechanges,
       `git rm --cached`, git's quoting of path names, gitlinks, and an unset `HOME`).

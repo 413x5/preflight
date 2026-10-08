@@ -948,6 +948,64 @@ FAKE
 "; fi
 }
 
+case_commit_scope_reviews_untracked() {
+  # The commit scope must hand the model EVERYTHING a commit would contain, and the containment rule
+  # makes an untracked file the sharp case: `reviewed_tree` is built with `git add -A`, so a new file IS
+  # in the tree the hook compares against - but a bare `git diff HEAD` never lists it. That combination
+  # meant an untracked file was never reviewed while the hook accepted it as reviewed, so a defect in a
+  # new file could be committed with the check passing. This asserts the diff itself, because the
+  # invariant is about what the model was SHOWN, not about which paths the hook allows.
+  local d fake out first second problems=""
+  d="$work/untracked"; fake="$work/untracked-bin"
+  mkdir -p "$d" "$fake"
+  # Records the diff pr-agent is handed, which is the only place this invariant is observable.
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat > "$DIFF_OUT"
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No"}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent"
+
+  ( cd "$d" \
+      && git init -q -b main . \
+      && printf 'x = 1\n' > tracked.py \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m init \
+      && printf '\ndef new_thing(a, b):\n    return a / (b - b)\n' > untracked.py \
+      && printf '\nchanged = True\n' >> tracked.py ) >/dev/null 2>&1
+  git -C "$d" rev-parse --verify -q HEAD >/dev/null 2>&1 || {
+    bad "the commit scope reviews untracked files, not just tracked edits" "REQ-HOOK-37" \
+        "a seeded repository" "no commit" \
+        "the case could not build its fixture, so the reviewed diff was never exercised"
+    return
+  }
+
+  out="$work/untracked.diff"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" DIFF_OUT="$out" \
+      PREFLIGHT_HOME="$work/untracked-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$work/untracked.txt" 2>&1
+
+  grep -q '^+++ b/untracked\.py' "$out" 2>/dev/null || problems="$problems
+        | the new UNTRACKED file was not in the diff handed to the model, yet it is in reviewed_tree - so
+        | the hook would accept it as reviewed while nothing ever looked at it"
+  grep -q '^+++ b/tracked\.py' "$out" 2>/dev/null || problems="$problems
+        | the tracked edit was missing from the reviewed diff"
+
+  if [ -z "$problems" ]; then ok "the commit scope reviews untracked files, not just tracked edits" "REQ-HOOK-37"
+  else bad "the commit scope reviews untracked files, not just tracked edits" "REQ-HOOK-37" \
+        "the diff handed to the model contains untracked.py and tracked.py" "see below" "$problems
+"; fi
+}
+
 # ---------------------------------------------------------------------------- summary wiring
 
 case_summary_wiring() {
@@ -1110,6 +1168,35 @@ FAKE
   # line may print the literal None.
   case "$out" in *"=None"*) problems="$problems
         | (2) a bare None reached the summary line: $out" ;; esac
+
+  # A wrongly-TYPED field is worse than an absent one: `security_concerns: true` (which the model does
+  # return, and which preflight-gate has its own guard for) made `.strip()` raise AttributeError, killing
+  # the heredoc so `issues=`, `new=` and `coverage=` were lost together. Assert the coercion handles the
+  # JSON types the model actually sends, not just absence.
+  local typed="$work/verdict-typed"
+  mkdir -p "$typed"
+  cat > "$typed/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":true},"usage":{"total_tokens":7}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$typed/pr-agent"
+  rc=0
+  out="$( cd "$d" && rm -rf .preflight && PATH="$typed:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
+            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+  # The counts must survive a boolean field: if the line is missing entirely, the heredoc raised.
+  case "$out" in *"issues=0"*) ;; *) problems="$problems
+        | (3) a boolean security_concerns destroyed the summary line instead of degrading: $out" ;; esac
+  case "$out" in *"security=yes"*) ;; *) problems="$problems
+        | (3) a boolean security_concerns was not coerced to yes/no: $out" ;; esac
 
   if [ -z "$problems" ]; then ok "the summary line reports the fields the gate fails on" "REQ-HOOK-35"
   else bad "the summary line reports the fields the gate fails on" "REQ-HOOK-35" \
@@ -1380,7 +1467,7 @@ REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK
 #   orthogonal            do not test blocking at all, or test a different file.
 insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
 REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31
-REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36'
+REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36 REQ-HOOK-37'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -1510,6 +1597,7 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_verdict_fields \
     case_bounded_shutdown \
     case_scope_defaults \
+    case_commit_scope_reviews_untracked \
     case_bundle_hooks_executable
   say ""
 fi

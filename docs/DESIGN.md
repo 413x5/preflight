@@ -15,9 +15,12 @@ PR-Agent's plain-diff mode only sees what you hand it as a diff. To review *unco
 1. a temporary `GIT_INDEX_FILE` is pointed at a scratch file;
 2. `git read-tree HEAD` seeds it from `HEAD`;
 3. `git add -A` stages the working tree (tracked edits **and** untracked files) into it;
-4. `git write-tree` + `git commit-tree` turn it into a synthetic commit (authored as
-   `preflight <preflight@localhost>`), with `commit.gpgsign=false` so a global `gpgsign = true` cannot break it;
-5. that commit is diffed against the base branch.
+4. `git write-tree` turns it into a tree. The `worktree` scope additionally wraps that tree in a synthetic
+   commit (`git commit-tree`, authored as `preflight <preflight@localhost>`, with `commit.gpgsign=false` so
+   a global `gpgsign = true` cannot break it); the `commit` scope needs no commit, because a tree is
+   diffable directly;
+5. that tree is diffed according to `PREFLIGHT_SCOPE` - against `HEAD` for the default `commit` scope, or
+   against the base for the branch scopes.
 
 The real index, `HEAD`, and history are never touched - the scratch index is deleted on exit.
 
@@ -27,7 +30,7 @@ The real index, `HEAD`, and history are never touched - the scratch index is del
 |---|---|---|
 | `commit` (**default**) | `HEAD` -> the snapshot, i.e. exactly what a commit would contain | no |
 | `worktree` | the default branch -> the snapshot (the whole branch, plus uncommitted work) | yes |
-| `head` | `base...HEAD`, committed content only | yes |
+| `head` | `base...HEAD`, committed content only (no snapshot: it builds no scratch tree) | yes |
 
 `commit` is the default because it is the case the tool exists for: reviewing a change before it is
 submitted. It does no fetch and resolves no base, so it works offline and cannot fail the way base

@@ -5,7 +5,7 @@ review. The reviewer is a machine-local PR-Agent run over the **working tree** -
 commit required:
 
 ```sh
-preflight review   # working tree vs the base branch -> .preflight/review.md + .preflight/review.json
+preflight review   # the pending change (HEAD -> working tree) -> .preflight/review.md + .preflight/review.json
 preflight-gate     # exit 0 = pass, 1 = changes required or key issues, 2 = security concerns, 3 = no review yet
 ```
 

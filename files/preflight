@@ -61,7 +61,7 @@ preflight — review the pending change (no commit, no GitHub round trip).
 Usage:  preflight [command] [args...]
 
 Commands:
-  review (default)     review the pending change (commit scope) vs the base branch
+  review (default)     review the pending change (HEAD -> working tree, no base)
                        -> .preflight/review.md + .preflight/review.json
   describe             generate a PR description -> .preflight/description.md
   improve              suggest concrete code changes -> .preflight/improve.md
@@ -218,6 +218,7 @@ esac
 idxf=''
 prev_json=''
 hook_tree=''
+diff_base=''
 cleanup() { if [ -n "$idxf" ]; then rm -f "$idxf"; fi; if [ -n "$prev_json" ]; then rm -f "$prev_json"; fi; }
 trap cleanup EXIT
 if [ "$scope" = 'head' ]; then
@@ -232,8 +233,11 @@ else
   # committed against this tree.
   hook_tree="$tree"
   if [ "$scope" = 'commit' ]; then
-    # `git diff HEAD <tree>` is exactly `git diff --cached`, without needing an index or a base.
-    diff_ref='HEAD'
+    # `diff HEAD` alone sees only TRACKED changes, so a new file would never be reviewed while still
+    # being in reviewed_tree - and the hook, which compares against that tree, would then accept the
+    # unreviewed file. Diffing against the tree is what makes "everything a commit would contain" true.
+    diff_ref="$tree"
+    diff_base='HEAD'
   else
     synth="$(GIT_AUTHOR_NAME=preflight GIT_AUTHOR_EMAIL=preflight@localhost \
               GIT_COMMITTER_NAME=preflight GIT_COMMITTER_EMAIL=preflight@localhost \
@@ -285,17 +289,25 @@ import json, os, re, sys
 d = json.load(open(sys.argv[1]))
 r = d.get('review') or {}
 issues = r.get('key_issues_to_review') or []
-sec = (r.get('security_concerns') or '').strip()
-# Every field on this line is read by an agent, so an absent one degrades to n/a rather than printing a
-# bare `None` (or an empty value that reads as a verdict of its own). Every field goes through the
-# helper, not just the ones a report happened to name.
+# Every field on this line is read by an agent, so an absent or wrongly-typed one degrades to n/a rather
+# than printing a bare `None`, raising, or reading as a verdict of its own. A raise is the worst of the
+# three: it kills the heredoc, so `issues=`, `new=` and `coverage=` are lost together. Coercion matches
+# preflight-gate's own `as_text`, including the boolean case - `security_concerns: true` is common enough
+# that the gate has a dedicated guard for it.
 #
 # `merge_recommendation` is one of the four things preflight-gate fails on (effort, security,
 # merge_recommendation, issues); making it visible here means `preflight review` can no longer report a
 # review the gate would then refuse. `risk_level` is reported but NOT enforced - the gate reads it only
 # to print it, so `risk=low` alongside real findings passes regardless. See ROADMAP.md.
 def as_text(value):
-    return str(value).strip() if value is not None else ''
+    if value is None:
+        return ''
+    if isinstance(value, bool):
+        return 'yes' if value else 'no'
+    if not value:
+        return ''
+    return str(value).strip()
+sec = as_text(r.get('security_concerns'))
 risk = as_text(r.get('risk_level'))
 rec = as_text(r.get('merge_recommendation'))
 effort = as_text(r.get('estimated_effort_to_review_[1-5]'))
@@ -387,7 +399,7 @@ if [ -n "$out_json" ]; then
   # the launch would be a race.
   rm -f "$out_json" "$out_md" 2>/dev/null || true
 
-  git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
+  git diff ${diff_base:+"$diff_base"} "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
     --output "$out_md" --json-output "$out_json" "$cmd" "$@" &
   pr_pid=$!
 
@@ -446,7 +458,7 @@ if [ -n "$out_json" ]; then
 else
   # describe/improve/ask write no JSON artifact, so there is nothing to salvage: they are not bounded, and
   # a timeout must never cut off slow-but-valid work.
-  git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
+  git diff ${diff_base:+"$diff_base"} "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
     --output "$out_md" "$cmd" "$@" &
   pr_pid=$!
   wait "$pr_pid" 2>/dev/null || exit $?

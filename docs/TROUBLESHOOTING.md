@@ -52,10 +52,30 @@ Set it to your own model, or to `[]` to disable fallback (a primary-model failur
 rather than silently retrying). The id must be in the endpoint's `provider/model` form; `cline-pass/...`
 works too, while the `openai/` prefix above routes through LiteLLM's OpenAI-compatible transport.
 
-## The review keeps finding 3 new issues every round (the "cascade")
+## The review reports few issues per round and the loop will not converge (the "cascade")
 
-`pr_reviewer.num_max_findings` defaults to 3, so each run only reports 3 findings and the agent fixes
-3 and re-runs to find 3 more. It is set to 20 here so one review reports everything.
+This has **two** causes, and only fixing the first one leaves the loop slow.
+
+**1. A cap on how many findings are returned.** `pr_reviewer.num_max_findings` defaults to 3, so each
+run reports 3 findings, the agent fixes 3 and re-runs to find 3 more. It is set to 20 here, and
+`preflight.toml` also sets `pr_reviewer.extra_instructions`, which is injected into the reviewer's
+system prompt and tells the model to report *everything* it is confident about rather than stopping at
+the first issue. Neither setting changes what the model is *shown* - raise both and a review still only
+covers the content the model received.
+
+**2. A pruned diff.** That is the half `num_max_findings` cannot fix. When a diff exceeds the token
+budget, pr-agent's default is to **prune files** and review only the first patch, so one "complete"
+review silently covers a slice of the tree. The next run, against different content, surfaces findings
+that were there all along - which looks identical to an agent that only found one issue. `preflight.toml`
+therefore sets `enable_large_pr_chunking = true` (with `max_number_of_calls = 3`), so an oversized diff
+is split, every chunk is reviewed, and the findings are unioned into one review. It is inert unless the
+budget actually leaves files out, so a normal diff still costs exactly one AI call.
+
+If a review could not cover everything, it says so: the summary line ends with
+`coverage=PARTIAL (token budget left files out - see review.md)`, and `review.md` names the omitted
+files. Treat that as "there may be more here" and do **not** read a low `issues=` count on a partial
+review as "the change is nearly clean". Raise `config.max_model_tokens` / `custom_model_max_tokens` if
+you want the whole diff in a single call.
 
 ## `preflight review` says the repository has no commits yet
 

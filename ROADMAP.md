@@ -73,7 +73,8 @@ Wanted; needs a little design.
 
 - [ ] **One review packet.** Optionally run `preflight review` + `preflight improve` together so a
       coding agent gets the findings *and* concrete suggested diffs in a single round (fewer
-      iterations).
+      iterations). The single-review completeness work (chunking, `extra_instructions`, the coverage
+      line) is done; this is the remaining half - not yet a second report per round.
 - [ ] **Surface `risk_level` / `merge_recommendation` in `preflight`'s summary line** (today it prints
       issues/security/effort/tokens only). The gate already uses both.
 - [ ] **`preflight --since <ref>`** for a pseudo-incremental review - plain-diff mode has no true

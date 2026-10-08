@@ -233,3 +233,35 @@ estimated effort).
 
 `preflight review` runs the same check to record `gate.verdict` in `review.meta.json`, so the commit hook
 and the gate can never disagree about what counts as a pass.
+
+## Making one review report everything (why the loop converges)
+
+The loop is `review → fix all findings → re-review`. It is only as good as the claim that *one* review
+reports *all* findings, and that claim has two independent failure modes. Both show up the same way - an
+agent fixes a finding, re-runs, and gets handed a fresh one - so the two are easy to mistake for each
+other, and fixing only one leaves the loop slow.
+
+**The model returns few findings.** `pr_reviewer.num_max_findings` caps how many are returned (upstream
+default 3). `preflight.toml` raises it, and also sets `pr_reviewer.extra_instructions` - injected verbatim
+into the reviewer's system prompt - to tell the model to work through the whole diff and report every
+issue it is confident about, rather than stopping at the first.
+
+**The model was shown only part of the diff.** This is the half `num_max_findings` cannot fix: raising a
+cap on *returned* findings does nothing if the diff itself was pruned before the call. When a diff exceeds
+the token budget, pr-agent's default is to prune files and review the first patch, so a "complete" review
+covers a slice of the tree - and a later run, against different content, surfaces findings that were there
+all along. `preflight.toml` therefore sets `enable_large_pr_chunking = true` (`max_number_of_calls = 3`),
+which splits an oversized diff, reviews every chunk, and *unions* the per-chunk findings into one review
+(the merge rules live in pr-agent's `algo/review_merge.py`). It is inert unless the budget actually leaves
+files out, so an ordinary diff still costs exactly one AI call; only a genuinely oversized change pays for
+extra calls, and it pays them to avoid an unbounded fix/re-review loop.
+
+Whatever is left uncovered after that is reported rather than hidden. pr-agent appends a coverage footer
+to `review.md`, and `preflight` repeats it on the summary line as `coverage=PARTIAL ...`. That line exists
+because the summary is what an agent actually reads: `issues=1` on a partial review means "the other files
+were not looked at", not "the change is nearly clean". Silent partial coverage is the failure this whole
+section guards against - the same shape as the base-resolution and gate failures above, where an
+inability to check was indistinguishable from a pass.
+
+The real budget lever is `config.max_model_tokens` / `custom_model_max_tokens`: raise those and the whole
+diff fits in a single call. Chunking is the fallback for when it does not.

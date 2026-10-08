@@ -295,12 +295,30 @@ PY
   fi
 fi
 if [ -n "$out_json" ] && [ -f "$out_json" ]; then
-  python3 - "$out_json" <<'PY' >&2 2>/dev/null || true
+  python3 - "$out_json" "$out_md" <<'PY' >&2 2>/dev/null || true
 import json, sys
 d = json.load(open(sys.argv[1]))
 r = d.get('review') or {}
 issues = r.get('key_issues_to_review') or []
 sec = (r.get('security_concerns') or '').strip()
-print(f"preflight: issues={len(issues)} security={sec or 'n/a'} effort={r.get('estimated_effort_to_review_[1-5]')} tokens={(d.get('usage') or {}).get('total_tokens')}")
+line = (f"preflight: issues={len(issues)} security={sec or 'n/a'}"
+        f" effort={r.get('estimated_effort_to_review_[1-5]')}"
+        f" tokens={(d.get('usage') or {}).get('total_tokens')}")
+# Coverage is part of the verdict, so report it next to the counts. A pruned diff means the model was
+# shown part of the tree, and `issues=1` on a partial review does NOT mean "one problem in the change"
+# - it means the rest was never looked at. That misreading is what turns a single review into an
+# unbounded fix/re-review loop, so it belongs on the line an agent actually reads, not only in the
+# markdown footer further down.
+#
+# `Review coverage:` is pr-agent's own footer wording; if upstream ever rewords it this suffix goes
+# quiet (it degrades to today's plain line, it does not fail), so keep the two in step when the tool
+# is upgraded.
+try:
+    md = open(sys.argv[2], encoding='utf-8').read()
+except OSError:
+    md = ''
+if 'Review coverage:' in md:
+    line += " coverage=PARTIAL (token budget left files out - see review.md)"
+print(line)
 PY
 fi

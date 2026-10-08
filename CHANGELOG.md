@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **One review now reports everything, instead of one finding at a time.** The `review → fix → re-review`
+  loop was slow because it had two independent causes, and only one of them was configured for.
+  `pr_reviewer.num_max_findings` caps how many findings a review *returns* (upstream default 3), and it
+  was already raised to 20 - but raising it does nothing when the model was only *shown* part of the
+  diff. When a diff exceeds the token budget, pr-agent's default is to prune files and review the first
+  patch, so a "complete" review silently covered a slice of the tree, and the next run surfaced findings
+  that were there all along. `files/preflight.toml` now also sets:
+  - `pr_reviewer.extra_instructions` - injected verbatim into the reviewer's system prompt (verified),
+    telling the model to work through the whole diff and report every issue it is confident about rather
+    than stopping at the first;
+  - `pr_reviewer.enable_large_pr_chunking = true` (`max_number_of_calls = 3`) - an oversized diff is
+    split, every chunk is reviewed, and the per-chunk findings are unioned into one review instead of
+    files being pruned. It is inert unless the budget actually leaves files out, so an ordinary diff
+    still costs exactly one AI call.
+  Anything still uncovered is reported rather than hidden: `preflight` now appends
+  `coverage=PARTIAL (token budget left files out - see review.md)` to its summary line, so a low
+  `issues=` count on a partially-reviewed diff is not mistaken for a clean change. CI asserts all four
+  completeness settings, because a regression in any of them shows up as a loop that will not converge
+  rather than as a failing build.
 - **`preflight --help` and `preflight --version`** (plus `-h`/`-V` and `preflight-gate --help`). Both are
   answered before anything touches git or the config, so they work outside a repository too (`--help` is
   the first thing a new user runs, and it must not need a repo or a configured key). `--version`

@@ -27,6 +27,14 @@ Loop until `preflight-gate` exits 0:
 3. Re-run `preflight review`, then `preflight-gate`. Repeat until it passes.
 4. The branch is then ready for the pull request; committing and pushing are the user's call.
 
+The review is configured to report **all** findings in one pass: it raises the finding cap, tells the
+model to report everything it is confident about, and reviews an oversized diff in chunks (merging the
+chunks' findings) instead of pruning files. Still, **read the coverage line**: if the summary ends with
+`coverage=PARTIAL`, the token budget left files out of the review and `review.md` names them. A low
+`issues=` count on a partial review means "the rest was not looked at", not "the change is clean" - raise
+`max_model_tokens`/`custom_model_max_tokens` (see the bundle's `docs/TROUBLESHOOTING.md`) rather than
+round-tripping until the omitted files happen to come into view.
+
 - **Do not commit to be reviewed.** The loop needs no commit - work in the working tree, review, fix, re-review.
   Committing between rounds is what produces a stack of near-identical commits, and the review does not require
   one; commit once, for the pull request, and only when the user asks.

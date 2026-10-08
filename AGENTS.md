@@ -24,6 +24,25 @@ provider into a mechanism: anything endpoint-specific - a model id, a streaming 
 belongs in `files/preflight.toml` as an overridable default, and must be documented as provider-specific in
 the file itself and in `docs/DESIGN.md`. The CI and the tests must never require a paid key or the network.
 
+## One review must report everything
+
+The product's central promise is that the loop converges: review once, fix **all** the findings, re-review.
+If a review reports one finding and the next run hands you another, the bundle has failed at the one thing
+it exists to do. There are two independent ways to break that promise, and they look identical from the
+outside - fix one and the loop is still slow.
+
+1. **What the model reports.** `pr_reviewer.num_max_findings` (upstream default 3) and
+   `pr_reviewer.extra_instructions`. Lowering either re-creates the cascade.
+2. **What the model was shown.** When a diff exceeds the token budget, pr-agent prunes files and reviews
+   the first patch unless `pr_reviewer.enable_large_pr_chunking` is on - so a "complete" review can cover a
+   slice of the tree. **This is the one that is easy to miss**, because every finding in a partial review is
+   a real finding; the missing coverage is invisible.
+
+`files/preflight.toml` sets all four keys, CI asserts them, and `preflight` prints `coverage=PARTIAL` when
+anything was left out. Do not weaken any of it to save tokens: a partial review is what turns a two-round
+loop into an unbounded one, and silent partial coverage has the same shape as the other failures this repo
+guards against - an inability to check that is indistinguishable from a pass.
+
 ## Layout
 
 | Path | What it is |

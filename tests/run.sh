@@ -522,11 +522,21 @@ case_post_commit_advisory() {
   [ -z "$out" ] || problems="$problems
         | absent sidecar should be silent, got: $out"
 
-  # A worktree-scope review is the enforced case, so nothing to say.
+  # A worktree-scope review is an enforced case, so nothing to say.
   set_meta '{"scope": "worktree", "reviewed_tree": "abc"}'
   out="$(run_post)"
   [ -z "$out" ] || problems="$problems
         | worktree scope should be silent, got: $out"
+
+  # `commit` is the DEFAULT scope and is enforced - files/preflight-hook accepts `commit|worktree`.
+  # This assertion is the regression guard for an advisory that warned on every default-scope commit:
+  # it only recognised `worktree`, which was correct before `commit` became the default and stale
+  # after, and the message it printed ("run 'preflight review' with the default worktree scope") named
+  # a scope that is no longer the default.
+  set_meta '{"scope": "commit", "reviewed_tree": "abc"}'
+  out="$(run_post)"
+  [ -z "$out" ] || problems="$problems
+        | commit scope is enforced and must be silent, got: $out"
 
   # A head-scope review covers already-committed content, so it cannot vouch for this commit.
   set_meta '{"scope": "head", "reviewed_tree": ""}'
@@ -783,17 +793,14 @@ defaults_path, ours_path = sys.argv[1:3]
 # extra_instructions) are declared in many tool sections upstream, so "first occurrence wins" would
 # resolve a key to whichever section happens to be listed first and fail on a correctly-configured repo.
 # The assertion is therefore "pr_reviewer declares it", not "nothing else does".
-# Each key with the section pr-agent reads it from. The COMPLETENESS keys live in [pr_reviewer]; the
-# reasoning knob lives in [config] and only reaches the model because the model id is also registered in
-# [config] additional_reasoning_effort_models - a key that is read, logged, and then silently dropped when
-# the id is missing, which is exactly how the default looked applied while being inert.
+# Each key with the section pr-agent reads it from. These are the keys the bundle SETS; the ones it
+# deliberately leaves unset (`extra_instructions`, `reasoning_effort`, and the
+# `additional_reasoning_effort_models` that exists only to forward the latter) are not listed here, and
+# CI asserts their absence instead - a key that is absent cannot be put in the wrong section.
 wanted = {
     "num_max_findings": "pr_reviewer",
-    "extra_instructions": "pr_reviewer",
     "enable_large_pr_chunking": "pr_reviewer",
     "max_number_of_calls": "pr_reviewer",
-    "reasoning_effort": "config",
-    "additional_reasoning_effort_models": "config",
 }
 sections = {key: set() for key in wanted}
 section = None

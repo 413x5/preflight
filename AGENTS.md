@@ -31,8 +31,9 @@ If a review reports one finding and the next run hands you another, the bundle h
 it exists to do. There are **three** independent ways to break that promise, and they look identical from
 the outside - fix one and the loop is still slow.
 
-1. **What the model reports.** `pr_reviewer.num_max_findings` (upstream default 3) and
-   `pr_reviewer.extra_instructions`. Lowering either re-creates the cascade.
+1. **What the model reports.** `pr_reviewer.num_max_findings` (upstream default 3, raised here). The
+   bundle does not set `pr_reviewer.extra_instructions`: pr-agent's own reviewer prompt already carries
+   its severity guidance, and our additions argued against it. See `CHANGELOG.md` and `ROADMAP.md`.
 2. **What the model was shown.** When a diff exceeds the token budget, pr-agent prunes files and reviews
    the first patch unless `pr_reviewer.enable_large_pr_chunking` is on - so a "complete" review can cover a
    slice of the tree. **This is the one that is easy to miss**, because every finding in a partial review is
@@ -55,9 +56,9 @@ stops on judgement, not on silence.
 
 "Everything" is bounded, and the docs should say so rather than overclaim. The finding cap is a prompt
 instruction, not a hard truncation, but it is still a ceiling; the coverage line is a text heuristic, so a
-byte-faithful reproduction of pr-agent's footer is indistinguishable from the footer itself. Both are
-documented in `docs/DESIGN.md`. Do not let the marketing get ahead of that: the claim is "one review
-reports every finding it was *shown*", not "a review can never miss anything".
+byte-faithful reproduction of pr-agent's footer is indistinguishable from the footer itself. Do not let the
+marketing get ahead of that: the claim is "one review reports every finding it was *shown*", not "a review
+can never miss anything".
 
 ## Layout
 
@@ -170,15 +171,15 @@ Ruby's built-in Psych if you need to inspect config.
   commits. Do all hook testing in a `mktemp -d` repository.
 - **Never introduce an absolute `core.hooksPath`** in anything you write, including docs and examples. It
   breaks git worktrees - each worktree would run another checkout's hooks dir. Relative `.githooks` only.
-- **Never reintroduce the old names.** `pra`/`pral`/`pral-gate` and `~/.config/pr-agent/` were renamed;
-  `pr-agent` must mean only the upstream tool. The installer actively cleans the stale commands up.
+- **Never reintroduce the old names.** `pra`/`pral`/`pral-gate` and `~/.config/pr-agent/` are the former
+  names; `pr-agent` means only the upstream tool.
 - **Never make the doc examples require a paid key or the network**, and never add a test that does.
 - **Never hand-edit a `.preflight/review.meta.json`** in a test to fake the *real* review path. The suite
   deliberately simulates a review by writing a sidecar (`review_here`); that is a fixture, not a shortcut
   for production code. `preflight review` is the only thing that may write it.
 - **Never let base resolution silently guess.** The base is resolved by *verifying* each candidate
   (`PREFLIGHT_BASE`, `origin/HEAD`, `ls-remote --symref origin HEAD`, then `origin/main|master`, `main|master`)
-  and failing with exit 4 when none resolves. The old unchecked fallback to a bare `main` produced a fatal
+  and failing with exit 4 when none resolves. An unchecked fallback to a bare `main` would produce a fatal
   `git diff` and an **empty** artifact dir, which the hook reports as "no review found" - turning a base
   problem into an unexplainable block on every commit.
 - **Never make the `post-commit` advisory exit 0 on a sidecar it cannot read.** It is the only thing that
@@ -222,12 +223,27 @@ state. `git status` is the first thing to check in this repo.
 
 ## Working on docs
 
-The docs are part of the product, and they drift. Before claiming something works, run it - several
-documented recipes in this repo were wrong (a "re-record the verdict with `preflight-gate`" instruction
-that could not work, and a reference to a file that never existed). If you change behaviour, grep for every
-place that describes it: `README.md`, `AGENTS-review-snippet.md`, `ROADMAP.md`, `CHANGELOG.md`,
-`docs/DESIGN.md`, `docs/TROUBLESHOOTING.md`, `tests/README.md`, `CONTRIBUTING.md`. Case counts, the
-requirement table, and the containment table go stale fastest.
+The docs are part of the product, and they drift. Before claiming something works, run it. If you change
+behaviour, grep for every place that describes it: `README.md`, `AGENTS-review-snippet.md`, `ROADMAP.md`,
+`CHANGELOG.md`, `docs/DESIGN.md`, `docs/TROUBLESHOOTING.md`, `tests/README.md`, `CONTRIBUTING.md`. Case
+counts, the requirement table, and the containment table go stale fastest.
+
+## Comments in code files state current invariants, nothing else
+
+A comment in `files/*` or `*.toml` explains the code as it **is**: the invariant that a change would
+break, and why a value is that value rather than the obvious alternative. It does not narrate history
+("used to", "previously", "historically", "no longer", "was reverted"), restate the diff, or retell the
+decision journey that produced the line.
+
+- **The test: if deleting the comment would not change a reader's next action, delete it.**
+- History, measurements and reverted experiments belong in `CHANGELOG.md`; design rationale belongs in
+  `docs/DESIGN.md`; operator symptoms belong in `docs/TROUBLESHOOTING.md`.
+- **An unverifiable comment is a liability, not documentation.** Prose is not executed, so a comment that
+  contradicts the code beside it survives indefinitely. A documentation pass took `files/preflight.toml` to
+  73% comments (61 of 84 lines) and left a `post-commit` comment instructing users to "run `preflight
+  review` with the default worktree scope" - a scope that had not been the default since the `commit` scope
+  landed. Trimming that comment is what exposed the matching bug (the advisory warned on every
+  default-scope commit), which no test had covered.
 
 ## Keep each round's change small, or the loop will not converge
 
@@ -235,14 +251,13 @@ This repo's own loop is the thing being built, so it is worth knowing how it fai
 ways, and the first two are already handled: what the model reports, what it was shown, and - this one -
 **how much you change between rounds.**
 
-A round reports one defect. Fix the code: usually a few lines. Then the temptation is to also rewrite the
-comments around it, add a docs paragraph, add a changelog bullet, and add a row to the mutation table
-asserting the new test covers the fix. That is a much larger diff than the fix, and the next round reviews
-*all of it* - including the claims, which are the part most likely to be wrong, because prose written to
-describe a fix is not verified the way the fix is. Correcting the prose adds more prose. That is a loop with
-no stopping condition, and it has happened here: one change measured **~56 lines of executable logic and
-~271 lines of comment about it**, across five rounds whose later findings were almost entirely about the
-writing.
+A round reports one defect. Fix the code: usually a few lines. The temptation is to also rewrite the
+comments around it, add a docs paragraph, add a changelog bullet, and add a row to the mutation table.
+That diff is mostly *claims*, which are the part most likely to be wrong, because prose written to describe
+a fix is not verified the way the fix is - and the next round reviews all of it. Correcting prose adds more
+prose, which is a loop with no stopping condition. `CHANGELOG.md` records a change here that measured
+**~56 lines of executable logic against ~271 lines of comment about it**, across five rounds whose later
+findings were almost entirely about the writing.
 
 So:
 
@@ -250,6 +265,8 @@ So:
   unless the finding is *about* those files.
 - **Do not add a sentence saying you fixed something.** The diff is the record. A comment narrating a fix
   duplicates the diff and can only be checked against it, which spends a round to learn nothing.
+- **Code files carry current invariants only.** History and design rationale go to `CHANGELOG.md` and
+  `docs/DESIGN.md`; see "Comments in code files state current invariants" above.
 - **Do not write a claim you have not verified.** "This is guarded by REQ-HOOK-nn" and "every mutation is
   listed" are factual assertions that a reviewer will check. If you did not run the mutation, the claim is
   usually wrong in the direction of overclaiming - and a wrong claim about coverage is the same failure this

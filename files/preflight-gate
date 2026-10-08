@@ -34,21 +34,18 @@ if [ ! -f "$json" ]; then echo "preflight-gate: no review at $json (run 'preflig
 python3 - "$json" <<'PY'
 import json, os, sys
 
-# The review is model output, so each field's JSON type is whatever the model chose. `security_concerns`
-# and `relevant_tests` come back as real booleans often enough to matter, and a bare `.strip()` on a
-# bool crashed the gate with a traceback instead of reporting a verdict. A crash here is not a neutral
-# failure: the commit hook reads any non-zero exit as "the review did not pass", and `preflight review`
-# records that exit as the sidecar verdict - so a type quirk silently turned a clean review into a
-# verdict of `fail` and blocked commits. Coerce every field to text.
+# The review is model output, so each field's JSON type is whatever the model chose. Coerce every
+# field to text: a crash here is not a neutral failure - the hook reads any non-zero exit as "did not
+# pass" and `preflight review` records it as the sidecar verdict, so a type quirk becomes a blocked
+# commit for a clean review.
 def as_text(v):
     if v is None:
         return ''
     if isinstance(v, bool):
         return 'yes' if v else 'no'
-    # A falsy non-bool (0, [], {}) means "nothing here", which is what the pre-existing
-    # `(field or '')` idiom encoded. Without this, `security_concerns: 0` became the STRING '0',
-    # which `is_no` does not recognise - so a clean review was read as having security concerns,
-    # exited 2, and was recorded as `fail`, blocking every commit. Preserve the old semantics.
+    # A falsy non-bool (0, [], {}) means "nothing here", matching the `(field or '')` idiom this
+    # replaced: without it, `security_concerns: 0` became the STRING '0', which `is_no` does not
+    # recognise, so a clean review exited 2 and blocked commits.
     if not v:
         return ''
     return str(v).strip()
@@ -62,12 +59,11 @@ except Exception as exc:
     print(f'preflight-gate: cannot read {sys.argv[1]}: {exc}', file=sys.stderr)
     sys.exit(3)
 
-# Guard the SHAPE as well as the parse. Valid JSON that is not a review object (`[1,2,3]`, or
-# `"review": "..."`) still crashed with an AttributeError, which has the same effect as the bool
-# crash described above: a non-zero exit that the hook and `preflight review` both read as a failed
-# verdict. A wholly ABSENT `review` key keeps its long-standing meaning (no findings, fields n/a), but
-# a key that is present and not an object - including an explicit `null` - is malformed and is
-# reported rather than passed over: this is the enforcement gate, so "the model returned no review
+# Guard the SHAPE as well as the parse: valid JSON that is not a review object (`[1,2,3]`, or
+# `"review": "..."`) crashed with an AttributeError and blocked commits the same way. A wholly ABSENT
+# `review` key keeps its meaning (no findings, fields n/a), but a key present and not an object -
+# including an explicit `null` - is malformed and reported rather than passed over: this is the
+# enforcement gate, so "the model returned no review
 # object" must not read as "the review was clean".
 if not isinstance(d, dict):
     print(f'preflight-gate: {sys.argv[1]} is not a review object (JSON {type(d).__name__})', file=sys.stderr)

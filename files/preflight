@@ -287,15 +287,13 @@ r = d.get('review') or {}
 issues = r.get('key_issues_to_review') or []
 sec = (r.get('security_concerns') or '').strip()
 # Every field on this line is read by an agent, so an absent one degrades to n/a rather than printing a
-# bare Python artefact (`None`, or an empty value that reads as a verdict of its own). `merge_recommendation`
-# is also one of the four things preflight-gate fails on (`effort`, `security`, `merge_recommendation`,
-# issues), and it used to appear only in the gate's own output - so `preflight review` could report a
-# review the gate would then refuse, discoverable only by running a second command. `risk_level` is
-# reported for the reader and NOT enforced: the gate reads it only to print it, so a low `risk` alongside
-# real findings (observed: `risk=low` with two key issues) passes the gate regardless. All five fields go
-# through the same helper, including `tokens`: reviewing this very change with the tool found `effort=None`
-# first and `tokens=None` after that, each one the same class of leak, so the guard is applied to every
-# field rather than the reported one.
+# bare `None` (or an empty value that reads as a verdict of its own). Every field goes through the
+# helper, not just the ones a report happened to name.
+#
+# `merge_recommendation` is one of the four things preflight-gate fails on (effort, security,
+# merge_recommendation, issues); making it visible here means `preflight review` can no longer report a
+# review the gate would then refuse. `risk_level` is reported but NOT enforced - the gate reads it only
+# to print it, so `risk=low` alongside real findings passes regardless. See ROADMAP.md.
 def as_text(value):
     return str(value).strip() if value is not None else ''
 risk = as_text(r.get('risk_level'))
@@ -305,16 +303,14 @@ tokens = as_text((d.get('usage') or {}).get('total_tokens'))
 line = (f"preflight: issues={len(issues)} security={sec or 'n/a'}"
         f" risk={risk or 'n/a'} merge={rec or 'n/a'}"
         f" effort={effort or 'n/a'} tokens={tokens or 'n/a'}")
-# Coverage belongs on the line an agent actually reads: a pruned diff means the model was shown part
-# of the tree, so `issues=1` does NOT mean "one problem in the change" - it means the rest was never
-# looked at. Reported only for the branch scopes; see the gate below.
+# Coverage belongs on the line an agent actually reads: a pruned diff means the model saw part of the
+# tree, so `issues=1` does NOT mean "one problem in the change". Reported only for the branch scopes.
 #
-# Matching is text matching against model-generated prose, and a finding may legitimately *discuss*
-# coverage. What holds is matching pr-agent's FOOTER BLOCK as it EMITS it - the `<hr>` anchor, the bold
-# header, the sentence and the generated `- \`file\`` bullets - rather than any single sentence, which a
-# finding can quote verbatim by accident. The limit: a byte-faithful reproduction of the emitted footer
-# is indistinguishable from the footer, and a miss degrades to the plain summary line, which is the
-# safer error (a spurious PARTIAL is what teaches the reader to ignore the marker).
+# The match is against pr-agent's FOOTER BLOCK as it EMITS it - the `<hr>` anchor, the bold header, the
+# sentence and the generated `- \`file\`` bullets - not any single sentence, which a finding can quote
+# verbatim by accident. A byte-faithful reproduction is indistinguishable from the footer; a miss
+# degrades to the plain summary line, which is the safer error (a spurious PARTIAL teaches the reader
+# to ignore the marker).
 COVERAGE_RE = re.compile(
     # `[^\n]*` rather than the emoji, which the lenient read below may have replaced with U+FFFD: requiring
     # the emoji would make the marker unable to fire on exactly the file it was written to tolerate, and

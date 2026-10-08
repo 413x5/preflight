@@ -80,6 +80,21 @@ Shipped on `main`; kept for the reasoning behind each change, not as work to pic
 Wanted; needs a little design. Items marked `[x]` here are shipped but still carry an open question - the
 answered part is kept for context, and the **Still open** paragraph under each is the work.
 
+- [ ] **Decide what replaces the removed `extra_instructions` (OPEN EXPERIMENT).** The injected text was
+      removed because capturing the literal prompt showed it arguing against pr-agent's own guidance in
+      the same system prompt (which says "prefer not reporting over guessing" and "an empty list is
+      acceptable"), by asserting "most real diffs have several". It was the only text in the prompt
+      pushing toward generating findings. **Unproven either way:** compare the next reviews against
+      `new=N/M` and finding volume to see whether the loop settles or the model simply under-reports.
+      Reverting is one config block. Details in `CHANGELOG.md`; the capture method is in
+      `docs/TROUBLESHOOTING.md`.
+
+      Unresolved and related: pr-agent's finding schema has **no severity field**, so a broken doc command
+      and a real logic bug both block a commit. A deterministic tier from `relevant_file` (code and
+      `tests/**` blocking, `*.md`/`docs/**` advisory) is designed but **not implemented**. Any such
+      classifier must normalise the path first - the values arrive with a trailing newline
+      (`'README.md\n'`), so a naive `endswith('.md')` would classify every doc as code.
+
 - [x] **Make the post-run hang survivable, and stop it hiding the counts.** `preflight review` writes
       both artifacts and then sometimes never exits (4-13 minutes, in two shapes - sleeping in `kevent`,
       spinning in the asyncio loop), because pr-agent's post-run callback drain blocks after the review is
@@ -104,22 +119,18 @@ answered part is kept for context, and the **Still open** paragraph under each i
          still reproduces at the much lower output this now produces.
       3. **Streaming.** Point at a non-streaming endpoint and re-test, to separate the SSE connection from
          the callback drain.
-- [x] **Make the model call cheaper and faster - the reasoning budget was unset and invisible.** A review
-      of a ~500-line diff reported ~23,500 completion tokens in 111s, of which only ~2,500 characters
-      reached `review.md`; the rest was hidden reasoning, so a slow review read as a slow provider rather
-      than as an unset budget. `[config] reasoning_effort` now takes effect - which needed `[config]
-      additional_reasoning_effort_models` as well, because pr-agent forwards the setting only to a model
-      litellm's metadata calls reasoning-capable and `cline-pass/*` is not in that table (`REQ-HOOK-29` and
-      CI assert both keys). Measured with the arms INTERLEAVED on one diff (mean **~18.6s / ~4,051
-      completion tokens** unforwarded, versus **~9.2s / ~1,689** with `low` forwarded). A first sequential
-      pass overstated the gap as 22-38s vs 14s; a later default run took 11s, so interleaving is what
-      separates the setting from endpoint load. The lesson is recorded in `docs/TROUBLESHOOTING.md`.
+- [ ] **Re-measure the reasoning budget before pinning it again (REVERTED, read this).** The bundle used
+      to set `[config] reasoning_effort = "low"` plus `additional_reasoning_effort_models`. Both keys are
+      now removed, so pr-agent's `medium` default applies. The reason: the pin rested on interleaved arms
+      measured on **one synthetic 525-line diff** (mean ~18.6s / ~4,051 completion tokens unforwarded
+      versus ~9.2s / ~1,689 with `low`), and it did not reproduce on real work - four consecutive reviews
+      of this repo's own branch at `low` spent 23k-34k completion tokens (60-68% of each run's total) and
+      ranged 1m19s-2m30s on similar diffs. The synthetic number was never evidence about real content. To
+      pin it again: measure on a real branch diff, interleaved, against `new=N/M` as well as wall clock
+      (a cheaper round that reports fewer findings just moves the cost to a later round).
 
-      **Still open:** whether the reduction holds on the real branch diff (that measurement is a synthetic
-      525-line diff, not the ~2k-line branch), and whether `num_max_findings = 20` invites padding now that
-      rounds are cheap. Also unmeasured: `[config] seed`, which would pin sampling and stabilise `new=N/M`
-      at the cost of whatever coverage pinning removes - left unset deliberately, and documented as the
-      lever to reach for if the count never settles.
+      **Still open:** whether `num_max_findings = 20` invites padding, and `[config] seed` (unset), which
+      would pin sampling and stabilise `new=N/M` at the cost of whatever coverage pinning removes.
 - [x] **Make pending-commit review the default (the `commit` scope).** Changed the default so
       `preflight review` covers the pending commit - HEAD to the working tree, untracked files included -
       instead of the whole branch since the default branch, which is what the tool exists for: reviewing a
@@ -148,8 +159,8 @@ answered part is kept for context, and the **Still open** paragraph under each i
       runs on every PR.
 - [ ] **One review packet.** Optionally run `preflight review` + `preflight improve` together so a
       coding agent gets the findings *and* concrete suggested diffs in a single round (fewer
-      iterations). The single-review completeness work (chunking, `extra_instructions`, the coverage
-      line) is done; this is the remaining half - not yet a second report per round.
+      iterations). The single-review completeness work (chunking, the coverage line) is
+      done; this is the remaining half - not yet a second report per round.
 - [ ] **`risk_level` is reported but never enforced - decide what it is for.** The gate reads it only to
       print it; the verdict comes from effort/security/`merge_recommendation`/issues. Measured over four
       consecutive reviews of this repo it was `low, low, medium, low` on similar finding counts, while

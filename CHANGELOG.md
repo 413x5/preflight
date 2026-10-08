@@ -196,6 +196,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `post-commit` advisory warned on every default-scope commit, and named a scope that no longer
+  exists.** It recognised only `scope=worktree` as enforced, but `commit` became the default scope - and
+  `files/preflight-hook` accepts `commit|worktree`. So the common case printed *"the last review used
+  scope=commit, so this commit was NOT verified by the hook"* for a commit that the hook had in fact
+  enforced, and told the reader to re-run with *"the default worktree scope"*, which had stopped being the
+  default. Found while reviewing the hook's own comments. `REQ-HOOK-27` now asserts `commit` is silent;
+  reverting the fix fails it.
 - **The documented way to install the commit hooks could produce a hook git ignores.** The recipe said
   `cp ~/.config/preflight/githooks/* .githooks/`. `cp` preserves the source mode, so it works on a machine
   where `install.sh` put the files down - but git **ignores a hook that is not executable**, printing a
@@ -300,6 +307,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`files/preflight.toml` no longer sets `pr_reviewer.extra_instructions` or `[config] reasoning_effort`.**
+  Both are removed, so pr-agent's own reviewer prompt and its own `medium` reasoning default apply.
+
+  The `extra_instructions` text was the more consequential of the two. Capturing the literal request
+  pr-agent sends - a local endpoint that logs the body and returns a canned review, so no key and no cost -
+  showed it appended to a system prompt that already says, in the same payload: *"For lower-severity
+  concerns, be certain before flagging... do not flag it"*, *"Otherwise, prefer not reporting over
+  guessing"*, and, in the schema description, *"An empty list is acceptable if no clear issues are
+  found."* Our text said *"Report EVERY issue you are confident about... If you find one issue, keep
+  looking: most real diffs have several."* That sentence was the only content in an ~8,000-character
+  prompt pushing toward **generating** findings rather than filtering them - the opposite of the loop
+  converging, which is what the bundle exists to achieve. The prompt is now sent unmodified; the effect on
+  finding volume is an open experiment in `ROADMAP.md`, not a settled result.
+
+  `reasoning_effort = "low"` and the `additional_reasoning_effort_models` that existed only to forward it
+  are removed on the evidence rather than on principle. The pin rested on interleaved arms measured on one
+  synthetic 525-line diff (mean ~18.6s / ~4,051 completion tokens unforwarded versus ~9.2s / ~1,689 with
+  `low`). Four consecutive reviews of this repo's own branch, at `low`, spent 23k-34k completion tokens -
+  60-68% of each run's total - and ranged 1m19s-2m30s on similar diffs, so the synthetic figure was not a
+  predictor of real content. CI now asserts these keys are **absent**, so neither can return silently.
+
+- **`require_risk_assessment = true` is removed, and the `[pr_code_suggestions]` override with it.** Both
+  asked the model for more output that nothing acts on: `risk_level` is only *printed* by the gate (the
+  verdict comes from effort, security, `merge_recommendation` and issues), and it measured unstable -
+  `low, low, medium, low` across four reviews of this repo while `merge_recommendation` never moved off
+  `merge_with_caution` - so requiring it bought a go/no-go-looking field with no signal in it.
+  `num_code_suggestions_per_chunk = 20` (upstream 3) is the same nudge as `num_max_findings`, applied to
+  `preflight improve`, and is reverted for the same reason. CI asserts both stay unset.
+- **Comments in `files/` no longer narrate their own history.** Shipped files and the operator docs now
+  state what a value *is* and why; what it replaced, what was measured, and what was reverted live in this
+  changelog. `files/preflight.toml` was 73% comments (61 of 84 lines) after a single documentation pass and
+  is now 48%, with the reasoning it lost recorded here. The rule is written into `AGENTS.md`, with the test
+  "if deleting a comment would not change a reader's next action, it belongs in the changelog or nowhere".
 - The `post-commit` companion hook is now covered by the suite (`REQ-HOOK-27`; classified insensitive,
   since a post-commit hook cannot block) - it previously had only a `sh -n` syntax check, which is why the
   silent-sidecar defect above survived.

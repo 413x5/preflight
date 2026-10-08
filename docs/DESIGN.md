@@ -232,24 +232,22 @@ A commit can only be verified once it exists, so enforcement is inherently about
 
 ## Where a review's time goes (the reasoning budget)
 
-A review is one model call, and on this endpoint most of that call is **hidden reasoning** - tokens the
-model spends deliberating and then discards. It is invisible in the artifacts: `review.json` carries
-`usage` totals and `review.md` carries the same numbers in its run-details footer, but neither splits
-reasoning from the text that actually became the review. A measured example, a ~500-line diff on this
-repo: **23,467 completion tokens in 111s**, of which roughly 2,500 characters reached `review.md` - and
-the same diff has also completed in 11s / 2,126 tokens, so the spread matters as much as the peak.
+A review is one model call, and most of it can be **hidden reasoning** - tokens the model deliberates with
+and discards. The artifacts do not split that from the text: `review.json` carries `usage` totals and
+`review.md` repeats them in its run-details footer, but neither separates reasoning from findings. Watch
+the footer's "out" count: a ~500-line diff has reported 23,467 completion tokens in 111s with only ~2,500
+characters reaching `review.md`, and the same diff has also completed in 11s / 2,126 tokens. A slow review
+therefore looks like a slow provider when it may be reasoning volume.
 
-That invisibility is the problem, not the cost. A slow review looks like a slow provider, so the budget
-that dominates the wall clock is the one nobody sets. `files/preflight.toml` therefore sets
-`[config] reasoning_effort`, and the measurement behind the value is in the file itself.
+The lever is `[config] reasoning_effort`, and pr-agent forwards it **only** to a model its bundled litellm
+metadata calls reasoning-capable. `cline-pass/*` is not in that table, so the key is read, logged as the
+config default, and then silently never sent - it looks applied while every run uses the provider's own
+default. The escape hatch is `[config] additional_reasoning_effort_models`, naming the id explicitly; the
+two are only useful together.
 
-The trap worth knowing about, because it is the same shape as the token-budget one: pr-agent forwards
-`reasoning_effort` **only** to a model litellm's bundled metadata calls reasoning-capable.
-`cline-pass/*` is not in that table, so the key is read, logged as the config default, and then silently
-never sent - the setting looks applied while every run uses the provider's own default. The documented
-escape hatch is `[config] additional_reasoning_effort_models`, which names the id explicitly. Both keys
-are required for the lever to do anything, and `REQ-HOOK-29` asserts each sits in the section pr-agent
-reads it from, because a wrong path fails with no feedback at all.
+`files/preflight.toml` sets **neither**, so pr-agent's `medium` default applies. Pinning `low` was tried and
+reverted: the measurement behind it came from one synthetic diff and did not hold on real content. See
+`ROADMAP.md` for what to re-measure before pinning it again, and `docs/TROUBLESHOOTING.md` for the numbers.
 
 There is deliberately **no sampling pin**. `config.temperature` (upstream default 0.2) and `config.seed`
 (default -1, i.e. unset) are left alone, so reviews sample freely; see the convergence section for why
@@ -281,9 +279,10 @@ agent fixes a finding, re-runs, and gets handed a fresh one - so the two are eas
 other, and fixing only one leaves the loop slow.
 
 **The model returns few findings.** `pr_reviewer.num_max_findings` caps how many are returned (upstream
-default 3). `preflight.toml` raises it, and also sets `pr_reviewer.extra_instructions` - injected verbatim
-into the reviewer's system prompt - to tell the model to work through the whole diff and report every
-issue it is confident about, rather than stopping at the first.
+default 3). `preflight.toml` raises it. It does not set `pr_reviewer.extra_instructions`, so pr-agent's
+reviewer prompt is sent unmodified - including its own guidance to prefer not reporting over guessing, and
+its schema's "an empty list is acceptable". See `CHANGELOG.md` for why that text is gone and `ROADMAP.md`
+for the open experiment.
 
 That cap is a prompt instruction, not a hard truncation: pr-agent does not slice the merged list (checked
 against its source - the value feeds the prompt and one resolution heuristic only). It is still a bound,

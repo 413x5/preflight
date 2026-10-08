@@ -1,117 +1,33 @@
 # preflight config — a HOST-side PR-Agent layer, loaded via --extra_config_url.
 #
-# This works against ANY OpenAI-compatible endpoint. The values below default to ClinePass
-# (openai/cline-pass/*), which is simply the endpoint this bundle was first built for; change the
-# model ids and the [litellm] block to target another provider. install.sh exposes an env override
-# for each of them, so a different provider needs no hand-editing:
+# Any OpenAI-compatible endpoint works; these values are the ClinePass defaults the bundle was built
+# for. install.sh overrides them all: PREFLIGHT_MODEL, PREFLIGHT_FALLBACK_MODELS,
+# PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS, PREFLIGHT_MAX_MODEL_TOKENS, PREFLIGHT_FORCE_STREAMING_HOST.
 #
-#   PREFLIGHT_MODEL, PREFLIGHT_FALLBACK_MODELS, PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS,
-#   PREFLIGHT_MAX_MODEL_TOKENS, PREFLIGHT_FORCE_STREAMING_HOST
-#
-# Being a host-side layer (not a repo .pr_agent.toml), token-budget keys are allowed here.
+# Why each value is what it is: docs/DESIGN.md. History: CHANGELOG.md.
 [config]
 model = "openai/cline-pass/deepseek-v4.1-flash"
-# The upstream default is a bare OpenAI id ("gpt-5.6-terra") that the ClinePass endpoint cannot
-# route, so a failed primary would retry against a dead model. Any fallback must be an id your own
-# endpoint serves, in its own provider/model form (or [] to disable fallback entirely).
+# An id your endpoint serves, in its own provider/model form ([] disables fallback).
 fallback_models = ["openai/cline-pass/glm-5.3-flash"]
-# Token budgets: needed when your provider's model is not in LiteLLM's model table (as cline-pass/*
-# is not), because then nothing declares the context window and the packing clamp cuts it to 32k.
-# For a model LiteLLM already knows, set 0 to let LiteLLM resolve it rather than overriding it here
-# with a guess — 0 means "look it up", not "no limit".
-custom_model_max_tokens = 1000000   # declares DeepSeek V4.1 Flash's 1M window (unknown to LiteLLM/MAX_TOKENS)
-max_model_tokens = 1000000          # raise the packing clamp (default 32000) so it isn't cut to 32k; 0 disables the clamp
-output_run_details = true           # show which model actually served the run
-
-# How much hidden reasoning the model does before it answers. This is the largest single lever on how
-# long a review takes, and it is invisible unless you look for it: on this endpoint a review of a
-# ~500-line diff reported 23,467 completion tokens in 111s, of which only ~2,500 characters reached
-# review.md. The rest was reasoning the model discarded. Nothing in review.json or the summary line
-# separates the two, so a slow review reads as a slow provider rather than as a reasoning budget.
-#
-# `low` rather than the upstream default `medium`, measured with the two settings INTERLEAVED on one
-# 525-line diff (base, low, base, low, ...) so endpoint load is shared rather than credited to whichever
-# arm happened to run first:
-#
-#   reasoning_effort  forwarded?   elapsed             completion tokens     findings
-#   medium (default)  no           11.0/23.7/21.2s     2,126/5,593/4,434     2/20/2
-#   low               yes          8.7/10.6/8.4s       1,587/2,037/1,444     2/3/2
-#
-# Mean ~18.6s vs ~9.2s elapsed, and ~4,051 vs ~1,689 completion tokens. The smaller arm is also the
-# tighter one: the default swung by a factor of 2.6 on the same diff, and one of its runs returned 20
-# findings - which reads as much like padding as thoroughness.
-#
-# The first, sequential attempt to measure this put the default at 22-38s against `low` at 14s; a later
-# run of the default on the same diff took 11s. Interleaving is what separates the setting from the
-# endpoint, so quote the table above, not that one. And the honest reading either way is "do not assume
-# reasoning helps": measure your own change against `new=N/M`, since a cheaper round that reports fewer
-# findings just moves the cost into a second round.
-reasoning_effort = "low"
-# pr-agent forwards reasoning_effort only to a model litellm's bundled metadata calls reasoning-capable,
-# and `cline-pass/*` is not in that table - the same gap that forces custom_model_max_tokens above. The
-# key is read, logged, and then silently dropped, so the default looked applied while every run used the
-# provider's own default. This is the documented escape hatch for exactly that case, and it is what makes
-# `reasoning_effort` above take effect rather than merely look set. Point it at your own model id when
-# you change the endpoint, or the lever goes inert again.
-additional_reasoning_effort_models = ["openai/cline-pass/deepseek-v4.1-flash"]
-# git_provider intentionally left unset -> defaults to 'github' (keeps GitHub Actions drop-in ready)
+# Required when the model is absent from LiteLLM's table (as cline-pass/* is), or nothing declares the
+# context window and the packing clamp cuts it to 32k. 0 = let LiteLLM resolve it.
+custom_model_max_tokens = 1000000
+max_model_tokens = 1000000
+output_run_details = true
 
 [litellm]
-# CLINEPASS-SPECIFIC. ClinePass returns a wrapped non-streaming envelope ({data:..., success:true})
-# that LiteLLM cannot normalize, while its streaming returns standard SSE. Force streaming for that
-# host only. The substring below is matched against your request's api_base, so for any other
-# endpoint it simply never matches and this whole block stays inert — no need to delete it unless
-# you are also moving the api_base to a ClinePass-family host.
-# PREFLIGHT_FORCE_STREAMING_HOST replaces the host below if you point at ClinePass through a proxy.
+# CLINEPASS-SPECIFIC, matched against api_base so it is inert for other endpoints: this host's
+# non-streaming envelope cannot be normalized by LiteLLM, its streaming returns standard SSE.
 force_streaming_custom_llm_provider = "openai"
 force_streaming_api_base_substrings = ["api.cline.bot"]
-# Forward the provider so the force-streaming workaround engages. This is also correct for any other
-# OpenAI-compatible endpoint: it just tells LiteLLM to use its OpenAI transport.
 custom_llm_provider = "openai"
 
 [pr_reviewer]
-# Surface ALL findings in ONE review. Default is 3, which is the main cause of the
-# review->fix->review "cascade": the agent fixes 3 and the next run reveals 3 more.
+# Upstream is 3, which makes an agent fix 3 findings and discover 3 more on the next run.
 num_max_findings = 20
-# One clear go/no-go signal, in the same review (handy for preflight-gate):
-require_risk_assessment = true
 require_merge_recommendation = true
-# The other half of the cascade - the half num_max_findings does NOT fix. That setting caps how many
-# findings are *returned*; it cannot help when the model only ever sees part of the diff. When the diff
-# exceeds the token budget pr-agent prunes files and reviews the first patch, so each round exposes a
-# different slice of the tree and the next round "reveals" findings that were there all along. This text
-# is injected verbatim into the reviewer's system prompt (verified), and it is the only lever that tells
-# the model to look at the whole change before answering rather than stopping at the first issue.
-#
-# Two instructions matter, and both are about *completeness*, not severity:
-#   - enumerate the whole change and check each file, so the model does not report one issue and stop;
-#   - report every issue it is confident about, so "I found something" is not read as "I am done".
-# Kept short deliberately: it is prompt budget on every run.
-extra_instructions = """
-Report EVERY issue you are confident about in this diff in a single review - do not stop at the first
-one, and do not hold findings back for a later run. Work through the whole diff file by file and check
-each changed hunk for a concrete defect (a wrong value, a missing guard, an unchecked error path, a
-resource left open, a security-relevant input) before you answer. If you find one issue, keep looking:
-most real diffs have several. List them all, most severe first.
-"""
-
-# The mechanical half of the same problem. `num_max_findings` and `extra_instructions` shape what the
-# model *reports*; neither can help if the model was never shown the whole diff. When a diff exceeds the
-# token budget pr-agent's default is to PRUNE files and review only the first patch, so a "complete"
-# review silently covers a slice of the tree - and the next run, with different content, surfaces findings
-# that were there all along. That reads exactly like a loop that will not converge.
-#
-# Turning chunking on changes the fallback from "review a slice, drop the rest" to "split the diff,
-# review it in chunks and union the findings into one review". It is inert unless the budget actually
-# leaves files out, so a normal diff still costs exactly one AI call.
+# Chunking switches the token-budget fallback from "review a slice, drop the rest" to "split the diff
+# and union the findings". max_number_of_calls bounds chunks SENT; beyond it, files appear only in the
+# coverage footer that coverage=PARTIAL points at.
 enable_large_pr_chunking = true
-# How many chunks may be REVIEWED, not merely how much output is kept: a diff needing more chunks than
-# this has the extra chunks never sent to the model, so their findings are never produced at all. The
-# remaining files are then listed in the review's coverage footer, which is what `coverage=PARTIAL` on
-# the summary line points at - that line is the signal, not the cap. Raise this to cover a larger diff;
-# raising `config.max_model_tokens` instead lets the whole diff fit in one call.
 max_number_of_calls = 3
-
-[pr_code_suggestions]
-# Same idea for `preflight improve` (default is 3 suggestions per chunk):
-num_code_suggestions_per_chunk = 20

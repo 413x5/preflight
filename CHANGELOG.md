@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     still costs exactly one AI call.
   Anything still uncovered is reported rather than hidden: `preflight` now appends
   `coverage=PARTIAL (token budget left files out - see review.md)` to its summary line, so a low
-  `issues=` count on a partially-reviewed diff is not mistaken for a clean change. CI asserts all four
+  `issues=` count on a partially-reviewed diff is not mistaken for a clean change. CI asserts the
   completeness settings, because a regression in any of them shows up as a loop that will not converge
   rather than as a failing build.
   The marker decides **structurally, then textually**: findings render inside the review `<table>` and
@@ -88,12 +88,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `preflight hook` subcommand and `preflight-hook` helper; `install.sh` installs both plus the example
     hooks into `~/.config/preflight/`.
   - Covered by an integration suite in `tests/` (`./tests/run.sh`): real repositories, the real hook
-    files, no framework and no network. 30 cases (28 offline plus one live end-to-end), one per
-    requirement (`REQ-HOOK-01`..`30`, mapped in `tests/README.md`), each protecting a specific behaviour -
-    including the seven bypasses found while building this (unreviewed deletions, renames, symlink
-    typechanges, `git rm --cached`, reviewed files whose names git quotes, gitlinks, and an unset `HOME`).
-    Every fix was reverted in turn to confirm the matching case fails without it; a neutered hook turns 16
-    offline cases red.
+    files, no framework and no network. One check per requirement (`REQ-HOOK-nn`, mapped in
+    `tests/README.md`), each protecting a specific behaviour - including the bypasses found while
+    building this (unreviewed deletions, renames, symlink typechanges, `git rm --cached`, reviewed files
+    whose names git quotes, gitlinks, and an unset `HOME`).
+    Every fix was reverted in turn to confirm the matching case fails without it, and the selfcheck
+    below requires that a neutered hook turns exactly the enforcement-sensitive cases red.
   - Path listings use `-z` and the paths are handled as raw bytes. `--name-only` without `-z` wraps any
     path that needs quoting in double quotes and backslash-escapes it, and `core.quotePath` cannot
     disable that for the characters that matter. Handing such a name back to git asks about a path that
@@ -103,14 +103,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     candidate path. `git cat-file -e "HEAD:sub"` fails for a **gitlink**, so a submodule removal was
     classified as "not tracked at HEAD" and slipped through unreviewed.
 - **A selfcheck for the hook test suite** (`./tests/run.sh selfcheck`, wired into CI). A green suite was
-  not evidence that the hook enforced anything: stubbing the hook out entirely still satisfied 10 of the 26
-  offline cases, because those assert *acceptance* (a reviewed deletion, `commit -a`, a reviewed rename),
-  exercise a deliberate bypass, or test the separate example hooks. Nothing kept the enforcement-sensitive
-  cases sensitive, so a case claiming to catch an unreviewed commit could have passed with the hook
-  disabled and nobody would have known. The selfcheck re-runs the whole suite against a neutered hook and
-  requires exactly the declared enforcement-sensitive cases to fail, reports the split
-  (16 sensitive / 13 insensitive), and **requires every case to be classified** - an unclassified case, or
-  a sensitive case that passes or skips, fails it. The check is itself mutation-tested.
+  not evidence that the hook enforced anything: stubbing the hook out entirely still satisfied a large
+  share of the offline cases, because those assert *acceptance* (a reviewed deletion, `commit -a`, a
+  reviewed rename), exercise a deliberate bypass, or test the separate example hooks. Nothing kept the
+  enforcement-sensitive cases sensitive, so a case claiming to catch an unreviewed commit could have
+  passed with the hook disabled and nobody would have known. The selfcheck re-runs the whole suite
+  against a neutered hook and requires exactly the declared enforcement-sensitive cases to fail, reports
+  the split, and **requires every case to be classified** - an unclassified case, or a sensitive case
+  that passes or skips, fails it. The check is itself mutation-tested.
 
 ### Fixed
 

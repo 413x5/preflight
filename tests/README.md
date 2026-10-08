@@ -107,14 +107,14 @@ selfcheck below, which asks about the whole hook at once.
 ## The selfcheck, and why "all cases pass" is not enough
 
 A passing suite does not by itself mean the hook enforces anything. Stub the hook out entirely
-(`#!/bin/sh` + `exit 0`) and the suite is still green for **12 of its 28 offline cases**, because those
-cases do not depend on the hook refusing something:
+(`#!/bin/sh` + `exit 0`) and the suite is still green for a large share of its offline cases, because
+those cases do not depend on the hook refusing something:
 
 | Group | Cases | Why a neutered hook still passes them |
 |---|---|---|
 | permissive by design | REQ-HOOK-07, 08, 09, 10 | they assert something is **not** blocked (`commit -a` with a scratch file, a reviewed deletion, a reviewed rename, an empty commit), so blocking nothing satisfies them |
 | bypass hatches | REQ-HOOK-14, 15 | they assert `--no-verify` / `PREFLIGHT_SKIP=1` work |
-| orthogonal | REQ-HOOK-20, 22, 26, 27 | `20` checks a file's presence rather than a block; `22`, `26` and `27` exercise the *example* hooks in `files/githooks/`, different files, which stubbing `files/preflight-hook` cannot affect |
+| orthogonal | REQ-HOOK-20, 22, 26, 27, 28, 29 | they do not test the hook at all: `20` checks a file's presence, `22`, `26` and `27` exercise the *example* hooks in `files/githooks/`, and `28`/`29` exercise the review helper - different files, which stubbing `files/preflight-hook` cannot affect |
 
 That is correct per case, but it leaves a hole: nothing stopped the **enforcement-sensitive** set from
 silently losing its teeth. A case could be added that is meant to catch an unreviewed commit, pass with
@@ -136,7 +136,7 @@ It reports the split, so drift is visible in the output:
 
 ```
   PASS  a neutered hook fails exactly the enforcement-sensitive cases  [REQ-SELF-01]
-        16 enforcement-sensitive, 13 insensitive, 28 ids exercised
+        <n> enforcement-sensitive, <n> insensitive, <n> ids exercised
 ```
 
 The selfcheck is itself mutation-tested: adding a temporary case that passes with the hook neutered must

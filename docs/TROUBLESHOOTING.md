@@ -201,15 +201,39 @@ per upgrade; if it happens every run, the symlink target is being deleted - chec
 
 Check `.preflight/review.json` first. If it exists, is recent, and parses, the review **finished** - the
 artifacts are written before pr-agent's shutdown step - and only the exit is stuck. Stop the process; the
-review is usable, so continue with `preflight-gate` and carry on.
+review is usable, so continue with `preflight-gate` and carry on. `preflight review` prints its summary
+line (`issues=... new=N/M ...`) only after pr-agent exits, so a hang also hides the counts: read them from
+`review.json` (`review.key_issues_to_review`, `usage.total_tokens`) instead.
 
-Cause: pr-agent waits after the run for litellm's deferred callbacks to flush, and that wait has been
-observed to block indefinitely on a stalled socket read (`select` with no data arriving). `ai_timeout`
-(`config.ai_timeout`, default 120s) bounds the model *request*, not this shutdown wait, so it does not
-cover it.
+**Diagnosis.** Two distinct shapes have been observed on this machine, both *after* the artifacts were
+written, so both are shutdown problems rather than review problems:
 
-Do not "fix" this by wrapping the call in a short timeout: a timeout that cuts off a slow but valid
-review is the silent-truncation failure this project works hardest to avoid, and a review is expensive
-enough that losing one is worse than waiting. If it becomes routine, set `config.callback_timeout_seconds`
-(the shutdown wait's own budget) rather than bounding the whole command, and treat any output that
-appears after it as suspect.
+| Shape | Process state | Where it sits |
+|---|---|---|
+| waiting | `S`, ~0% CPU | `select_kqueue`/`kevent` - blocked on a socket read that never delivers |
+| spinning | `R`, ~100% CPU | the asyncio loop re-entering `task_step`/`context_run` without settling |
+
+pr-agent waits after the run for litellm's deferred callbacks to flush
+(`drain_litellm_callbacks`). That wait is *supposed* to be bounded by `DEFAULT_CALLBACK_TIMEOUT_SECONDS`
+(30s, overridable) but has been measured running for 4-13 minutes.
+
+Two conditions on this machine plausibly contribute, and which dominates has **not** been isolated:
+`config.litellm.force_streaming_api_base_substrings` makes the response arrive as a long-lived SSE
+connection (a stalled or half-closed stream is exactly what blocks `kevent`), and `extra_instructions`
+makes the model emit far more output than a default review, so there is far more callback traffic to
+drain.
+
+**Do not bound the whole command.** A timeout that cuts off a slow but valid review is the
+silent-truncation failure this project works hardest to avoid, and a review is expensive enough that
+losing one is worse than waiting.
+
+**If it becomes routine**, the shutdown wait has its own budget:
+`[litellm] callback_timeout_seconds` (default 30) in `~/.config/preflight/preflight.toml`. Note the
+section: it is **`[litellm]`**, not `[config]` - `cli.py` reads
+`get_settings().litellm.get("callback_timeout_seconds", 30)`, and a key placed under `[config]` is
+silently ignored, so an operator who "sets" the wrong one keeps hanging with no feedback. The model
+*request* is bounded separately by `config.ai_timeout` (default 120s), which does not cover this wait.
+
+Lowering `callback_timeout_seconds` has **not** been confirmed to stop the hang - one attempt was
+inconclusive because it used the wrong section, and no verified bound has been measured. Treat it as a
+lever to test, not a known fix.

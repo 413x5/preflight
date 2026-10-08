@@ -71,6 +71,43 @@ Small, ready to do.
 
 Wanted; needs a little design.
 
+- [ ] **Diagnose and bound the post-run hang (highest-value work; the next PR).** Confirmed again on the
+      final review of this branch: the watchdog saw the process still alive 480s after the model call had
+      finished, with no summary line printed. Treat this as the known entry condition, not a new symptom.
+
+      `preflight review` completes, writes `review.md` + `review.json`, and then sometimes never exits -
+      measured at 4-13 minutes, in two shapes (sleeping in `kevent`, or spinning at 100% CPU in the
+      asyncio loop). Full symptom notes are in `docs/TROUBLESHOOTING.md` ("prints nothing more and never
+      exits"), which also records what is **not** yet known. What a future session needs:
+
+      - The hang is in pr-agent's shutdown step (`drain_litellm_callbacks`), *after* the artifacts are
+        complete - so it never corrupts a review, and stopping the process is always safe.
+      - **Not isolated:** two plausible contributors on this machine - the forced streaming endpoint
+        (`config.litellm.force_streaming_api_base_substrings = ["api.cline.bot"]`, a long-lived SSE
+        connection is exactly what blocks `kevent`) and the increased output volume from
+        `extra_instructions`. Test them separately: point at a non-streaming endpoint, or temporarily
+        empty `extra_instructions`, and see whether the hang disappears.
+      - **Not yet tested correctly:** `[litellm] callback_timeout_seconds` is the drain's own budget and
+        `cli.py` reads it from `[litellm]`, *not* `[config]`. One attempt placed it under the wrong
+        section, so it proved nothing. The correct experiment is a run with it set under `[litellm]`;
+        if the process still hangs, the block is inside the stream/transport and no config key will fix
+        it.
+      - **The summary line is printed after pr-agent exits**, so a hang also hides `issues=`/`new=`. If
+        this is not fixed, `preflight` could emit the counts *before* the drain (it already has
+        `review.json`) so a hung run still reports what it found. That is a smaller, independent fix and
+        worth doing regardless.
+      - Do **not** bound the whole command with a short timeout; a timeout that cuts off a slow but valid
+        review is the silent-truncation failure this project avoids. Bound the shutdown phase only.
+- [ ] **Make the model call cheaper and faster.** A single review on this branch costs ~27k prompt tokens
+      and 53-61k completion tokens, and 260-480s of model time - the largest part of a loop iteration.
+      Candidates: trim what the prompt includes (the diff is ~2k lines and every file is sent),
+      reconsider whether `extra_instructions` asking for *every* finding is worth its output volume,
+      and check whether `num_max_findings = 20` invites padding. Any change must be measured against the
+      convergence signal (`new=N/M`) rather than assumed, since completeness is the property that makes
+      the loop terminate at all.
+- [ ] **Record the convergence evidence in CI.** `REQ-HOOK-31` covers the counting logic, but nothing
+      checks that a real review's summary *emits* `new=` (the live case does not assert it). A cheap
+      addition to `case_e2e_real_review`.
 - [ ] **One review packet.** Optionally run `preflight review` + `preflight improve` together so a
       coding agent gets the findings *and* concrete suggested diffs in a single round (fewer
       iterations). The single-review completeness work (chunking, `extra_instructions`, the coverage

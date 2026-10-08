@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   looks like a repeat. Text matching means a lightly reworded repeat can still read as new - a strong
   hint, not a verdict, absent on a first review or when the previous one is unreadable.
   `AGENTS-review-snippet.md` documents the stop condition, and `docs/DESIGN.md` the reasoning and limits.
+
+  Reviewing this feature found that its own tests were the weakest part, and each gap is fixed:
+  the assertions were **skipped wherever pr-agent is absent** - which is always, in CI - so the headline
+  logic ran under no check at all; they now live in a pr-agent-independent case (`REQ-HOOK-31`) that runs
+  in CI. A simulated upstream change to the footer bullet format now fails loudly instead of quietly
+  retiring the marker. And `COVERAGE_RE` no longer requires the emoji: the lenient read that keeps the
+  counts on a non-UTF-8 `review.md` replaces an invalid emoji with U+FFFD, so requiring it meant the
+  marker could never fire on exactly the file it was written to tolerate.
+
+  Review also caught a doc bug worth naming: the troubleshooting advice pointed at
+  `config.callback_timeout_seconds` when pr-agent reads it from `[litellm]`, so anyone following it would
+  have changed nothing and kept hanging. A wrong config path fails silently, so `REQ-HOOK-29` now checks
+  every `section.key` the docs name against pr-agent's own defaults - the guidance cannot rot unnoticed
+  again.
 - **One review now reports everything, instead of one finding at a time.** The `review → fix → re-review`
   loop was slow because it had two independent causes, and only one of them was configured for.
   `pr_reviewer.num_max_findings` caps how many findings a review *returns* (upstream default 3), and it
@@ -256,14 +270,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known issue
 
-- **`preflight review` can complete and then never exit.** Observed repeatedly in one session: both
-  artifacts are written, then pr-agent's post-run wait for litellm callbacks blocks indefinitely on a
-  stalled socket read. The review itself is finished and correct - only the exit hangs - so a scripted
-  loop that waits on the process would stall forever. `config.ai_timeout` bounds the model request, not
-  this shutdown wait, so it does not cover it. If a run appears to hang, check whether
-  `.preflight/review.json` was written; if it was, stop the process and use the review. Not fixed by
-  wrapping the command in a shorter timeout, which would risk cutting off a slow but valid review - the
-  silent-truncation failure this project works hardest to avoid. See `docs/TROUBLESHOOTING.md`.
+- **`preflight review` can complete and then never exit.** Both artifacts are written, and then
+  pr-agent's post-run wait for litellm callbacks fails to finish - measured at 4-13 minutes, in two
+  shapes: sleeping in `kevent`, or spinning at 100% CPU in the asyncio loop. The review itself is
+  finished and correct, so a scripted loop that waits on the process stalls for no reason; stop it and
+  use the artifacts. The summary line (`issues=`, `new=`) is printed after pr-agent exits, so a hang
+  hides the counts too - read them from `review.json`. `config.ai_timeout` bounds the model request, not
+  this wait, which has its own budget at `[litellm] callback_timeout_seconds` (not `[config]` - the
+  wrong section is silently ignored). That bound has **not** been confirmed to stop the hang. Not fixed
+  by wrapping the command in a shorter timeout, which would risk cutting off a slow but valid review -
+  the silent-truncation failure this project works hardest to avoid. Diagnosis, the two contributing
+  conditions, and what remains untested are recorded in `docs/TROUBLESHOOTING.md`, with the follow-up
+  work in `ROADMAP.md`.
 
 ## [0.1.0] - 2026-10-07
 

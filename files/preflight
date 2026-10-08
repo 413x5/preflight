@@ -350,14 +350,21 @@ line = (f"preflight: issues={len(issues)} security={sec or 'n/a'}"
 # review does - and a miss is the safer error here: it degrades to the plain summary line, whereas a
 # spurious PARTIAL is what teaches the reader to ignore the marker.
 COVERAGE_RE = re.compile(
-    r"<hr>\s*\n\s*\n?\s*\u26a0\ufe0f \*\*Review coverage:\*\* The following files were not included "
-    r"in this review because of the token budget:\s*\n\s*-\s*`",
+    # The rule and the bold header are separated by `[^\n]*` rather than by the emoji, which fixes a
+    # real hole and removes a fragility. Hole: the read below is lenient (`errors='replace'`) so the
+    # counts survive a non-UTF-8 review.md, but that same leniency turns an invalid emoji into U+FFFD -
+    # so requiring the emoji meant the marker could never fire on exactly the file it was written to
+    # tolerate, reporting a partial review as complete. Fragility: pr-agent's choice of pictograph was
+    # load-bearing. Nothing non-ASCII is needed to discriminate - the rule, the bold header, the
+    # sentence and the bullet list do that - so the gap is just "whatever pr-agent puts there".
+    r"<hr>\s*\n\s*[^\n]*\*\*Review coverage:\*\*\s*The following files were not included in this "
+    r"review because of the token budget:\s*\n\s*-\s*`",
     re.S)
 try:
-    # errors='replace', not a bare read: the footer contains an emoji, so a review.md written in a
-    # non-UTF-8 locale would raise UnicodeDecodeError - which is a ValueError, not an OSError, so the
-    # except below would not catch it. The whole summary line would be lost (the outer `|| true`
-    # swallows the traceback), taking the counts with it. Decoding leniently keeps them.
+    # errors='replace', not a bare read: a review.md written in a non-UTF-8 locale would raise
+    # UnicodeDecodeError - which is a ValueError, not an OSError, so the except below would not catch it
+    # - and the whole summary line (the counts, not just the marker) would be lost, because the outer
+    # `|| true` swallows the traceback. Decoding leniently keeps them.
     md = open(sys.argv[2], encoding='utf-8', errors='replace').read()
 except OSError:
     md = ''

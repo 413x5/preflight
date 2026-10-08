@@ -279,6 +279,12 @@ Reproducing all of that is a much narrower accident than quoting a sentence, and
 additionally restricted to the text after the review's last `</table>` (findings render inside the table;
 the footer is emitted after it).
 
+The match spans the rule and the bold header with a wildcard rather than naming pr-agent's emoji, for two
+reasons: the read is deliberately lenient (so the counts survive a non-UTF-8 `review.md`), and that same
+leniency rewrites an invalid emoji as U+FFFD - so requiring the emoji meant the marker could never fire on
+exactly the file it was written to tolerate. Nothing non-ASCII is needed to discriminate, so nothing
+non-ASCII is required.
+
 Two honest limits. It is still text matching, so a byte-faithful copy of the emitted footer is
 indistinguishable from the footer. And the structural half - searching only after the review table -
 assumes plain-diff mode emits that table; if a future output shape drops it, the restriction goes inert

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# preflight — local PR-style review of the current branch vs the remote default branch.
+# preflight — local PR-style review of the pending change (or, optionally, the whole branch).
 #
 # Usage:  preflight [command] [args...]
 #   command : review (default) | describe | improve | ask "<question>" | hook
@@ -8,23 +8,16 @@
 #   hook    — verify that the content being committed was already reviewed. This is what a repo's
 #             .githooks/pre-commit calls; it is read-only and never runs a review. See docs/DESIGN.md.
 #
-# Base (PREFLIGHT_BASE), used only by the `worktree` and `head` scopes:
-#   the ref the diff is taken against. Unset, it is resolved as origin/HEAD, then the remote's own
-#   HEAD, then origin/main|master, then main|master. Set it to target anything else. The `commit`
-#   scope needs no base - it always diffs against HEAD.
-#
 # Scope (PREFLIGHT_SCOPE):
-#   commit (default)   — reviews exactly what a commit would contain: HEAD -> working tree, including
-#                        untracked files. No remote, no base, no fetch: this is the "review before you
-#                        commit" case, and it is what the pre-commit hook enforces.
-#   worktree           — reviews the whole BRANCH: the default branch -> your working tree. Use this to
-#                        review a feature branch before opening its PR; it needs a resolvable base.
-#   head               — reviews committed changes only (base...HEAD). Cannot be enforced by a
-#                        pre-commit hook, which by construction runs before the commit exists.
+#   commit (default)   — exactly what a commit would contain: HEAD -> working tree, untracked files
+#                        included. No remote, no base, no fetch, and it is what the hook enforces.
+#   worktree           — the whole BRANCH: default branch -> working tree. Needs a resolvable base
+#                        (PREFLIGHT_BASE overrides it) and a fetch.
+#   head               — committed changes only (base...HEAD). Not enforceable by a pre-commit hook,
+#                        which by construction runs before the commit exists.
 #
-#   Reviewing commit by commit covers a multi-commit branch completely: each commit is checked against
-#   the tree that was reviewed for it, so the union of the per-commit reviews covers the branch, and
-#   content cannot reach it unreviewed.
+# Reviews are per-commit, which covers a multi-commit branch: each commit is checked against the tree
+# reviewed for it, so their union covers the branch.
 #
 # Artifacts (dir = PREFLIGHT_DIR, default .preflight), auto-excluded from git:
 #   review -> review.md + review.json (+ review.meta.json, the hook's record of what was reviewed)
@@ -37,24 +30,19 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 
-# The config directory, honouring PREFLIGHT_HOME exactly as install.sh defines it. Defining it once
-# matters: the version lookup, the secrets relink, the hook helper and the review config URL all live
-# here, and if only some of them honoured the override they could read different directories - the
-# version from one tree, the config from another.
+# PREFLIGHT_HOME is honoured here exactly as install.sh defines it. Defining it once matters: the
+# version lookup, the secrets relink, the hook helper and the review config URL all use it, and if only
+# some honoured the override they could read different directories.
 cfgdir="${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}"
 
-# An installed copy has no way to tell you what it is, which makes "did the bundle update on this
-# machine?" unanswerable except by re-running install.sh and hoping. There was a real session where
-# exactly that question went unanswered. One source of truth: files/VERSION, installed next to the
-# config. Looked up beside the script first (a checkout, or a vendored copy) and then in the config
-# dir - PREFLIGHT_HOME overrides that dir exactly as it does in install.sh, so a throwaway-prefix
-# install can still report its version. `unknown` rather than an error: a missing VERSION should not
-# make the tool unusable.
+# files/VERSION is the single source of truth, installed next to the config: looked up beside the
+# script first (a checkout or vendored copy), then in cfgdir. `unknown` rather than an error, because a
+# missing VERSION should not make the tool unusable.
 #
-# ${HOME:-} and not $HOME: bash expands every word of the `for` list before the loop starts, so a
-# bare $HOME is evaluated even when the FIRST candidate would have matched - and under `set -u` an
-# unset HOME (`env -u HOME preflight --version`) would abort instead of printing a version. The
-# example hook guards HOME for the same reason (REQ-HOOK-26); this is the same trap one level up.
+# ${HOME:-} and not $HOME: bash expands every word of the `for` list before the loop starts, so a bare
+# $HOME is evaluated even when the FIRST candidate would have matched - and under `set -u` an unset HOME
+# (`env -u HOME preflight --version`) would abort instead of printing a version. The example hook guards
+# HOME for the same reason (REQ-HOOK-26).
 bundle_version() {
   local cand
   for cand in "$here/VERSION" "$cfgdir/VERSION"; do
@@ -68,12 +56,12 @@ bundle_version() {
 
 usage() {
   cat <<'EOF'
-preflight — review the working tree (no commit, no GitHub round trip).
+preflight — review the pending change (no commit, no GitHub round trip).
 
 Usage:  preflight [command] [args...]
 
 Commands:
-  review (default)     review the working tree vs the base branch
+  review (default)     review the pending change (commit scope) vs the base branch
                        -> .preflight/review.md + .preflight/review.json
   describe             generate a PR description -> .preflight/description.md
   improve              suggest concrete code changes -> .preflight/improve.md
@@ -113,10 +101,8 @@ EOF
 cmd="review"
 if [ "$#" -gt 0 ]; then cmd="$1"; shift; fi
 
-# Answered before anything touches git or the config - including before ensure-link.sh is sourced
-# below - so `preflight --help` works anywhere: outside a repository, and on a machine where the
-# secrets relink helper wants to print something first. The ordering matters here because this is the
-# first command a new user runs after installing.
+# Answered before anything touches git or the config (including ensure-link.sh below), so
+# `preflight --help` works outside a repository and does not depend on the config being readable.
 case "$cmd" in
   -h|--help|help)          usage; exit 0 ;;
   -V|--version|version)    printf 'preflight %s\n' "$(bundle_version)"; exit 0 ;;
@@ -134,10 +120,6 @@ case "$cmd" in
 esac
 
 dir="${PREFLIGHT_DIR:-.preflight}"
-# `commit` (default) reviews only what a commit would contain: HEAD -> working tree. That is the case this
-# tool exists for - reviewing a change before it is submitted - and it needs no remote, because HEAD is
-# already the reference point. `worktree` and `head` review the whole branch since the default branch,
-# which needs a base and a fetch; they remain for reviewing a feature branch before its PR.
 scope="${PREFLIGHT_SCOPE:-commit}"
 case "$scope" in
   commit|worktree|head) ;;
@@ -147,10 +129,9 @@ esac
 # `hook` is a verifier, not a review: it must not fetch, snapshot or require a config. Dispatch it
 # before any of that, because it runs on every commit.
 #
-# ${HOME:-} here and above, for the reason bundle_version documents: this script runs under `set -u`,
-# and an unset HOME (`env -u HOME git commit` - the case REQ-HOOK-26 guards in the example hook) must
-# degrade to "helper not found" and refuse the commit, not abort with "HOME: unbound variable". A
-# bare $HOME made the outer helper panic before it could reach the guard the inner one has.
+# ${HOME:-} here and above, for the reason bundle_version documents: under `set -u` an unset HOME
+# (`env -u HOME git commit` - the case REQ-HOOK-26 guards in the example hook) must degrade to "helper
+# not found" and refuse the commit, not abort with "HOME: unbound variable".
 if [ "${cmd:-review}" = "hook" ]; then
   for cand in "$here/preflight-hook" "${cfgdir}/preflight-hook"; do
     if [ -f "$cand" ]; then exec sh "$cand" "$@"; fi
@@ -163,8 +144,8 @@ root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo 'preflight: not in
 cd "$root"
 git rev-parse --verify -q HEAD >/dev/null 2>&1 || { echo 'preflight: repository has no commits yet' >&2; exit 3; }
 # The branch scopes need an up-to-date base, and a remote to get it from; `commit` needs neither, so it
-# does no network round trip at all. Skipping the fetch is not just faster - it is what makes the default
-# work offline, and it removes the whole class of base-resolution failures from the common path.
+# makes no network round trip and works offline. This also removes base-resolution failures from the
+# common path.
 if [ "$scope" != 'commit' ]; then
   git fetch --quiet origin 2>/dev/null || echo 'preflight: warning: could not fetch origin' >&2
 fi
@@ -178,12 +159,9 @@ fi
 #   4. origin/main, origin/master, then main, master - the conventional names, remote first.
 #
 # Falling through to a bare `main` without checking (the old behaviour) was a real failure: in a
-# repository whose default branch is not `main`, `git diff main...HEAD` was fatal, pr-agent exited 2
-# with "No diff content received", and - worst of it - the artifact dir was left EMPTY. An empty
-# artifact dir is exactly what the commit hook reports as "no review found", so a base-resolution
-# failure turned into every later commit being blocked for a reason that had nothing to do with the
-# commit. Failing here, loudly, is the difference between a wrong answer and a wrong answer with
-# nothing to look at.
+# repository whose default branch is not `main`, `git diff main...HEAD` was fatal and pr-agent exited 2
+# with "No diff content received", leaving the artifact dir EMPTY - which the commit hook reports as
+# "no review found", so a base-resolution failure blocked every later commit. Fail here instead.
 resolve_base() {
   local cand
   if [ -n "${PREFLIGHT_BASE:-}" ]; then
@@ -249,12 +227,11 @@ else
   GIT_INDEX_FILE="$idxf" git read-tree HEAD
   GIT_INDEX_FILE="$idxf" git add -A
   tree="$(GIT_INDEX_FILE="$idxf" git write-tree)"
-  # This tree is the exact content handed to pr-agent, so it is the record the commit hook
-  # compares against. Captured here, on the same temp index, rather than recomputed later. The hook's
-  # containment check is unchanged by the scope: it compares every path being committed against this tree.
+  # This tree is the exact content handed to pr-agent, so it is the record the commit hook compares
+  # against. The hook's containment check is unchanged by the scope: it compares every path being
+  # committed against this tree.
   hook_tree="$tree"
   if [ "$scope" = 'commit' ]; then
-    # HEAD -> worktree. This is the change a commit would contain, so a synthetic commit is unnecessary:
     # `git diff HEAD <tree>` is exactly `git diff --cached`, without needing an index or a base.
     diff_ref='HEAD'
   else
@@ -282,24 +259,21 @@ else
 fi
 
 # Set the PREVIOUS review aside before this run overwrites it, so the summary can report whether the
-# run surfaced anything NEW. This is the loop's convergence signal. The loop's failure mode is not
-# "the model misses bugs" - it is "the model keeps reporting concerns that are already answered",
-# because each round reviews the text the previous round wrote (comments, docs, guards) and a reviewer
-# cannot tell a deliberate, documented trade-off from an oversight. Without a new-vs-repeat count the
-# agent cannot distinguish "the change is clean now" from "the same two findings came back reworded",
-# so it re-runs forever. Counting only what is genuinely new gives it a stopping rule.
+# run surfaced anything NEW - the loop's convergence signal. The loop's failure mode is not "the model
+# misses bugs" but "the model keeps reporting concerns that are already answered", because each round
+# reviews the text the previous round wrote (comments, docs, guards) and a reviewer cannot tell a
+# deliberate, documented trade-off from an oversight. Counting only what is new gives it a stopping rule.
 # review is the only command that writes a json artifact, so this is inert for describe/improve/ask.
 prev_json=''
 if [ -n "$out_json" ] && [ -f "$out_json" ]; then
-  # Assign only after a SUCCESSFUL copy: `mktemp` already created the file, so clearing the variable on
-  # a failed copy (`|| prev_json=''`) would leave the file behind and the EXIT trap - which tests for a
-  # non-empty path - would never remove it, leaking one temp file per failure.
+  # Assign only after a SUCCESSFUL copy: `mktemp` already created the file, so a failed copy must clean
+  # up itself - the EXIT trap only removes a non-empty path, so it would otherwise leak a file per failure.
   cand="$(mktemp)"
   if cp "$out_json" "$cand" 2>/dev/null; then prev_json="$cand"; else rm -f "$cand"; fi
 fi
 
-# Report the counts from the artifact, so they survive a hang. Called from both points, hence idempotent.
-# The flag is set only on a successful read: an artifact caught mid-write must not retire the retry.
+# Report the counts from the artifact, so they survive a hang. Called from both points, hence idempotent:
+# the flag is set only on a successful read, so an artifact caught mid-write does not retire the retry.
 emit_summary() {
   [ -z "${summary_printed:-}" ] || return 0
   [ -f "$out_json" ] || return 0
@@ -315,94 +289,49 @@ sec = (r.get('security_concerns') or '').strip()
 line = (f"preflight: issues={len(issues)} security={sec or 'n/a'}"
         f" effort={r.get('estimated_effort_to_review_[1-5]')}"
         f" tokens={(d.get('usage') or {}).get('total_tokens')}")
-# Coverage is part of the verdict, so report it next to the counts. A pruned diff means the model was
-# shown part of the tree, and `issues=1` on a partial review does NOT mean "one problem in the change"
-# - it means the rest was never looked at. That misreading is what turns a single review into an
-# unbounded fix/re-review loop, so it belongs on the line an agent actually reads, not only in the
-# markdown footer further down.
+# Coverage belongs on the line an agent actually reads: a pruned diff means the model was shown part
+# of the tree, so `issues=1` does NOT mean "one problem in the change" - it means the rest was never
+# looked at. Reported only for the branch scopes; see the gate below.
 #
-# Matching is the hard part, because the file being searched is model-generated prose and a finding may
-# legitimately *discuss* coverage - a review of THIS feature did exactly that. Text matching alone cannot
-# win: the model can reproduce the footer's words while explaining them. Attempts, in order:
-#   - 'Review coverage:' alone - matched its own review, reporting PARTIAL for a fully-reviewed diff;
-#   - two independent substrings - a finding quoted both and still tripped it;
-#   - the footer's contiguous sentence - a verbatim quote still trips it;
-#   - only searching after the review's last `</table>` - closer, but prose can still follow the table.
-# What actually holds is matching pr-agent's FOOTER BLOCK as it EMITS it, not its prose: the footer is
-# introduced by a horizontal rule and continues with the file bullets pr-agent generates
-# (`"\n\n<hr>\n\n" + "⚠️ **Review coverage:** ... token budget:\n" + "- \`file\`" ...`). Requiring the
-# `<hr>` anchor, the header, the sentence AND the bullet list makes this a match of the footer's emitted
-# STRUCTURE - a finding would have to forge a horizontal rule and a bullet list of files to trip it,
-# which is a far narrower accident than quoting a sentence. The tail-after-`</table>` restriction is
-# kept as a second, independent condition.
-#
-# The limit, stated honestly: this is text matching, so a reproduction that is byte-faithful to the
-# emitted footer is indistinguishable from the footer itself. What makes that acceptable rather than
-# hand-waving is that the remaining ambiguity all points one way - a model writing the full footer,
-# rule and bullets included, is either reproducing pr-agent's own output or writing something no real
-# review does - and a miss is the safer error here: it degrades to the plain summary line, whereas a
-# spurious PARTIAL is what teaches the reader to ignore the marker.
+# Matching is text matching against model-generated prose, and a finding may legitimately *discuss*
+# coverage. What holds is matching pr-agent's FOOTER BLOCK as it EMITS it - the `<hr>` anchor, the bold
+# header, the sentence and the generated `- \`file\`` bullets - rather than any single sentence, which a
+# finding can quote verbatim by accident. The limit: a byte-faithful reproduction of the emitted footer
+# is indistinguishable from the footer, and a miss degrades to the plain summary line, which is the
+# safer error (a spurious PARTIAL is what teaches the reader to ignore the marker).
 COVERAGE_RE = re.compile(
-    # The rule and the bold header are separated by `[^\n]*` rather than by the emoji, which fixes a
-    # real hole and removes a fragility. Hole: the read below is lenient (`errors='replace'`) so the
-    # counts survive a non-UTF-8 review.md, but that same leniency turns an invalid emoji into U+FFFD -
-    # so requiring the emoji meant the marker could never fire on exactly the file it was written to
-    # tolerate, reporting a partial review as complete. Fragility: pr-agent's choice of pictograph was
-    # load-bearing. Nothing non-ASCII is needed to discriminate - the rule, the bold header, the
-    # sentence and the bullet list do that - so the gap is just "whatever pr-agent puts there".
+    # `[^\n]*` rather than the emoji, which the lenient read below may have replaced with U+FFFD: requiring
+    # the emoji would make the marker unable to fire on exactly the file it was written to tolerate, and
+    # would make pr-agent's choice of pictograph load-bearing.
     r"<hr>\s*\n\s*[^\n]*\*\*Review coverage:\*\*\s*The following files were not included in this "
     r"review because of the token budget:\s*\n\s*-\s*`",
     re.S)
 try:
-    # errors='replace', not a bare read: a review.md written in a non-UTF-8 locale would raise
-    # UnicodeDecodeError - which is a ValueError, not an OSError, so the except below would not catch it
-    # - and the whole summary line (the counts, not just the marker) would be lost, because the outer
-    # `|| true` swallows the traceback. Decoding leniently keeps them.
+    # errors='replace', not a bare read: a non-UTF-8 review.md would raise UnicodeDecodeError - a
+    # ValueError, not an OSError, so the except below would not catch it - and the outer `|| true` would
+    # swallow the traceback, losing the counts too, not just the marker.
     md = open(sys.argv[2], encoding='utf-8', errors='replace').read()
 except OSError:
     md = ''
-# Everything a finding writes renders inside the table, and plain-diff mode always renders one. This
-# restriction is LOAD-BEARING, not a nicety: the regex above matches the emitted structure, and a finding
-# that quotes the footer verbatim reproduces exactly that structure, so only "it is inside the table"
-# rejects it. REQ-HOOK-28 asserts that case, and removing this line is one of the listed mutations.
-#
-# It is not self-sufficient either - a review whose prose AFTER the table reproduces the rule and bullets
-# would pass both conditions - but that requires forging pr-agent's generated output, whereas every
-# observed false positive was a finding describing the footer. With no `</table>` (a shape plain-diff
-# does not produce) the whole file is searched.
-#
-# Neither failure direction is acceptable, which is why both are tested: a miss retires the marker and a
-# partial review reads as complete, while a spurious match fires it on a complete one and teaches the
-# reader to ignore it. This line is an AID that points at the authoritative footer in review.md, not a
-# guarantee - `review.md` is what to read to settle whether coverage was complete.
+# LOAD-BEARING: every finding renders inside the table, so this rejects a finding that quotes the footer
+# verbatim (REQ-HOOK-28; removing this line is one of the listed mutations). Not self-sufficient - prose
+# after the table could reproduce the footer - but that requires forging pr-agent's own output. With no
+# `</table>` the whole file is searched. This is an AID pointing at the authoritative footer in
+# review.md, not a guarantee.
 tail = md[md.rfind('</table>') + len('</table>'):] if '</table>' in md else md
-# Only the branch scopes can hit this: a pending-commit diff is orders of magnitude below the token
-# budget, so pr-agent never prunes it. For them the marker is a real safety net - a pruned branch diff
-# means `issues=1` reads as "one problem" when it means "the rest was never looked at". Under `commit`
-# scope there is nothing to announce, so it is not emitted rather than emitted-and-always-absent.
+# Only the branch scopes can hit this: a pending-commit diff is far below the token budget, so pr-agent
+# never prunes it and there is nothing to announce.
 if os.environ.get('PREFLIGHT_SCOPE_IS_BRANCH') == '1' and COVERAGE_RE.search(tail):
     line += " coverage=PARTIAL (token budget left files out - see review.md)"
 
-# How many findings are NEW since the previous review, and how many repeat one already answered here.
-# This is the loop's stopping rule, and it is deliberately mechanical: the failures that keep this loop
-# alive are the ones a reviewer cannot distinguish from a real defect - it re-reports a documented
-# trade-off, or re-words a finding the previous round already raised, because it has no memory of that
-# round. Both look like fresh findings in a single review.
-#
-# Two things make "repeat" decidable without guessing:
-#   - identity is (file, header, content) per pr-agent's own dedupe key, so a genuinely different issue
-#     in the same file still counts as new;
-#   - the prompt is fixed, so a re-review of unchanged content tends to reproduce the same text. There is
-#     deliberately no sampling pin: `temperature`/`seed` are NOT set here, so a paraphrase is a normal
-#     outcome and a reworded repeat still reads as new. That is the honest limit, not a defect to paper
-#     over - see docs/DESIGN.md, which explains why the lever is left unset.
-# A reworded repeat can therefore still read as new, which is the honest limit: the count is a strong
-# hint, not a verdict. `new=0` with issues>0 is the signal to stop and read the findings, not to fix
-# them; `new=N` means there is something the last round did not see.
+# How many findings are NEW since the previous review. Identity is (file, header, content) per
+# pr-agent's own dedupe key, so a different issue in the same file still counts as new. temperature and
+# seed are deliberately NOT set, so a reworded repeat still reads as new - the honest limit of a
+# mechanical count. `new=0` with issues>0 means stop and read the findings, not fix them.
 #
 # Gated on "a previous review was LOADED", not on "it had findings": a clean previous review makes every
-# current finding new, and suppressing the count there would remove the signal in the one round that
-# follows a clean pass - the round most likely to be re-running for no reason.
+# current finding new, and suppressing the count there would remove the signal from the round most likely
+# to be re-running for no reason.
 new = None
 prev_path = os.environ.get('PREFLIGHT_PREV_JSON') or ''
 if prev_path and os.path.isfile(prev_path):
@@ -437,20 +366,20 @@ PY
   return 0
 }
 
-# Run the review in the background and report its counts from the artifact, so a pr-agent that finishes the
-# review and then hangs on shutdown cannot hide `issues=`/`new=`/`coverage=` - the signal the loop stops on.
-# Split into two bounded phases, because a hang can happen before OR after the artifacts are written.
+# Run the review in the background and report its counts from the artifact, so a pr-agent that finishes
+# the review and then hangs on shutdown cannot hide `issues=`/`new=`/`coverage=`. Two bounded phases,
+# because a hang can happen before OR after the artifacts are written.
 if [ -n "$out_json" ]; then
-  # Remove the previous run's artifacts BEFORE launching, so phase 1 waits for THIS run's output. Without
-  # this the wait sees the old file, never waits, and reports the previous review's counts - worse than
-  # printing nothing, because it reads like a verdict. Removing after the launch would be a race.
+  # Remove the previous run's artifacts BEFORE launching, so phase 1 waits for THIS run's output: an old
+  # file present would make the wait return immediately with the previous review's counts. Removing after
+  # the launch would be a race.
   rm -f "$out_json" "$out_md" 2>/dev/null || true
 
   git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
     --output "$out_md" --json-output "$out_json" "$cmd" "$@" &
   pr_pid=$!
 
-  # Phase 1: the review itself. `kill -0` tests liveness without reaping, so the exit status survives.
+  # Phase 1: the review. `kill -0` tests liveness without reaping, so the exit status survives.
   waited=0
   review_limit="${PREFLIGHT_REVIEW_WAIT:-3600}"
   while { [ ! -f "$out_json" ] || [ ! -f "$out_md" ]; } \
@@ -461,7 +390,7 @@ if [ -n "$out_json" ]; then
 
   emit_summary
 
-  # Phase 2: the shutdown. Bounded and short, because the review is already on disk by now.
+  # Phase 2: the shutdown - bounded and short, because the review is already on disk by now.
   shutdown_waited=0
   shutdown_limit="${PREFLIGHT_SHUTDOWN_WAIT:-120}"
   while kill -0 "$pr_pid" 2>/dev/null && [ "$shutdown_waited" -lt "$shutdown_limit" ]; do
@@ -491,9 +420,9 @@ if [ -n "$out_json" ]; then
   pr_status=0
   wait "$pr_pid" 2>/dev/null || pr_status=$?
 
-  # A process WE stopped after a complete review is not a failure - `preflight-gate` decides the verdict on
-  # the artifact. Anything else (including a stopped run that wrote nothing) keeps its own status, so a bad
-  # key, a real error, or a hang that produced no review still fails the run.
+  # A process WE stopped after a complete review is not a failure - `preflight-gate` decides the verdict
+  # on the artifact. Anything else (including a stopped run that wrote nothing) keeps its own status, so a
+  # bad key, a real error, or a hang that produced no review still fails the run.
   if [ -n "$stopped" ] && [ -n "$complete" ]; then
     case "$pr_status" in
       143|137) pr_status=0 ;;
@@ -503,7 +432,7 @@ if [ -n "$out_json" ]; then
   [ -n "$complete" ] && emit_summary
   [ "$pr_status" = 0 ] || exit "$pr_status"
 else
-  # describe/improve/ask write no JSON artifact, so there is nothing to salvage - they are not bounded, and
+  # describe/improve/ask write no JSON artifact, so there is nothing to salvage: they are not bounded, and
   # a timeout must never cut off slow-but-valid work.
   git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
     --output "$out_md" "$cmd" "$@" &
@@ -523,12 +452,10 @@ if [ "$cmd" = 'review' ] || [ "$cmd" = 'review_pr' ]; then
       if [ -f "$cand" ]; then gate_bin="$cand"; break; fi
     done
     if [ -n "$gate_bin" ]; then
-      # Run it with the interpreter its shebang names, NOT `sh`. preflight-gate is bash (`set -o
-      # pipefail`), and on Debian/Ubuntu /bin/sh is dash, which rejects pipefail outright - the gate
-      # died on its first line, the exit code was read as a failed verdict, and every commit was then
-      # blocked with "the last review did not pass" for a reason unrelated to the review. Executing it
-      # directly honours the shebang, and there is deliberately no `|| sh` fallback: that would
-      # reintroduce exactly this silently-wrong verdict on any host where the shebang cannot be used.
+      # Execute it directly so its shebang is honoured, NEVER via `sh`: preflight-gate is bash (`set -o
+      # pipefail`) and on Debian/Ubuntu /bin/sh is dash, which rejects pipefail outright - the gate died
+      # on its first line and its exit code was read as a failed verdict, blocking every commit for a
+      # reason unrelated to the review. Deliberately no `|| sh` fallback, which would reintroduce that.
       PREFLIGHT_DIR="$dir" "$gate_bin" >/dev/null 2>&1 || gate_code=$?
       if [ "$gate_code" = 126 ] || [ "$gate_code" = 127 ]; then
         echo "preflight: warning: could not execute ${gate_bin}; the gate verdict is unknown" >&2

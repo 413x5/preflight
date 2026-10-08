@@ -186,6 +186,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--help` still described the old default scope.** After the pending commit became the default review
+  scope, the usage text said `review` was a "review of the working tree vs the base branch" - the branch
+  behaviour it no longer has by default, and a base it never resolves in that scope. `preflight --help`
+  and the script header now describe the pending change, and name `PREFLIGHT_SCOPE=worktree` for the
+  branch review.
 - **The `new=` count was suppressed after a clean review.** It was computed only when the previous
   review had findings, so a run following a clean pass reported no convergence signal - the one round
   most likely to be re-running for no reason. It is now computed whenever a previous review was *loaded*,

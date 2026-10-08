@@ -212,9 +212,8 @@ Note when testing the *gate*: `PREFLIGHT_GATE_ALLOW_ISSUES=1` relaxes key issues
 
 `ROADMAP.md` is the working document, and its **Now** and **Next** sections carry anything a previous
 session left unfinished - including work that is *implemented but uncommitted* in the working tree, which
-is invisible from `git log`. Read the top of `Next` first; one item there is written as an explicit
-handoff because it is mid-implementation and the next session needs to know exactly what is done, what is
-not, and which constraints will bite.
+is invisible from `git log`. Read **Now** first; in **Next**, an item marked `[x]` is shipped but still
+carries an open question, and the **Still open** paragraph under it is the work.
 
 Do not assume a clean tree means a clean slate, and do not assume the last commit describes the current
 state. `git status` is the first thing to check in this repo.

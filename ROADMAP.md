@@ -6,13 +6,19 @@ Work that is agreed but not yet done, plus ideas worth keeping. Nothing here is 
 
 Small, ready to do.
 
-- [ ] **Finish the `commit` scope.** See the handoff under **Next** - it is the one item with an unfinished
-      implementation already in the working tree, so start there.
+- [x] **Trim the helper commentary.** `files/preflight` was 210 comment lines of 564
+      (37%), most densely the coverage-marker block, the summary function and the review-job block. Now
+      137 of 491 (28%). Only comments and two `--help` strings changed; the executable lines are untouched
+      and `./tests/run.sh hook` and `selfcheck` are green. What remains is the non-obvious reasoning:
+      why the coverage marker matches emitted structure, why the two waits are bounded, why the hook
+      binding is content- not time-based, and each trap already hit here.
 - [ ] **Pin the PR-Agent version** in `install.sh` (`pr-agent==0.47.0`) for reproducible installs.
 - [ ] **Mirror the snippet** into `.github/copilot-instructions.md` and/or `.clinerules` so agents
       that do not read `AGENTS.md` still follow the loop.
 
 ## Done
+
+Shipped on `main`; kept for the reasoning behind each change, not as work to pick up.
 
 - [x] **Make the bundle's version answerable, and stop two silent failures** (found by reviewing a
       consuming repo's session log). `preflight --version` / `--help` (and `preflight-gate --help`), with
@@ -71,7 +77,8 @@ Small, ready to do.
 
 ## Next
 
-Wanted; needs a little design.
+Wanted; needs a little design. Items marked `[x]` here are shipped but still carry an open question - the
+answered part is kept for context, and the **Still open** paragraph under each is the work.
 
 - [x] **Make the post-run hang survivable, and stop it hiding the counts.** `preflight review` writes
       both artifacts and then sometimes never exits (4-13 minutes, in two shapes - sleeping in `kevent`,
@@ -113,74 +120,15 @@ Wanted; needs a little design.
       rounds are cheap. Also unmeasured: `[config] seed`, which would pin sampling and stabilise `new=N/M`
       at the cost of whatever coverage pinning removes - left unset deliberately, and documented as the
       lever to reach for if the count never settles.
-- [ ] **Finish the `commit` scope: make pending-commit review the default (HANDOFF - read this first).**
-      The goal, stated by the maintainer: *"we want a way to review a commit before it is submitted, to
-      catch bugs early on and for a dev/agent to fix before committing."* The current default does not do
-      that - `preflight review` reviews **the whole branch since the default branch**, which is the wrong
-      product for the stated goal and the reason a routine review costs ~25k prompt tokens and minutes of
-      wall clock.
+- [x] **Make pending-commit review the default (the `commit` scope).** Changed the default so
+      `preflight review` covers the pending commit - HEAD to the working tree, untracked files included -
+      instead of the whole branch since the default branch, which is what the tool exists for: reviewing a
+      change before it is submitted. Landed as [#5](https://github.com/413x5/preflight/pull/5) - CI green on
+      both platforms. The per-commit coverage argument, both branch scopes, and the three `REQ-HOOK-33`
+      mutations are documented in `README.md`, `docs/DESIGN.md` and `tests/README.md`.
 
-      **State of the working tree (read before touching anything).**
-
-      **Nothing here is committed.** `git log -1` is still the merge of PR #4, and all of the work described
-      below is sitting uncommitted in the working tree of the session that wrote it (12 files, ~722
-      insertions). A new session should decide first whether to land that work as one or two commits before
-      adding to it - the two logical changes are *"the reasoning budget + bounded shutdown"* (complete,
-      tested) and *"the `commit` scope"* (partly done, see below).
-
-      Whatever is landed, the commit must be **GPG-signed** and carry no `Co-authored-by` trailer.
-
-      **The change, and why it is small.**
-
-      `files/preflight` already builds a scratch index (`read-tree HEAD` + `add -A` + `write-tree`) for the
-      `worktree` scope, then diffs `${base}...${synth}`. The new default reuses that exact tree and changes
-      only the diff line:
-
-      ```sh
-      diff_ref='HEAD'        # was: diff_ref="${base}...${synth}"
-      ```
-
-      Verified: `git diff HEAD <tree>` is identical to `git diff --cached`. No base, no remote, no
-      `commit-tree`. `hook_tree="$tree"` is set identically in both branches, so the hook's containment
-      check is **unaffected** - it compares every path being committed against `reviewed_tree`, and a
-      `commit`-scope review records precisely that tree.
-
-      **Why per-commit review is *complete*, not merely cheaper.**
-
-      This is the design argument, and it is why the scope change does not weaken coverage. A PR is usually
-      one commit at the end; when it is several, each is reviewed as it is made. Containment makes that an
-      induction rather than a hope: the hook binds **content, not time** (it deliberately does *not* check
-      that the recorded `HEAD` equals `HEAD`, because that "would forbid splitting one reviewed change
-      across commits"), and it compares `reviewed_tree -> staged_tree`, so it constrains only the commit
-      being made. Therefore every commit was reviewed against the tree it committed, and the union covers
-      the branch. A branch review, by contrast, is a *sample* of the final state - subject to token-budget
-      pruning, and it enforces nothing.
-
-      **DONE and committed.** The `commit` scope is the default; the branch scopes and the containment rule are
-      unchanged.
-
-      - `scope="${PREFLIGHT_SCOPE:-commit}"`, with `commit|worktree|head` validated and an unknown value
-        rejected with exit 2.
-      - `resolve_base()` and the fetch run **only** for `worktree`/`head`; `commit` sets `base='HEAD'` and
-        does no network round trip.
-      - `coverage=PARTIAL` is gated to the branch scopes (a pending-commit diff is never pruned, so there is
-        nothing to announce).
-      - `files/preflight-hook` accepts `commit` **and** `worktree` (it previously required `worktree`, so
-        without this the hook would have refused to enforce the new default); `head` is still unenforced.
-      - the helper header, `--help`, `README.md`, `docs/DESIGN.md`, `docs/TROUBLESHOOTING.md` and
-        `AGENTS-review-snippet.md` all describe the three scopes and the per-commit coverage argument.
-      - `REQ-HOOK-33` guards it: the default is `commit`, `worktree` still resolves a base and keeps the
-        branch diff, and an unknown scope exits 2. All three were confirmed by mutation (the case fails with
-        each applied), and the mutations are listed in `tests/README.md`.
-      - `./tests/run.sh hook` (31 cases) and `selfcheck` are green.
-
-      **Still open here (not done):**
-
-      1. **Trim the helper commentary.** This change added a lot of it; the block that handles the review job
-         and both waits is roughly half comments. Cut to what is load-bearing and re-measure.
-      2. **Review the change with the tool itself and stop at `new=0`.** It was committed and pushed
-         *without* a review pass, at the maintainer's direction, so this is the outstanding verification.
-         PR: <https://github.com/413x5/preflight/pull/5> - CI green on both platforms, live `e2e` green.
+      **Still open: it has never been reviewed by the tool itself.** It was committed and pushed without a
+      review pass, at the maintainer's direction.
 
 - [ ] **Record the convergence evidence in CI.** `REQ-HOOK-31` covers the counting logic, but nothing
       checks that a real review's summary *emits* `new=` (the live case does not assert it). A cheap

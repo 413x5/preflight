@@ -77,8 +77,8 @@ Shipped on `main`; kept for the reasoning behind each change, not as work to pic
 
 ## Next
 
-Wanted; needs a little design. Items marked `[x]` here are shipped but still carry an open question - the
-answered part is kept for context, and the **Still open** paragraph under each is the work.
+Wanted; needs a little design. `[x]` here means shipped; where a `**Still open**` paragraph follows, that
+paragraph is the remaining work - not every `[x]` item has one, and an item without it is simply done.
 
 - [ ] **Decide what replaces the removed `extra_instructions` (OPEN EXPERIMENT).** The injected text was
       removed because capturing the literal prompt showed it arguing against pr-agent's own guidance in

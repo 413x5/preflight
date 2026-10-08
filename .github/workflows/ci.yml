@@ -110,8 +110,8 @@ jobs:
           #   num_max_findings          - how many findings one review may RETURN
           #   enable_large_pr_chunking  - review the whole diff instead of a pruned slice of it
           #   max_number_of_calls       - the bound on those extra chunking calls
-          # The last assertion is a separate concern (the gate's go/no-go signal), not a completeness
-          # knob, so it is named after what it checks rather than being counted as one of the three.
+          # A separate concern from the three completeness knobs above - the gate's go/no-go signal - so
+          # it is named after what it checks rather than counted among them.
           rv = d["pr_reviewer"]
           assert rv["num_max_findings"] >= 10, "num_max_findings is back down to a cascade-sized cap"
           assert rv["enable_large_pr_chunking"] is True, "a token-budget-pruned diff would be reviewed as a slice"

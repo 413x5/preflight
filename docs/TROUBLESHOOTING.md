@@ -68,7 +68,7 @@ budget, pr-agent's default is to **prune files** and review only the first patch
 review silently covers a slice of the tree. The next run, against different content, surfaces findings
 that were there all along - which looks identical to an agent that only found one issue. `preflight.toml`
 therefore sets `enable_large_pr_chunking = true` (with `max_number_of_calls = 3`), so an oversized diff
-is split, every chunk is reviewed, and the findings are unioned into one review. It is inert unless the
+is split, up to `max_number_of_calls` chunks are reviewed, and the findings are unioned into one review. It is inert unless the
 budget actually leaves files out, so a normal diff still costs exactly one AI call.
 
 If a review could not cover everything, it says so: the summary line ends with

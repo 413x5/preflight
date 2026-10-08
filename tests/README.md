@@ -68,6 +68,9 @@ the selfcheck itself is `REQ-SELF-nn`, listed in its own table below.
 | REQ-HOOK-25 | Removing a reviewed gitlink (submodule) is blocked | `git cat-file -e "HEAD:sub"` failing for a gitlink, so a submodule removal counted as "not tracked at HEAD" |
 | REQ-HOOK-26 | The example hook reports a missing helper when `HOME` is unset | `set -u` plus a bare `$HOME` aborting with "HOME: unbound variable" instead of the documented message |
 | REQ-HOOK-27 | The `post-commit` advisory warns when it cannot read the review sidecar | the advisory exiting 0 on a missing `python3` or a malformed/scope-less sidecar, making it silent in exactly the case it exists to report |
+| REQ-HOOK-28 | The coverage marker matches pr-agent's footer and ignores prose, including a verbatim quote of the footer inside the review table | the marker keying on text alone - one phrase, two substrings, or the contiguous sentence each false-positived on a real review that discussed coverage; and the footer being reworded upstream, which would silently retire the marker |
+| REQ-HOOK-29 | The completeness keys sit in the `[pr_reviewer]` section pr-agent reads them from | a key in the wrong table (or renamed upstream) leaving the finding cap or chunking silently inert while CI, which only checks presence, stays green |
+| REQ-HOOK-30 | A real `review.md` renders the `</table>` the coverage marker's structural restriction relies on | plain-diff output no longer emitting the table, which would make that restriction inert on real reviews - and the marker would miss a real footer (skipped when no live review can run) |
 
 The selfcheck is its own requirement, since it checks the suite rather than the hook:
 
@@ -95,6 +98,8 @@ reverted in turn and the expected case was confirmed to fail:
 | the `ls-tree` discriminator replaced by per-path `cat-file` | REQ-HOOK-24, REQ-HOOK-25 |
 | `${HOME:-}` reverted to a bare `$HOME` in the example hook | REQ-HOOK-26 |
 | the `post-commit` advisory's unreadable-sidecar guards restored to `exit 0` | REQ-HOOK-27 |
+| `COVERAGE_RE` weakened to a bare phrase, or the structural `<table>` gate dropped (so an in-table quote of the footer counts) | REQ-HOOK-28 |
+| a completeness key moved out of `[pr_reviewer]`, or renamed | REQ-HOOK-29 |
 
 This table is per-fix: it records which case guards which repair. It is **not** the same property as the
 selfcheck below, which asks about the whole hook at once.
@@ -102,7 +107,7 @@ selfcheck below, which asks about the whole hook at once.
 ## The selfcheck, and why "all cases pass" is not enough
 
 A passing suite does not by itself mean the hook enforces anything. Stub the hook out entirely
-(`#!/bin/sh` + `exit 0`) and the suite is still green for **10 of its 26 offline cases**, because those
+(`#!/bin/sh` + `exit 0`) and the suite is still green for **12 of its 28 offline cases**, because those
 cases do not depend on the hook refusing something:
 
 | Group | Cases | Why a neutered hook still passes them |
@@ -131,7 +136,7 @@ It reports the split, so drift is visible in the output:
 
 ```
   PASS  a neutered hook fails exactly the enforcement-sensitive cases  [REQ-SELF-01]
-        16 enforcement-sensitive, 10 insensitive, 26 ids exercised
+        16 enforcement-sensitive, 13 insensitive, 28 ids exercised
 ```
 
 The selfcheck is itself mutation-tested: adding a temporary case that passes with the hook neutered must

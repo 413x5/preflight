@@ -246,12 +246,18 @@ default 3). `preflight.toml` raises it, and also sets `pr_reviewer.extra_instruc
 into the reviewer's system prompt - to tell the model to work through the whole diff and report every
 issue it is confident about, rather than stopping at the first.
 
+That cap is a prompt instruction, not a hard truncation: pr-agent does not slice the merged list (checked
+against its source - the value feeds the prompt and one resolution heuristic only). It is still a bound,
+so "everything" means "everything within the cap"; a diff with more findings than that would need the
+number raised. The point of the setting is that the cap stops being the reason a review reports one issue
+at a time.
+
 **The model was shown only part of the diff.** This is the half `num_max_findings` cannot fix: raising a
 cap on *returned* findings does nothing if the diff itself was pruned before the call. When a diff exceeds
 the token budget, pr-agent's default is to prune files and review the first patch, so a "complete" review
 covers a slice of the tree - and a later run, against different content, surfaces findings that were there
 all along. `preflight.toml` therefore sets `enable_large_pr_chunking = true` (`max_number_of_calls = 3`),
-which splits an oversized diff, reviews every chunk, and *unions* the per-chunk findings into one review
+which splits an oversized diff, reviews up to `max_number_of_calls` chunks, and *unions* the per-chunk findings into one review
 (the merge rules live in pr-agent's `algo/review_merge.py`). It is inert unless the budget actually leaves
 files out, so an ordinary diff still costs exactly one AI call; only a genuinely oversized change pays for
 extra calls, and it pays them to avoid an unbounded fix/re-review loop.
@@ -262,6 +268,30 @@ because the summary is what an agent actually reads: `issues=1` on a partial rev
 were not looked at", not "the change is nearly clean". Silent partial coverage is the failure this whole
 section guards against - the same shape as the base-resolution and gate failures above, where an
 inability to check was indistinguishable from a pass.
+
+Detecting that footer is harder than it looks, because the file being searched is model-generated prose
+that may legitimately *discuss* coverage - and a review of this very feature did exactly that. Text
+matching alone cannot win, because the model can reproduce the footer's words while explaining them; one
+phrase, two independent substrings, the contiguous sentence, and searching only after the review table
+each false-positived or was too weak in practice. What the marker actually keys on is the footer **as
+pr-agent emits it**: a horizontal rule, the header, the sentence, and then the generated file bullets.
+Reproducing all of that is a much narrower accident than quoting a sentence, and the search is
+additionally restricted to the text after the review's last `</table>` (findings render inside the table;
+the footer is emitted after it).
+
+Two honest limits. It is still text matching, so a byte-faithful copy of the emitted footer is
+indistinguishable from the footer. And the structural half - searching only after the review table -
+assumes plain-diff mode emits that table; if a future output shape drops it, the restriction goes inert
+and the emitted-structure match carries the decision alone. Neither failure direction is acceptable, so
+both are tested: a miss retires the marker and a partial review reads as complete, while a spurious
+`PARTIAL` fires it on a complete one and teaches the reader to ignore it. Treat the summary line as a
+pointer to the authoritative signal, which is the footer in `review.md` itself.
+
+pr-agent's structured `remaining_files_list` is not exposed in plain-diff JSON, so there is no exact
+signal to use instead. CI checks the marker against the footer literal from pr-agent's source and against
+the shapes that broke earlier versions, and `tests/run.sh` `REQ-HOOK-28` re-checks it against the
+**installed** pr-agent's own footer source (skipping where the tool is absent), which is also where the
+table assumption is exercised against real output.
 
 The real budget lever is `config.max_model_tokens` / `custom_model_max_tokens`: raise those and the whole
 diff fits in a single call. Chunking is the fallback for when it does not.

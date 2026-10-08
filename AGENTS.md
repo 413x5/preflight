@@ -43,6 +43,12 @@ anything was left out. Do not weaken any of it to save tokens: a partial review 
 loop into an unbounded one, and silent partial coverage has the same shape as the other failures this repo
 guards against - an inability to check that is indistinguishable from a pass.
 
+"Everything" is bounded, and the docs should say so rather than overclaim. The finding cap is a prompt
+instruction, not a hard truncation, but it is still a ceiling; the coverage line is a text heuristic, so a
+byte-faithful reproduction of pr-agent's footer is indistinguishable from the footer itself. Both are
+documented in `docs/DESIGN.md`. Do not let the marketing get ahead of that: the claim is "one review
+reports every finding it was *shown*", not "a review can never miss anything".
+
 ## Layout
 
 | Path | What it is |
@@ -118,9 +124,11 @@ Everything CI runs is available locally; a green local run means a green CI run.
 ./tests/run.sh             # everything
 ```
 
-`selfcheck` exists because a green suite is **not** proof the hook enforces: 10 of the 26 offline cases
-pass with the hook stubbed out entirely, because they assert acceptance (`commit -a`, a reviewed deletion,
-a reviewed rename) or test a deliberate bypass. The selfcheck runs the whole suite against a neutered hook
+`selfcheck` exists because a green suite is **not** proof the hook enforces: 12 of the 28 offline cases
+take the hook (or the helper) neutered without complaint - they assert acceptance (`commit -a`, a reviewed
+deletion, a reviewed rename), test a deliberate bypass, or exercise a different file such as the example
+hooks and the review helper, so they never ask the hook to refuse anything. (Two of them - REQ-HOOK-28/29 -
+skip instead of passing wherever pr-agent is not installed, which is the case in CI.) The selfcheck runs the whole suite against a neutered hook
 and requires exactly the enforcement-sensitive cases to fail. It also **requires every case to be
 classified**, so a new case must be declared sensitive or insensitive or the selfcheck fails.
 

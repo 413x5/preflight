@@ -296,7 +296,7 @@ PY
 fi
 if [ -n "$out_json" ] && [ -f "$out_json" ]; then
   python3 - "$out_json" "$out_md" <<'PY' >&2 2>/dev/null || true
-import json, sys
+import json, re, sys
 d = json.load(open(sys.argv[1]))
 r = d.get('review') or {}
 issues = r.get('key_issues_to_review') or []
@@ -310,14 +310,55 @@ line = (f"preflight: issues={len(issues)} security={sec or 'n/a'}"
 # unbounded fix/re-review loop, so it belongs on the line an agent actually reads, not only in the
 # markdown footer further down.
 #
-# `Review coverage:` is pr-agent's own footer wording; if upstream ever rewords it this suffix goes
-# quiet (it degrades to today's plain line, it does not fail), so keep the two in step when the tool
-# is upgraded.
+# Matching is the hard part, because the file being searched is model-generated prose and a finding may
+# legitimately *discuss* coverage - a review of THIS feature did exactly that. Text matching alone cannot
+# win: the model can reproduce the footer's words while explaining them. Attempts, in order:
+#   - 'Review coverage:' alone - matched its own review, reporting PARTIAL for a fully-reviewed diff;
+#   - two independent substrings - a finding quoted both and still tripped it;
+#   - the footer's contiguous sentence - a verbatim quote still trips it;
+#   - only searching after the review's last `</table>` - closer, but prose can still follow the table.
+# What actually holds is matching pr-agent's FOOTER BLOCK as it EMITS it, not its prose: the footer is
+# introduced by a horizontal rule and continues with the file bullets pr-agent generates
+# (`"\n\n<hr>\n\n" + "⚠️ **Review coverage:** ... token budget:\n" + "- \`file\`" ...`). Requiring the
+# `<hr>` anchor, the header, the sentence AND the bullet list makes this a match of the footer's emitted
+# STRUCTURE - a finding would have to forge a horizontal rule and a bullet list of files to trip it,
+# which is a far narrower accident than quoting a sentence. The tail-after-`</table>` restriction is
+# kept as a second, independent condition.
+#
+# The limit, stated honestly: this is text matching, so a reproduction that is byte-faithful to the
+# emitted footer is indistinguishable from the footer itself. What makes that acceptable rather than
+# hand-waving is that the remaining ambiguity all points one way - a model writing the full footer,
+# rule and bullets included, is either reproducing pr-agent's own output or writing something no real
+# review does - and a miss is the safer error here: it degrades to the plain summary line, whereas a
+# spurious PARTIAL is what teaches the reader to ignore the marker.
+COVERAGE_RE = re.compile(
+    r"<hr>\s*\n\s*\n?\s*\u26a0\ufe0f \*\*Review coverage:\*\* The following files were not included "
+    r"in this review because of the token budget:\s*\n\s*-\s*`",
+    re.S)
 try:
-    md = open(sys.argv[2], encoding='utf-8').read()
+    # errors='replace', not a bare read: the footer contains an emoji, so a review.md written in a
+    # non-UTF-8 locale would raise UnicodeDecodeError - which is a ValueError, not an OSError, so the
+    # except below would not catch it. The whole summary line would be lost (the outer `|| true`
+    # swallows the traceback), taking the counts with it. Decoding leniently keeps them.
+    md = open(sys.argv[2], encoding='utf-8', errors='replace').read()
 except OSError:
     md = ''
-if 'Review coverage:' in md:
+# Everything a finding writes renders inside the table, and plain-diff mode always renders one. This
+# restriction is LOAD-BEARING, not a nicety: the regex above matches the emitted structure, and a finding
+# that quotes the footer verbatim reproduces exactly that structure, so only "it is inside the table"
+# rejects it. REQ-HOOK-28 asserts that case, and removing this line is one of the listed mutations.
+#
+# It is not self-sufficient either - a review whose prose AFTER the table reproduces the rule and bullets
+# would pass both conditions - but that requires forging pr-agent's generated output, whereas every
+# observed false positive was a finding describing the footer. With no `</table>` (a shape plain-diff
+# does not produce) the whole file is searched.
+#
+# Neither failure direction is acceptable, which is why both are tested: a miss retires the marker and a
+# partial review reads as complete, while a spurious match fires it on a complete one and teaches the
+# reader to ignore it. This line is an AID that points at the authoritative footer in review.md, not a
+# guarantee - `review.md` is what to read to settle whether coverage was complete.
+tail = md[md.rfind('</table>') + len('</table>'):] if '</table>' in md else md
+if COVERAGE_RE.search(tail):
     line += " coverage=PARTIAL (token budget left files out - see review.md)"
 print(line)
 PY

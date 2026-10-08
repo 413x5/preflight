@@ -565,6 +565,139 @@ case_post_commit_advisory() {
 "; fi
 }
 
+case_coverage_marker_matches_real_footer() {
+  # Two things only the INSTALLED pr-agent can settle, and both fail silently:
+  #
+  # 1. The coverage marker. `preflight` prints `coverage=PARTIAL` by matching pr-agent's footer in
+  #    review.md. The file is model-generated prose, and a finding may discuss coverage - a review of
+  #    THIS feature did, repeatedly. Text matching alone loses: the model can reproduce the footer
+  #    verbatim while explaining it. The discriminator is therefore structural - findings render inside
+  #    the review <table>, and the footer is emitted after it - with the footer wording as a
+  #    secondary check.
+  # 2. The completeness settings. CI asserts the keys are present in the generated TOML, but presence is
+  #    not the same as pr-agent READING them: a key in the wrong table, or one renamed upstream, leaves
+  #    the finding cap and chunking inert while every check stays green. pr-agent's own defaults are the
+  #    ground truth for which section each key belongs to.
+  #
+  # CI deliberately never installs pr-agent (no network, no paid key), so both guards SKIP here rather
+  # than pretending to have verified anything - and BOTH ids must still report, because a classified id
+  # that never reports would let the selfcheck's "every case must be classified" rule go vacuous for it.
+  local sp
+  sp="$(ls -d "$HOME"/.local/share/uv/tools/pr-agent/lib/*/site-packages/pr_agent 2>/dev/null | head -n1)"
+  if [ -z "$sp" ] || [ ! -f "$sp/tools/pr_reviewer.py" ]; then
+    skip "the coverage marker ignores prose and matches the real footer" "REQ-HOOK-28" "pr-agent not installed"
+    skip "the completeness keys sit in the section pr-agent reads" "REQ-HOOK-29" "pr-agent not installed"
+    return
+  fi
+
+  # Drive the SHIPPED summary-line block over fixtures, so this tests behaviour rather than restating
+  # the logic: extract the heredoc body from files/preflight and run it.
+  if python3 - "$repo_root/files/preflight" "$sp/tools/pr_reviewer.py" <<'PY'
+import re, subprocess, sys, tempfile, os
+
+helper, reviewer = sys.argv[1:3]
+src = open(helper, encoding="utf-8").read()
+blocks = re.findall(r"python3 - \"\$out_json\" \"\$out_md\" <<'PY'[^\n]*\n(.*?)\nPY\n", src, re.S)
+if not blocks:
+    sys.exit("cannot find the summary-line block in files/preflight; update this case")
+d = tempfile.mkdtemp()
+json_path = os.path.join(d, "review.json")
+open(json_path, "w").write('{"review":{"key_issues_to_review":[]}}')
+script = os.path.join(d, "summary.py")
+open(script, "w").write(blocks[-1])
+
+def summary(body):
+    md = os.path.join(d, "review.md")
+    open(md, "w", encoding="utf-8").write(body)
+    return subprocess.run([sys.executable, script, json_path, md],
+                          capture_output=True, text=True).stdout
+
+# The footer, rebuilt from pr-agent's own source - INCLUDING the horizontal rule that introduces it,
+# because that rule is part of what the marker keys on. Each part is written across ADJACENT string
+# literals in the source, so take the whole run from the `<hr>` literal (matching one literal would
+# truncate the sentence, and starting at the header would drop the rule).
+psrc = open(reviewer, encoding="utf-8", errors="replace").read()
+anchor = psrc.index("Review coverage:")
+hr_start = psrc.rindex('"', 0, psrc.rindex("<hr>", 0, anchor))
+rm = re.match(r'((?:"[^"]*"\s*)+)', psrc[hr_start:])
+lits = re.findall(r'"([^"]*)"', rm.group(1))
+# The source spells newlines as the two characters \n; turn them into real newlines. Only these escapes
+# appear here, and they are handled explicitly so the emoji is not mangled by a generic unescaper.
+footer = "".join(lits).replace("\\n", "\n").replace('\\"', '"') + "- `late.py`"
+
+problems = []
+# The real footer, where pr-agent emits it: after the review table, introduced by a horizontal rule.
+if "PARTIAL" not in summary("<table>\n<tr><td>clean review</td></tr>\n</table>" + footer):
+    problems.append("the real footer, after the table, was not detected")
+# No table at all (a future output shape): the marker must still fire on the emitted footer.
+if "PARTIAL" not in summary(footer):
+    problems.append("the footer without a table was not detected")
+# The shapes text matching could not beat, kept as regressions. Each of these tripped an earlier
+# version of the marker and made a fully-reviewed diff report PARTIAL:
+for why, body in (
+    ("a finding quoting the footer verbatim inside the table",
+     "<table>\n<tr><td>finding:<br>" + footer + "</td></tr>\n</table>\n"),
+    ("prose after the table mentioning the same words, without the rule or the bullet list",
+     "<table>\n<tr><td>clean</td></tr>\n</table>\n\nNote: the review says "
+     "**Review coverage:** and 'were not included in this review because of the token budget'.\n"),
+    ("the header and sentence without pr-agent's rule-and-bullet structure",
+     "<table></table>\n\n**Review coverage:** The following files were not included in this "
+     "review because of the token budget:\n"),
+    ("a review that merely says the generated files were not included in this review",
+     "a review that merely says: generated files were not included in this review, and stops there."),
+):
+    if "PARTIAL" in summary(body):
+        problems.append(why + " was misread as coverage")
+# And the plain line must always carry its counts, whatever the verdict.
+if "issues=0" not in summary(footer):
+    problems.append("the summary line lost its counts")
+
+if problems:
+    print("\n".join(problems))
+    sys.exit(1)
+PY
+  then ok "the coverage marker ignores prose and matches the real footer" "REQ-HOOK-28"
+  else bad "the coverage marker ignores prose and matches the real footer" "REQ-HOOK-28" \
+        "footer detected; prose and in-table quotes ignored" "see below" \
+        "a missed footer retires the PARTIAL marker (a partial review reads as complete); a spurious match fires it on a complete one"
+  fi
+
+  # Part 2: the completeness keys must be in the table pr-agent actually reads them from.
+  if python3 - "$sp/settings/configuration.toml" "$repo_root/files/preflight.toml" <<'PY'
+import re, sys, tomllib
+
+defaults_path, ours_path = sys.argv[1:3]
+
+# Where pr-agent's OWN defaults declare each key: the ground truth for which section it reads.
+wanted = ("num_max_findings", "extra_instructions", "enable_large_pr_chunking", "max_number_of_calls")
+sections = {}
+section = None
+for line in open(defaults_path, encoding="utf-8", errors="replace"):
+    m = re.match(r"^\[(\w+)\]", line)
+    if m:
+        section = m.group(1)
+    m = re.match(r"^(\w+)\s*=", line)
+    if m and m.group(1) in wanted and m.group(1) not in sections:
+        sections[m.group(1)] = section
+
+wrong = [k for k in wanted if sections.get(k) != "pr_reviewer"]
+if wrong:
+    print("pr-agent no longer reads these from [pr_reviewer]: " + ", ".join(wrong))
+    sys.exit(2)
+
+ours = tomllib.load(open(ours_path, "rb"))
+missing = [k for k in wanted if k not in ours.get("pr_reviewer", {})]
+if missing:
+    print("files/preflight.toml does not set these under [pr_reviewer]: " + ", ".join(missing))
+    sys.exit(3)
+PY
+  then ok "the completeness keys sit in the section pr-agent reads" "REQ-HOOK-29"
+  else bad "the completeness keys sit in the section pr-agent reads" "REQ-HOOK-29" \
+        "each key under [pr_reviewer]" "not where pr-agent reads it" \
+        "a completeness key is in the wrong table or was renamed upstream, so the finding cap or chunking is silently inert while every check stays green"
+  fi
+}
+
 # ---------------------------------------------------------------------------- live end-to-end
 # Needs the installed helpers and an API key, so it is skipped when either is absent.
 
@@ -596,6 +729,20 @@ PY
   git -C "$d" -c commit.gpgsign=false commit -m "feat: sub" >/dev/null 2>&1; got=$?
   if [ "$got" = 0 ]; then ok "a real review then commit passes end to end" "REQ-HOOK-23"
   else bad "a real review then commit passes end to end" "REQ-HOOK-23" 0 "$got" ""; fi
+
+  # The coverage marker's structural half searches only the text after the review's last `</table>`, on
+  # the assumption that plain-diff mode renders one. Every other check feeds synthetic tables, so a real
+  # review.md is the only place that assumption can be falsified - and if it breaks, the marker goes
+  # inert and a partial review reads as complete. Cheap to assert here, where a real review already ran.
+  if [ -f "$d/.preflight/review.md" ]; then
+    if grep -q '</table>' "$d/.preflight/review.md"; then
+      ok "a real review renders the table the coverage marker relies on" "REQ-HOOK-30"
+    else
+      bad "a real review renders the table the coverage marker relies on" "REQ-HOOK-30" \
+          "a </table> in review.md" "absent" \
+          "the coverage marker's structural restriction is inert on real output; re-check files/preflight's COVERAGE_RE handling"
+    fi
+  fi
 }
 
 # ---------------------------------------------------------------------------- the selfcheck
@@ -626,7 +773,7 @@ REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK
 #   bypass                assert the documented escape hatches work.
 #   orthogonal            do not test blocking at all, or test a different file.
 insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
-REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27'
+REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-30'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -749,7 +896,8 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_worktree_enforced \
     case_missing_helper_fails_closed \
     case_missing_helper_fails_closed_unset_home \
-    case_post_commit_advisory
+    case_post_commit_advisory \
+    case_coverage_marker_matches_real_footer
   say ""
 fi
 

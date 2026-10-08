@@ -29,9 +29,10 @@ Loop until `preflight-gate` exits 0:
 
 The review is configured to report **all** findings in one pass: it raises the finding cap, tells the
 model to report everything it is confident about, and reviews an oversized diff in chunks (merging the
-chunks' findings) instead of pruning files. Still, **read the coverage line**: if the summary ends with
-`coverage=PARTIAL`, the token budget left files out of the review and `review.md` names them. A low
-`issues=` count on a partial review means "the rest was not looked at", not "the change is clean" - raise
+chunks' findings) instead of pruning files. Still, **read the coverage note**: if the summary line
+contains `coverage=PARTIAL`, the token budget left files out of the review and `review.md` names them
+(the full text is `coverage=PARTIAL (token budget left files out - see review.md)`). A low `issues=`
+count on a partial review means "the rest was not looked at", not "the change is clean" - raise
 `max_model_tokens`/`custom_model_max_tokens` (see the bundle's `docs/TROUBLESHOOTING.md`) rather than
 round-tripping until the omitted files happen to come into view.
 

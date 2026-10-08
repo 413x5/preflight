@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     telling the model to work through the whole diff and report every issue it is confident about rather
     than stopping at the first;
   - `pr_reviewer.enable_large_pr_chunking = true` (`max_number_of_calls = 3`) - an oversized diff is
-    split, every chunk is reviewed, and the per-chunk findings are unioned into one review instead of
+    split, up to `max_number_of_calls` chunks are reviewed, and the per-chunk findings are unioned into one review instead of
     files being pruned. It is inert unless the budget actually leaves files out, so an ordinary diff
     still costs exactly one AI call.
   Anything still uncovered is reported rather than hidden: `preflight` now appends
@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `issues=` count on a partially-reviewed diff is not mistaken for a clean change. CI asserts all four
   completeness settings, because a regression in any of them shows up as a loop that will not converge
   rather than as a failing build.
+  The marker decides **structurally, then textually**: findings render inside the review `<table>` and
+  pr-agent emits the footer after it, so a match only counts past the last `</table>`, with the footer's
+  wording as a secondary check. Text matching alone could not hold - one phrase, two independent
+  substrings, and the contiguous sentence each false-positived on a real review of this very feature,
+  because the model reproduces the footer while explaining it. Both directions matter: a missed footer
+  retires the marker and a partial review reads as complete; a spurious match fires it on a complete one
+  and teaches the reader to ignore it. CI checks the surface that needs no network (the marker matches
+  the footer literal from pr-agent's source, and ignores prose and in-table quotes); `tests/run.sh`
+  `REQ-HOOK-28` re-checks against the **installed** pr-agent's own footer source and skips where the tool
+  is absent, so an upstream rewording is caught on a machine that has it.
 - **`preflight --help` and `preflight --version`** (plus `-h`/`-V` and `preflight-gate --help`). Both are
   answered before anything touches git or the config, so they work outside a repository too (`--help` is
   the first thing a new user runs, and it must not need a repo or a configured key). `--version`
@@ -78,8 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `preflight hook` subcommand and `preflight-hook` helper; `install.sh` installs both plus the example
     hooks into `~/.config/preflight/`.
   - Covered by an integration suite in `tests/` (`./tests/run.sh`): real repositories, the real hook
-    files, no framework and no network. 27 cases (26 offline plus one live end-to-end), one per
-    requirement (`REQ-HOOK-01`..`27`, mapped in `tests/README.md`), each protecting a specific behaviour -
+    files, no framework and no network. 30 cases (28 offline plus one live end-to-end), one per
+    requirement (`REQ-HOOK-01`..`30`, mapped in `tests/README.md`), each protecting a specific behaviour -
     including the seven bypasses found while building this (unreviewed deletions, renames, symlink
     typechanges, `git rm --cached`, reviewed files whose names git quotes, gitlinks, and an unset `HOME`).
     Every fix was reverted in turn to confirm the matching case fails without it; a neutered hook turns 16
@@ -99,7 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cases sensitive, so a case claiming to catch an unreviewed commit could have passed with the hook
   disabled and nobody would have known. The selfcheck re-runs the whole suite against a neutered hook and
   requires exactly the declared enforcement-sensitive cases to fail, reports the split
-  (16 sensitive / 10 insensitive), and **requires every case to be classified** - an unclassified case, or
+  (16 sensitive / 13 insensitive), and **requires every case to be classified** - an unclassified case, or
   a sensitive case that passes or skips, fails it. The check is itself mutation-tested.
 
 ### Fixed

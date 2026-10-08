@@ -565,6 +565,290 @@ case_post_commit_advisory() {
 "; fi
 }
 
+case_convergence_signal() {
+  # The `new=N/M` convergence signal - the reason the loop can stop. It is deliberately INDEPENDENT of
+  # pr-agent: it is a comparison of two JSON files, so it needs no network, no key and no installed
+  # package, and it therefore runs in CI. It previously lived inside a case that skips whenever
+  # pr-agent is absent (which is always, in CI), so the feature's own logic was never exercised by any
+  # check - a regression in the dedupe key, the count or the hint would have passed everything.
+  #
+  # Drives the SHIPPED summary block from files/preflight rather than restating it, so the test cannot
+  # drift from the code it is testing.
+  if python3 - "$repo_root/files/preflight" <<'PY'
+import json, os, re, subprocess, sys, tempfile
+
+src = open(sys.argv[1], encoding="utf-8").read()
+blocks = re.findall(r"python3 - \"\$out_json\" \"\$out_md\" <<'PY'[^\n]*\n(.*?)\nPY\n", src, re.S)
+if not blocks:
+    sys.exit("cannot find the summary-line block in files/preflight; update this case")
+d = tempfile.mkdtemp()
+json_path = os.path.join(d, "review.json")
+script = os.path.join(d, "summary.py")
+open(script, "w").write(blocks[-1])
+
+def summary(prev=None, current=None):
+    """Run the shipped summary block over `current`, comparing against `prev` when given."""
+    open(json_path, "w", encoding="utf-8").write(current or "{}")
+    env = dict(os.environ)
+    if prev is None:
+        env.pop("PREFLIGHT_PREV_JSON", None)
+    else:
+        prev_path = os.path.join(d, "prev.json")
+        open(prev_path, "w", encoding="utf-8").write(prev)
+        env["PREFLIGHT_PREV_JSON"] = prev_path
+    return subprocess.run([sys.executable, script, json_path, os.path.join(d, "review.md")],
+                          capture_output=True, text=True, env=env).stdout
+
+def finding(content, header="H", path="a.py"):
+    return '{"review":{"key_issues_to_review":[{"relevant_file":"%s","issue_header":"%s","issue_content":"%s"}]}}' % (
+        path, header, content)
+
+problems = []
+
+# Contract 1: a first review has nothing to compare against, so it must NOT claim new= (the docs say the
+# field is absent then; a naive implementation reports new=N/N, which reads like a real signal).
+first = summary(current=finding("same"))
+if "new=" in first:
+    problems.append("new= was reported on a first review, where there is no previous run: " + first.strip())
+
+# Contract 2: a repeat is detected, and carries the judge-don't-refix hint. Normalisation is part of the
+# contract: whitespace and case differences are the same finding, or the count is useless in practice.
+repeat = summary(prev=finding(" SAME ", header="h"), current=finding("same"))
+if "new=0/1" not in repeat:
+    problems.append("an identical finding (modulo case/whitespace) was not counted as a repeat: " + repeat.strip())
+if "unchanged" not in repeat:
+    problems.append("a repeat did not carry the judge-don't-refix hint: " + repeat.strip())
+
+# Contract 3: identity is the whole tuple, not the file - a different issue in the same file is NEW.
+# This is the boundary that makes the count meaningful rather than a per-file flag.
+changed = summary(prev=finding("different"), current=finding("same"))
+if "new=1/1" not in changed:
+    problems.append("a differently-worded finding in the same file was not counted as new: " + changed.strip())
+
+# Contract 4: a previous review with NO findings must still produce the count - the round after a clean
+# pass is the one most likely to be re-running for no reason, and suppressing the signal there was a real
+# defect caught in review.
+after_clean = summary(prev='{"review":{"key_issues_to_review":[]}}', current=finding("same"))
+if "new=1/1" not in after_clean:
+    problems.append("the count was suppressed after a clean previous review: " + after_clean.strip())
+
+# Contract 5: an unreadable previous review degrades to "no count", not to a crash or a false claim.
+bad_prev = os.path.join(d, "bad.json")
+open(bad_prev, "w").write("{ not json")
+env = dict(os.environ); env["PREFLIGHT_PREV_JSON"] = bad_prev
+open(json_path, "w", encoding="utf-8").write(finding("same"))
+out = subprocess.run([sys.executable, script, json_path, os.path.join(d, "review.md")],
+                     capture_output=True, text=True, env=env).stdout
+if "new=" in out:
+    problems.append("an unreadable previous review still produced a count: " + out.strip())
+if "issues=1" not in out:
+    problems.append("the counts were lost when the previous review was unreadable: " + out.strip())
+
+if problems:
+    print("\n".join(problems))
+    sys.exit(1)
+PY
+  then ok "the convergence signal counts new findings and flags repeats" "REQ-HOOK-31"
+  else bad "the convergence signal counts new findings and flags repeats" "REQ-HOOK-31" \
+        "new= on change, 0/N on repeat, absent on first/unreadable" "see below" \
+        "the loop's stopping signal is wrong: it would either never stop (repeats look new) or stop early (a new finding looks like a repeat)"
+  fi
+}
+
+case_coverage_marker_matches_real_footer() {
+  # Two things only the INSTALLED pr-agent can settle, and both fail silently:
+  #
+  # 1. The coverage marker. `preflight` prints `coverage=PARTIAL` by matching pr-agent's footer in
+  #    review.md. The file is model-generated prose, and a finding may discuss coverage - a review of
+  #    THIS feature did, repeatedly. Text matching alone loses: the model can reproduce the footer
+  #    verbatim while explaining it. The discriminator is therefore structural - findings render inside
+  #    the review <table>, and the footer is emitted after it - with the footer wording as a
+  #    secondary check.
+  # 2. The completeness settings. CI asserts the keys are present in the generated TOML, but presence is
+  #    not the same as pr-agent READING them: a key in the wrong table, or one renamed upstream, leaves
+  #    the finding cap and chunking inert while every check stays green. pr-agent's own defaults are the
+  #    ground truth for which section each key belongs to.
+  #
+  # CI deliberately never installs pr-agent (no network, no paid key), so both guards SKIP here rather
+  # than pretending to have verified anything - and BOTH ids must still report, because a classified id
+  # that never reports would let the selfcheck's "every case must be classified" rule go vacuous for it.
+  local sp
+  sp="$(ls -d "$HOME"/.local/share/uv/tools/pr-agent/lib/*/site-packages/pr_agent 2>/dev/null | head -n1)"
+  if [ -z "$sp" ] || [ ! -f "$sp/tools/pr_reviewer.py" ]; then
+    skip "the coverage marker ignores prose and matches the real footer" "REQ-HOOK-28" "pr-agent not installed"
+    skip "the completeness keys sit in the section pr-agent reads" "REQ-HOOK-29" "pr-agent not installed"
+    return
+  fi
+
+  # Drive the SHIPPED summary-line block over fixtures, so this tests behaviour rather than restating
+  # the logic: extract the heredoc body from files/preflight and run it.
+  if python3 - "$repo_root/files/preflight" "$sp/tools/pr_reviewer.py" <<'PY'
+import re, subprocess, sys, tempfile, os
+
+helper, reviewer = sys.argv[1:3]
+src = open(helper, encoding="utf-8").read()
+blocks = re.findall(r"python3 - \"\$out_json\" \"\$out_md\" <<'PY'[^\n]*\n(.*?)\nPY\n", src, re.S)
+if not blocks:
+    sys.exit("cannot find the summary-line block in files/preflight; update this case")
+d = tempfile.mkdtemp()
+json_path = os.path.join(d, "review.json")
+open(json_path, "w").write('{"review":{"key_issues_to_review":[]}}')
+script = os.path.join(d, "summary.py")
+open(script, "w").write(blocks[-1])
+
+def summary(body, prev=None, current=None):
+    md = os.path.join(d, "review.md")
+    open(md, "w", encoding="utf-8").write(body)
+    if current is not None:
+        open(json_path, "w", encoding="utf-8").write(current)
+    env = dict(os.environ)
+    if prev is not None:
+        prev_path = os.path.join(d, "prev.json")
+        open(prev_path, "w", encoding="utf-8").write(prev)
+        env["PREFLIGHT_PREV_JSON"] = prev_path
+    else:
+        env.pop("PREFLIGHT_PREV_JSON", None)
+    return subprocess.run([sys.executable, script, json_path, md],
+                          capture_output=True, text=True, env=env).stdout
+
+# The footer, rebuilt from pr-agent's own source - INCLUDING the horizontal rule that introduces it,
+# because that rule is part of what the marker keys on. Each part is written across ADJACENT string
+# literals in the source, so take the whole run from the `<hr>` literal (matching one literal would
+# truncate the sentence, and starting at the header would drop the rule).
+psrc = open(reviewer, encoding="utf-8", errors="replace").read()
+anchor = psrc.index("Review coverage:")
+hr_start = psrc.rindex('"', 0, psrc.rindex("<hr>", 0, anchor))
+rm = re.match(r'((?:"[^"]*"\s*)+)', psrc[hr_start:])
+lits = re.findall(r'"([^"]*)"', rm.group(1))
+# The source spells newlines as the two characters \n; turn them into real newlines. Only these escapes
+# appear here, and they are handled explicitly so the emoji is not mangled by a generic unescaper.
+footer = "".join(lits).replace("\\n", "\n").replace('\\"', '"')
+
+# The bullet line is the most format-sensitive part of COVERAGE_RE (it requires a dash, a space and a
+# backtick), and the one part not rebuilt from pr-agent's own literals. Verify that pr-agent still emits
+# it in that shape - the emitted f-string is the source of the format - so a change there fails this
+# case loudly instead of retiring the marker while the check stays green.
+if not re.search(r'f"- `\{file\}`"', psrc):
+    sys.exit("pr-agent no longer emits coverage bullets as f\"- `{file}`\"; COVERAGE_RE's bullet pattern "
+             "must be re-derived from its new output")
+footer += "- `late.py`\n"
+
+problems = []
+# The real footer, where pr-agent emits it: after the review table, introduced by a horizontal rule.
+if "PARTIAL" not in summary("<table>\n<tr><td>clean review</td></tr>\n</table>" + footer):
+    problems.append("the real footer, after the table, was not detected")
+# No table at all (a future output shape): the marker must still fire on the emitted footer.
+if "PARTIAL" not in summary(footer):
+    problems.append("the footer without a table was not detected")
+# The shapes text matching could not beat, kept as regressions. Each of these tripped an earlier
+# version of the marker and made a fully-reviewed diff report PARTIAL:
+for why, body in (
+    ("a finding quoting the footer verbatim inside the table",
+     "<table>\n<tr><td>finding:<br>" + footer + "</td></tr>\n</table>\n"),
+    ("prose after the table mentioning the same words, without the rule or the bullet list",
+     "<table>\n<tr><td>clean</td></tr>\n</table>\n\nNote: the review says "
+     "**Review coverage:** and 'were not included in this review because of the token budget'.\n"),
+    ("the header and sentence without pr-agent's rule-and-bullet structure",
+     "<table></table>\n\n**Review coverage:** The following files were not included in this "
+     "review because of the token budget:\n"),
+    ("a review that merely says the generated files were not included in this review",
+     "a review that merely says: generated files were not included in this review, and stops there."),
+):
+    if "PARTIAL" in summary(body):
+        problems.append(why + " was misread as coverage")
+# And the plain line must always carry its counts, whatever the verdict.
+if "issues=0" not in summary(footer):
+    problems.append("the summary line lost its counts")
+
+if problems:
+    print("\n".join(problems))
+    sys.exit(1)
+PY
+  then ok "the coverage marker ignores prose and matches the real footer" "REQ-HOOK-28"
+  else bad "the coverage marker ignores prose and matches the real footer" "REQ-HOOK-28" \
+        "footer detected; prose and in-table quotes ignored" "see below" \
+        "a missed footer retires the PARTIAL marker (a partial review reads as complete); a spurious match fires it on a complete one"
+  fi
+
+  # Part 2: the completeness keys must be in the table pr-agent actually reads them from.
+  if python3 - "$sp/settings/configuration.toml" "$repo_root/files/preflight.toml" <<'PY'
+import re, sys, tomllib
+
+defaults_path, ours_path = sys.argv[1:3]
+
+# Which sections pr-agent declares each key in, from its OWN defaults - the ground truth for where it
+# reads them. Collect EVERY section a key appears in rather than the first: several of these keys (e.g.
+# extra_instructions) are declared in many tool sections upstream, so "first occurrence wins" would
+# resolve a key to whichever section happens to be listed first and fail on a correctly-configured repo.
+# The assertion is therefore "pr_reviewer declares it", not "nothing else does".
+wanted = ("num_max_findings", "extra_instructions", "enable_large_pr_chunking", "max_number_of_calls")
+sections = {key: set() for key in wanted}
+section = None
+for line in open(defaults_path, encoding="utf-8", errors="replace"):
+    m = re.match(r"^\[(\w+)\]", line)
+    if m:
+        section = m.group(1)
+    m = re.match(r"^(\w+)\s*=", line)
+    if m and m.group(1) in sections and section:
+        sections[m.group(1)].add(section)
+
+wrong = [k for k in wanted if "pr_reviewer" not in sections[k]]
+if wrong:
+    print("pr-agent no longer reads these from [pr_reviewer]: " + ", ".join(wrong))
+    sys.exit(2)
+
+ours = tomllib.load(open(ours_path, "rb"))
+missing = [k for k in wanted if k not in ours.get("pr_reviewer", {})]
+if missing:
+    print("files/preflight.toml does not set these under [pr_reviewer]: " + ", ".join(missing))
+    sys.exit(3)
+
+# The DOCS also tell an operator which keys to set - and a wrong key path is silently ignored, so the
+# advice fails without feedback. That is not hypothetical: this section of the docs once said
+# `config.callback_timeout_seconds` when pr-agent reads it from `[litellm]`, so following the advice
+# changed nothing. Check every `section.key` / `[section] key` reference the docs make against
+# pr-agent's own defaults, so a documented path that does not exist is caught here rather than by
+# someone debugging a hang.
+import glob, os
+DOC_RE = re.compile(r"`(?:\[(\w+)\]\s+([a-z_][a-z0-9_]*)|(config|litellm|pr_reviewer|pr_code_suggestions)\.([a-z_][a-z0-9_]*))`")
+
+# Which keys pr-agent declares, per section.
+known = {}
+sec = None
+for line in open(defaults_path, encoding="utf-8", errors="replace"):
+    m = re.match(r"^\[(\w+)\]", line)
+    if m:
+        sec = m.group(1)
+    m = re.match(r"^([a-z_][a-z0-9_]*)\s*=", line)
+    if m and sec:
+        known.setdefault(sec, set()).add(m.group(1))
+
+doc_errors = []
+checked = 0
+for doc in glob.glob(os.path.join(os.path.dirname(os.path.abspath(ours_path)), "..", "docs", "*.md")) + \
+           [os.path.join(os.path.dirname(os.path.abspath(ours_path)), "..", "README.md")]:
+    for line in open(doc, encoding="utf-8", errors="replace"):
+        for bracket_section, bracket_key, dotted_section, dotted_key in DOC_RE.findall(line):
+            section = bracket_section or dotted_section
+            key = bracket_key or dotted_key
+            checked += 1
+            if key not in known.get(section, ()):
+                doc_errors.append("%s: %s.%s is not a key pr-agent declares in [%s]" % (
+                    os.path.basename(doc), section, key, section))
+
+if doc_errors:
+    print("\n".join(doc_errors))
+    print("a documented config path that pr-agent ignores fails silently for whoever follows it")
+    sys.exit(4)
+print("documented config paths checked:", checked)
+PY
+  then ok "the completeness keys sit in the section pr-agent reads" "REQ-HOOK-29"
+  else bad "the completeness keys sit in the section pr-agent reads" "REQ-HOOK-29" \
+        "each key under [pr_reviewer]" "not where pr-agent reads it" \
+        "a completeness key is in the wrong table or was renamed upstream, so the finding cap or chunking is silently inert while every check stays green"
+  fi
+}
+
 # ---------------------------------------------------------------------------- live end-to-end
 # Needs the installed helpers and an API key, so it is skipped when either is absent.
 
@@ -596,6 +880,26 @@ PY
   git -C "$d" -c commit.gpgsign=false commit -m "feat: sub" >/dev/null 2>&1; got=$?
   if [ "$got" = 0 ]; then ok "a real review then commit passes end to end" "REQ-HOOK-23"
   else bad "a real review then commit passes end to end" "REQ-HOOK-23" 0 "$got" ""; fi
+
+  # The coverage marker's structural half searches only the text after the review's last `</table>`, on
+  # the assumption that plain-diff mode renders one. Every other check feeds synthetic tables, so a real
+  # review.md is the only place that assumption can be falsified - and if it breaks, the marker goes
+  # inert and a partial review reads as complete. Cheap to assert here, where a real review already ran.
+  #
+  # An ABSENT review.md is a failure, not a skip: this id exists only to make the assumption falsifiable,
+  # and a version that reports nothing when the artifact is missing would silently retire the requirement
+  # - the same "a guard that did not run proves nothing" rule the selfcheck applies to skips.
+  if [ ! -f "$d/.preflight/review.md" ]; then
+    bad "a real review renders the table the coverage marker relies on" "REQ-HOOK-30" \
+        "a review.md to inspect" "no review.md written" \
+        "the review reported a pass but wrote no review.md, so the marker's structural assumption cannot be checked"
+  elif grep -q '</table>' "$d/.preflight/review.md"; then
+    ok "a real review renders the table the coverage marker relies on" "REQ-HOOK-30"
+  else
+    bad "a real review renders the table the coverage marker relies on" "REQ-HOOK-30" \
+        "a </table> in review.md" "absent" \
+        "the coverage marker's structural restriction is inert on real output; re-check files/preflight's COVERAGE_RE handling"
+  fi
 }
 
 # ---------------------------------------------------------------------------- the selfcheck
@@ -626,7 +930,7 @@ REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK
 #   bypass                assert the documented escape hatches work.
 #   orthogonal            do not test blocking at all, or test a different file.
 insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
-REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27'
+REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -749,7 +1053,9 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_worktree_enforced \
     case_missing_helper_fails_closed \
     case_missing_helper_fails_closed_unset_home \
-    case_post_commit_advisory
+    case_post_commit_advisory \
+    case_convergence_signal \
+    case_coverage_marker_matches_real_footer
   say ""
 fi
 

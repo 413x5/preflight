@@ -204,8 +204,9 @@ case "$dir" in
 esac
 
 idxf=''
+prev_json=''
 hook_tree=''
-cleanup() { if [ -n "$idxf" ]; then rm -f "$idxf"; fi; }
+cleanup() { if [ -n "$idxf" ]; then rm -f "$idxf"; fi; if [ -n "$prev_json" ]; then rm -f "$prev_json"; fi; }
 trap cleanup EXIT
 if [ "$scope" = 'head' ]; then
   diff_ref="${base}...HEAD"
@@ -234,6 +235,23 @@ esac
 mkdir -p "$dir"
 cfg="file://${cfgdir}/preflight.toml"
 echo "preflight: ${cmd} (scope=${scope}) — $(git rev-parse --abbrev-ref HEAD) vs ${base} -> ${dir}/" >&2
+
+# Set the PREVIOUS review aside before this run overwrites it, so the summary can report whether the
+# run surfaced anything NEW. This is the loop's convergence signal. The loop's failure mode is not
+# "the model misses bugs" - it is "the model keeps reporting concerns that are already answered",
+# because each round reviews the text the previous round wrote (comments, docs, guards) and a reviewer
+# cannot tell a deliberate, documented trade-off from an oversight. Without a new-vs-repeat count the
+# agent cannot distinguish "the change is clean now" from "the same two findings came back reworded",
+# so it re-runs forever. Counting only what is genuinely new gives it a stopping rule.
+# review is the only command that writes a json artifact, so this is inert for describe/improve/ask.
+prev_json=''
+if [ -n "$out_json" ] && [ -f "$out_json" ]; then
+  # Assign only after a SUCCESSFUL copy: `mktemp` already created the file, so clearing the variable on
+  # a failed copy (`|| prev_json=''`) would leave the file behind and the EXIT trap - which tests for a
+  # non-empty path - would never remove it, leaking one temp file per failure.
+  cand="$(mktemp)"
+  if cp "$out_json" "$cand" 2>/dev/null; then prev_json="$cand"; else rm -f "$cand"; fi
+fi
 
 if [ -n "$out_json" ]; then
   git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
@@ -295,12 +313,123 @@ PY
   fi
 fi
 if [ -n "$out_json" ] && [ -f "$out_json" ]; then
-  python3 - "$out_json" <<'PY' >&2 2>/dev/null || true
-import json, sys
+  PREFLIGHT_PREV_JSON="$prev_json" python3 - "$out_json" "$out_md" <<'PY' >&2 2>/dev/null || true
+import json, os, re, sys
 d = json.load(open(sys.argv[1]))
 r = d.get('review') or {}
 issues = r.get('key_issues_to_review') or []
 sec = (r.get('security_concerns') or '').strip()
-print(f"preflight: issues={len(issues)} security={sec or 'n/a'} effort={r.get('estimated_effort_to_review_[1-5]')} tokens={(d.get('usage') or {}).get('total_tokens')}")
+line = (f"preflight: issues={len(issues)} security={sec or 'n/a'}"
+        f" effort={r.get('estimated_effort_to_review_[1-5]')}"
+        f" tokens={(d.get('usage') or {}).get('total_tokens')}")
+# Coverage is part of the verdict, so report it next to the counts. A pruned diff means the model was
+# shown part of the tree, and `issues=1` on a partial review does NOT mean "one problem in the change"
+# - it means the rest was never looked at. That misreading is what turns a single review into an
+# unbounded fix/re-review loop, so it belongs on the line an agent actually reads, not only in the
+# markdown footer further down.
+#
+# Matching is the hard part, because the file being searched is model-generated prose and a finding may
+# legitimately *discuss* coverage - a review of THIS feature did exactly that. Text matching alone cannot
+# win: the model can reproduce the footer's words while explaining them. Attempts, in order:
+#   - 'Review coverage:' alone - matched its own review, reporting PARTIAL for a fully-reviewed diff;
+#   - two independent substrings - a finding quoted both and still tripped it;
+#   - the footer's contiguous sentence - a verbatim quote still trips it;
+#   - only searching after the review's last `</table>` - closer, but prose can still follow the table.
+# What actually holds is matching pr-agent's FOOTER BLOCK as it EMITS it, not its prose: the footer is
+# introduced by a horizontal rule and continues with the file bullets pr-agent generates
+# (`"\n\n<hr>\n\n" + "⚠️ **Review coverage:** ... token budget:\n" + "- \`file\`" ...`). Requiring the
+# `<hr>` anchor, the header, the sentence AND the bullet list makes this a match of the footer's emitted
+# STRUCTURE - a finding would have to forge a horizontal rule and a bullet list of files to trip it,
+# which is a far narrower accident than quoting a sentence. The tail-after-`</table>` restriction is
+# kept as a second, independent condition.
+#
+# The limit, stated honestly: this is text matching, so a reproduction that is byte-faithful to the
+# emitted footer is indistinguishable from the footer itself. What makes that acceptable rather than
+# hand-waving is that the remaining ambiguity all points one way - a model writing the full footer,
+# rule and bullets included, is either reproducing pr-agent's own output or writing something no real
+# review does - and a miss is the safer error here: it degrades to the plain summary line, whereas a
+# spurious PARTIAL is what teaches the reader to ignore the marker.
+COVERAGE_RE = re.compile(
+    # The rule and the bold header are separated by `[^\n]*` rather than by the emoji, which fixes a
+    # real hole and removes a fragility. Hole: the read below is lenient (`errors='replace'`) so the
+    # counts survive a non-UTF-8 review.md, but that same leniency turns an invalid emoji into U+FFFD -
+    # so requiring the emoji meant the marker could never fire on exactly the file it was written to
+    # tolerate, reporting a partial review as complete. Fragility: pr-agent's choice of pictograph was
+    # load-bearing. Nothing non-ASCII is needed to discriminate - the rule, the bold header, the
+    # sentence and the bullet list do that - so the gap is just "whatever pr-agent puts there".
+    r"<hr>\s*\n\s*[^\n]*\*\*Review coverage:\*\*\s*The following files were not included in this "
+    r"review because of the token budget:\s*\n\s*-\s*`",
+    re.S)
+try:
+    # errors='replace', not a bare read: a review.md written in a non-UTF-8 locale would raise
+    # UnicodeDecodeError - which is a ValueError, not an OSError, so the except below would not catch it
+    # - and the whole summary line (the counts, not just the marker) would be lost, because the outer
+    # `|| true` swallows the traceback. Decoding leniently keeps them.
+    md = open(sys.argv[2], encoding='utf-8', errors='replace').read()
+except OSError:
+    md = ''
+# Everything a finding writes renders inside the table, and plain-diff mode always renders one. This
+# restriction is LOAD-BEARING, not a nicety: the regex above matches the emitted structure, and a finding
+# that quotes the footer verbatim reproduces exactly that structure, so only "it is inside the table"
+# rejects it. REQ-HOOK-28 asserts that case, and removing this line is one of the listed mutations.
+#
+# It is not self-sufficient either - a review whose prose AFTER the table reproduces the rule and bullets
+# would pass both conditions - but that requires forging pr-agent's generated output, whereas every
+# observed false positive was a finding describing the footer. With no `</table>` (a shape plain-diff
+# does not produce) the whole file is searched.
+#
+# Neither failure direction is acceptable, which is why both are tested: a miss retires the marker and a
+# partial review reads as complete, while a spurious match fires it on a complete one and teaches the
+# reader to ignore it. This line is an AID that points at the authoritative footer in review.md, not a
+# guarantee - `review.md` is what to read to settle whether coverage was complete.
+tail = md[md.rfind('</table>') + len('</table>'):] if '</table>' in md else md
+if COVERAGE_RE.search(tail):
+    line += " coverage=PARTIAL (token budget left files out - see review.md)"
+
+# How many findings are NEW since the previous review, and how many repeat one already answered here.
+# This is the loop's stopping rule, and it is deliberately mechanical: the failures that keep this loop
+# alive are the ones a reviewer cannot distinguish from a real defect - it re-reports a documented
+# trade-off, or re-words a finding the previous round already raised, because it has no memory of that
+# round. Both look like fresh findings in a single review.
+#
+# Two things make "repeat" decidable without guessing:
+#   - identity is (file, header, content) per pr-agent's own dedupe key, so a genuinely different issue
+#     in the same file still counts as new;
+#   - `files/preflight.toml` pins `temperature`, and the prompt is deterministic, so a re-review of
+#     unchanged content tends to reproduce the same text rather than a paraphrase.
+# A reworded repeat can therefore still read as new, which is the honest limit: the count is a strong
+# hint, not a verdict. `new=0` with issues>0 is the signal to stop and read the findings, not to fix
+# them; `new=N` means there is something the last round did not see.
+#
+# Gated on "a previous review was LOADED", not on "it had findings": a clean previous review makes every
+# current finding new, and suppressing the count there would remove the signal in the one round that
+# follows a clean pass - the round most likely to be re-running for no reason.
+new = None
+prev_path = os.environ.get('PREFLIGHT_PREV_JSON') or ''
+if prev_path and os.path.isfile(prev_path):
+    def key(issue):
+        if not isinstance(issue, dict):
+            return ('', '', str(issue))
+
+        def norm(value):
+            return ' '.join(str(value or '').split()).lower()
+
+        return (norm(issue.get('relevant_file')), norm(issue.get('issue_header')),
+                norm(issue.get('issue_content')))
+    try:
+        with open(prev_path, encoding='utf-8') as fh:
+            prev = json.load(fh).get('review') or {}
+        seen = {key(i) for i in (prev.get('key_issues_to_review') or [])}
+        new = sum(1 for i in issues if key(i) not in seen)
+    except Exception:
+        new = None
+if new is not None:
+    line += f" new={new}/{len(issues)}"
+    if issues and new == 0:
+        # "repeats the previous review" is a statement about the text, not a verdict that the finding is
+        # handled: an agent that deliberately deferred one (judged it wrong, or ran out of time) will see
+        # it again here. The wording therefore points at the judgement to make rather than declaring done.
+        line += " (unchanged since the previous review: judge each, do not re-fix blind)"
+print(line)
 PY
 fi

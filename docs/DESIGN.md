@@ -233,3 +233,123 @@ estimated effort).
 
 `preflight review` runs the same check to record `gate.verdict` in `review.meta.json`, so the commit hook
 and the gate can never disagree about what counts as a pass.
+
+## Making one review report everything (why the loop converges)
+
+The loop is `review → fix all findings → re-review`. It is only as good as the claim that *one* review
+reports *all* findings, and that claim has two independent failure modes. Both show up the same way - an
+agent fixes a finding, re-runs, and gets handed a fresh one - so the two are easy to mistake for each
+other, and fixing only one leaves the loop slow.
+
+**The model returns few findings.** `pr_reviewer.num_max_findings` caps how many are returned (upstream
+default 3). `preflight.toml` raises it, and also sets `pr_reviewer.extra_instructions` - injected verbatim
+into the reviewer's system prompt - to tell the model to work through the whole diff and report every
+issue it is confident about, rather than stopping at the first.
+
+That cap is a prompt instruction, not a hard truncation: pr-agent does not slice the merged list (checked
+against its source - the value feeds the prompt and one resolution heuristic only). It is still a bound,
+so "everything" means "everything within the cap"; a diff with more findings than that would need the
+number raised. The point of the setting is that the cap stops being the reason a review reports one issue
+at a time.
+
+**The model was shown only part of the diff.** This is the half `num_max_findings` cannot fix: raising a
+cap on *returned* findings does nothing if the diff itself was pruned before the call. When a diff exceeds
+the token budget, pr-agent's default is to prune files and review the first patch, so a "complete" review
+covers a slice of the tree - and a later run, against different content, surfaces findings that were there
+all along. `preflight.toml` therefore sets `enable_large_pr_chunking = true` (`max_number_of_calls = 3`),
+which splits an oversized diff, reviews up to `max_number_of_calls` chunks, and *unions* the per-chunk findings into one review
+(the merge rules live in pr-agent's `algo/review_merge.py`). It is inert unless the budget actually leaves
+files out, so an ordinary diff still costs exactly one AI call; only a genuinely oversized change pays for
+extra calls, and it pays them to avoid an unbounded fix/re-review loop.
+
+Whatever is left uncovered after that is reported rather than hidden. pr-agent appends a coverage footer
+to `review.md`, and `preflight` repeats it on the summary line as `coverage=PARTIAL ...`. That line exists
+because the summary is what an agent actually reads: `issues=1` on a partial review means "the other files
+were not looked at", not "the change is nearly clean". Silent partial coverage is the failure this whole
+section guards against - the same shape as the base-resolution and gate failures above, where an
+inability to check was indistinguishable from a pass.
+
+Detecting that footer is harder than it looks, because the file being searched is model-generated prose
+that may legitimately *discuss* coverage - and a review of this very feature did exactly that. Text
+matching alone cannot win, because the model can reproduce the footer's words while explaining them; one
+phrase, two independent substrings, the contiguous sentence, and searching only after the review table
+each false-positived or was too weak in practice. What the marker actually keys on is the footer **as
+pr-agent emits it**: a horizontal rule, the header, the sentence, and then the generated file bullets.
+Reproducing all of that is a much narrower accident than quoting a sentence, and the search is
+additionally restricted to the text after the review's last `</table>` (findings render inside the table;
+the footer is emitted after it).
+
+The match spans the rule and the bold header with a wildcard rather than naming pr-agent's emoji, for two
+reasons: the read is deliberately lenient (so the counts survive a non-UTF-8 `review.md`), and that same
+leniency rewrites an invalid emoji as U+FFFD - so requiring the emoji meant the marker could never fire on
+exactly the file it was written to tolerate. Nothing non-ASCII is needed to discriminate, so nothing
+non-ASCII is required.
+
+Two honest limits. It is still text matching, so a byte-faithful copy of the emitted footer is
+indistinguishable from the footer. And the structural half - searching only after the review table -
+assumes plain-diff mode emits that table; if a future output shape drops it, the restriction goes inert
+and the emitted-structure match carries the decision alone. Neither failure direction is acceptable, so
+both are tested: a miss retires the marker and a partial review reads as complete, while a spurious
+`PARTIAL` fires it on a complete one and teaches the reader to ignore it. Treat the summary line as a
+pointer to the authoritative signal, which is the footer in `review.md` itself.
+
+pr-agent's structured `remaining_files_list` is not exposed in plain-diff JSON, so there is no exact
+signal to use instead. CI checks the marker against the footer literal from pr-agent's source and against
+the shapes that broke earlier versions, and `tests/run.sh` `REQ-HOOK-28` re-checks it against the
+**installed** pr-agent's own footer source (skipping where the tool is absent), which is also where the
+table assumption is exercised against real output.
+
+The real budget lever is `config.max_model_tokens` / `custom_model_max_tokens`: raise those and the whole
+diff fits in a single call. Chunking is the fallback for when it does not.
+
+## Why the loop converges: new findings, not a clean review
+
+The loop is `review → fix → re-review`, and the section above makes one review report everything it was
+*shown*. That is necessary but not sufficient: a loop can satisfy it and still never end. The failure is
+not that the reviewer misses bugs - it is that a reviewer reading a diff **cannot tell a deliberate,
+documented trade-off from an oversight**, and each round necessarily reviews the code, comments and docs
+the previous round wrote. Re-running therefore produces findings that were already considered, arriving
+as fresh issues because a single review has no memory of the last one. Chasing those is what turns the
+loop into a treadmill, and it is expensive: a round is a full model call.
+
+The fix is to make the distinction mechanical and put it on the line the agent already reads. Each run
+compares its findings against the previous run's (saved before the artifacts are overwritten) and reports
+how many are new:
+
+```
+preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
+```
+
+`new=N/M` means N of the M findings were not in the previous review. Identity is the tuple pr-agent
+itself uses to dedupe - `(relevant_file, issue_header, issue_content)`, whitespace- and case-normalised -
+so a different issue in the same file is still new while the same sentence is not. `files/preflight.toml`
+pins `temperature` and the prompt is fixed, so a re-review of unchanged content tends to reproduce the
+same text rather than a paraphrase.
+
+`new=0` is the stopping signal: **judge, do not re-fix**. Each finding is one of three things, and only
+the first is work:
+
+| The finding is | What to do |
+|---|---|
+| a real defect | fix it - this is the case the loop exists for |
+| already answered (a limit, trade-off or alternative the code/comment/docs already address) | write the reasoning down once if it is not recorded, and do not rewrite the design to satisfy a preference |
+| wrong | say so; `preflight-gate` is the check, not agreement with the model |
+
+Two rounds of `new=0` is the hand-off point, whatever remains, with the judgements recorded in the pull
+request so a human sees the reasoning instead of the loop's history.
+
+**The honest limits.** This is text matching over model output, so a lightly reworded repeat can still
+count as new - the count is a strong hint, not a verdict, and the `new=` field is absent on a first
+review or when the previous one is unreadable (judge the findings yourself then). It also compares
+against the previous *run*, not against what you decided: deferring a real finding (judged wrong, or out
+of time) makes it look like a repeat next round, which is why the hint says *judge*, not *done*. And the
+signal is only as good as the reviewer's wording being stable - a provider whose model paraphrases freely
+gets less from it, which is why the identity key is the reviewer's own rather than a fuzzy match we
+invented.
+
+A related hazard, and the reason the loop must not be driven blindly: `preflight review` has been observed
+completing a review and writing both artifacts, then **never exiting** because pr-agent's post-run
+callback drain blocked on a stalled socket. The artifacts are complete and correct - only the exit hangs -
+so a scripted loop that waits for the process would stall forever. If a review appears to hang, check
+whether `.preflight/review.json` was already written; if it was, the review is usable and the process can
+be stopped. See `docs/TROUBLESHOOTING.md`.

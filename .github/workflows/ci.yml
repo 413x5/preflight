@@ -104,6 +104,21 @@ jobs:
           assert cfg["model"], "no model configured"
           assert cfg["fallback_models"], "no fallback model configured"
           assert d["litellm"]["force_streaming_api_base_substrings"], "no streaming host configured"
+          # The completeness knobs, asserted here so they cannot be dropped silently. Each answers a
+          # different half of the review->fix->review cascade, and a regression in any one of them
+          # shows up as a loop that will not converge rather than as a failing build:
+          #   num_max_findings          - how many findings one review may RETURN
+          #   extra_instructions        - tells the model to report them all, not stop at the first
+          #   enable_large_pr_chunking  - review the whole diff instead of a pruned slice of it
+          #   max_number_of_calls       - the bound on those extra chunking calls
+          # The last assertion is a separate concern (the gate's go/no-go signals), not a completeness
+          # knob, so it is named after what it checks rather than being counted as one of the four.
+          rv = d["pr_reviewer"]
+          assert rv["num_max_findings"] >= 10, "num_max_findings is back down to a cascade-sized cap"
+          assert rv["extra_instructions"].strip(), "extra_instructions is empty: the model is not told to report everything"
+          assert rv["enable_large_pr_chunking"] is True, "a token-budget-pruned diff would be reviewed as a slice"
+          assert rv["max_number_of_calls"] >= 2, "chunking is on but capped at a single call, so it cannot cover the diff"
+          assert rv["require_risk_assessment"] and rv["require_merge_recommendation"], "no go/no-go signal"
           print("config parses:", cfg["model"], "->", cfg["fallback_models"])
           PY
           rm -rf "$tmp"
@@ -215,6 +230,89 @@ jobs:
           rm -rf "$d"
           [ "$rc" = 0 ] && echo "gate field shapes OK"
           exit "$rc"
+
+      - name: Coverage marker ignores prose and matches the real footer
+        shell: bash
+        # `preflight` decides whether a review covered the whole diff by matching pr-agent's coverage
+        # footer in review.md. That file is model-generated prose, and a finding may discuss coverage -
+        # a review of this very feature did, repeatedly. Text matching alone loses: the model can
+        # reproduce the footer's words while explaining them. One phrase, two independent substrings, the
+        # contiguous sentence, and a post-table-only search each false-positived or was too weak; what
+        # the shipped check keys on is the footer AS pr-agent EMITS it - a horizontal rule, the header,
+        # the sentence, and the generated file bullets - restricted to the text after the review table.
+        #
+        # This runs the SHIPPED summary-line block over fixtures rather than restating its logic, and
+        # covers both directions: the emitted footer must be detected, and the prose and in-table quotes
+        # that broke earlier versions must not be.
+        #
+        # What this step CANNOT catch, and does not claim to: upstream DRIFT. CI deliberately never
+        # installs pr-agent (no network, no paid key), so its footer fixture is a literal copied from
+        # pr-agent's source; if a future pr-agent rewords the footer, this step stays green while
+        # COVERAGE_RE stops matching and a partial review quietly reads as complete. That is exactly why
+        # tests/run.sh REQ-HOOK-28 re-checks the marker against the INSTALLED package's own footer source
+        # on any machine that has one - the check exists, but it skips where pr-agent is absent, so a
+        # reword is caught on a developer machine rather than in CI.
+        run: |
+          python3 - <<'PY'
+          import re, subprocess, sys, tempfile, os
+
+          src = open("files/preflight", encoding="utf-8").read()
+          blocks = re.findall(r"python3 - \"\$out_json\" \"\$out_md\" <<'PY'[^\n]*\n(.*?)\nPY\n", src, re.S)
+          if not blocks:
+              sys.exit("cannot find the summary-line block in files/preflight; update this guard")
+          d = tempfile.mkdtemp()
+          json_path = os.path.join(d, "review.json")
+          open(json_path, "w").write('{"review":{"key_issues_to_review":[]}}')
+          script = os.path.join(d, "summary.py")
+          open(script, "w").write(blocks[-1])
+
+          def summary(body):
+              md = os.path.join(d, "review.md")
+              open(md, "w", encoding="utf-8").write(body)
+              return subprocess.run([sys.executable, script, json_path, md],
+                                    capture_output=True, text=True).stdout
+
+          # pr-agent emits: "\n\n<hr>\n\n" + the header + the sentence + "\n" + bullet lines.
+          footer = ("\n\n<hr>\n\n\u26a0\ufe0f **Review coverage:** The following files were not "
+                    "included in this review because of the token budget:\n- `late.py`\n")
+
+          fails = []
+          # The real footer, where pr-agent emits it: after the review table.
+          if "PARTIAL" not in summary("<table>\n<tr><td>clean</td></tr>\n</table>" + footer):
+              fails.append("the real footer, after the table, was not detected")
+          # No table at all: the marker must still fire on the emitted footer.
+          if "PARTIAL" not in summary(footer):
+              fails.append("the footer without a table was not detected")
+          # Shapes that tripped earlier versions, each making a fully-reviewed diff report PARTIAL.
+          for label, body in (
+              ("a finding quoting the footer verbatim inside the table",
+               "<table>\n<tr><td>finding:<br>" + footer + "</td></tr>\n</table>\n"),
+              ("the header and sentence without pr-agent's rule-and-bullet structure",
+               "<table></table>\n\n**Review coverage:** The following files were not included in this "
+               "review because of the token budget:\n"),
+              ("a review that merely says the generated files were not included in this review",
+               "a review that merely says: generated files were not included in this review, and stops."),
+          ):
+              if "PARTIAL" in summary(body):
+                  fails.append(label + " was misread as coverage")
+          # The plain line always carries its counts, whatever the verdict.
+          if "issues=0" not in summary(footer):
+              fails.append("the summary line lost its counts")
+          # A review.md that is not valid UTF-8 (the footer holds an emoji) must still print the counts:
+          # UnicodeDecodeError is a ValueError, so a read guarded only by `except OSError` would drop the
+          # whole line, not just the marker.
+          md = os.path.join(d, "latin1.md")
+          open(md, "wb").write(b"caf\xe9 - a review in cp1252\n")
+          got = subprocess.run([sys.executable, script, json_path, md], capture_output=True, text=True).stdout
+          if "issues=0" not in got:
+              fails.append("a non-UTF-8 review.md lost the summary line: " + got.strip())
+
+          if fails:
+              for f in fails:
+                  print("FAIL:", f)
+              sys.exit(1)
+          print("coverage marker ignores prose and matches the real footer")
+          PY
 
       - name: Commit-hook selfcheck
         shell: bash

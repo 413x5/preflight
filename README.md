@@ -102,6 +102,20 @@ remote's own `HEAD`, then `origin/main|master`, then `main|master`. Set `PREFLIG
 something else (a release branch, a fork's trunk); if nothing resolves, `preflight` says so and exits 4
 rather than guessing a ref that does not exist.
 
+One review is meant to report **everything** it was shown, so the loop converges instead of re-discovering
+one issue at a time. That takes settings in `files/preflight.toml`: `num_max_findings`/`extra_instructions`
+govern what the model *reports*, and `enable_large_pr_chunking` governs whether it was shown the whole diff
+at all - without it an oversized diff is pruned to a slice of the tree, and each round "discovers" more. If
+anything still could not be covered, the summary line contains `coverage=PARTIAL` and `review.md` names the
+omitted files; treat that as "there may be more here", not as a clean review.
+
+Reporting everything is not the same as converging, though: a reviewer cannot tell a deliberate,
+documented trade-off from an oversight, and each round reviews the text the previous round wrote. The
+summary line therefore ends with a `new=N/M` count - how many findings were **not** in the previous
+review. `new=0` is the stopping signal: judge each finding rather than re-fixing it, since repeating is
+not the same as unresolved. Full detail in
+[`docs/DESIGN.md`](docs/DESIGN.md#why-the-loop-converges-new-findings-not-a-clean-review).
+
 ## Teach your coding agents
 
 Paste `AGENTS-review-snippet.md` into the repo's `AGENTS.md` so every agent follows the loop: review → fix all

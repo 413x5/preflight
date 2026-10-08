@@ -51,10 +51,12 @@ run means a green CI run:
 The live-endpoint case (`./tests/run.sh e2e`) is **not** run in CI: it needs a paid key, and CI should
 not depend on one.
 
-The **selfcheck** exists because a green suite is not proof the hook enforces. Ten of the 26 offline
-cases pass with the hook stubbed out entirely - they assert acceptance (`commit -a`, a reviewed deletion,
-a reviewed rename) or exercise a deliberate bypass, so blocking nothing satisfies them. The selfcheck runs
-the whole suite against a neutered hook and requires exactly the enforcement-sensitive cases to fail, and
+The **selfcheck** exists because a green suite is not proof the hook enforces. Many of the offline cases
+take the hook neutered without complaint - they assert acceptance (`commit -a`, a reviewed deletion, a
+reviewed rename), exercise a deliberate bypass, or test a different file (the example hooks, the review
+helper), so they never ask the hook to refuse anything; some skip rather than pass where pr-agent is
+absent, as in CI. The selfcheck runs the whole suite against a neutered hook and requires exactly the
+enforcement-sensitive cases to fail, and
 it requires every case to be classified, so a newly added case cannot join the insensitive set by
 default. See [`tests/README.md`](tests/README.md) for the classification.
 

@@ -68,6 +68,10 @@ the selfcheck itself is `REQ-SELF-nn`, listed in its own table below.
 | REQ-HOOK-25 | Removing a reviewed gitlink (submodule) is blocked | `git cat-file -e "HEAD:sub"` failing for a gitlink, so a submodule removal counted as "not tracked at HEAD" |
 | REQ-HOOK-26 | The example hook reports a missing helper when `HOME` is unset | `set -u` plus a bare `$HOME` aborting with "HOME: unbound variable" instead of the documented message |
 | REQ-HOOK-27 | The `post-commit` advisory warns when it cannot read the review sidecar | the advisory exiting 0 on a missing `python3` or a malformed/scope-less sidecar, making it silent in exactly the case it exists to report |
+| REQ-HOOK-28 | The coverage marker matches pr-agent's footer and ignores prose, including a verbatim quote of the footer inside the review table | the marker keying on text alone - one phrase, two substrings, or the contiguous sentence each false-positived on a real review that discussed coverage; and the footer being reworded upstream, which would silently retire the marker |
+| REQ-HOOK-29 | The completeness keys sit in the `[pr_reviewer]` section pr-agent reads them from, **and** every config path the docs name exists in pr-agent's own defaults | a key in the wrong table (or renamed upstream) leaving the finding cap or chunking silently inert while CI, which only checks presence, stays green; and documented advice pointing at a path pr-agent ignores - which fails silently for whoever follows it, as `config.callback_timeout_seconds` once did (it is `[litellm]`) |
+| REQ-HOOK-31 | The convergence signal: `new=N/M` counts new findings, `new=0` flags repeats with the judge-don't-refix hint, and the field is absent on a first or unreadable previous review | a count that never converges (repeats read as new), stops early (a new finding is misread as a repeat), or claims a signal it cannot support; the branch had no test at all, and its assertions sat inside a case that skips wherever pr-agent is absent - i.e. always, in CI |
+| REQ-HOOK-30 | A real `review.md` renders the `</table>` the coverage marker's structural restriction relies on | plain-diff output no longer emitting the table, which would make that restriction inert on real reviews; a missing `review.md` fails rather than vanishing, so the requirement cannot retire silently (the case rides in the live run, so it is not exercised where no live review can run) |
 
 The selfcheck is its own requirement, since it checks the suite rather than the hook:
 
@@ -95,6 +99,10 @@ reverted in turn and the expected case was confirmed to fail:
 | the `ls-tree` discriminator replaced by per-path `cat-file` | REQ-HOOK-24, REQ-HOOK-25 |
 | `${HOME:-}` reverted to a bare `$HOME` in the example hook | REQ-HOOK-26 |
 | the `post-commit` advisory's unreadable-sidecar guards restored to `exit 0` | REQ-HOOK-27 |
+| `COVERAGE_RE` weakened to a bare phrase, or the structural `<table>` gate dropped (so an in-table quote of the footer counts) | REQ-HOOK-28 |
+| a completeness key moved out of `[pr_reviewer]`, or renamed | REQ-HOOK-29 |
+| the live case's `review.md` presence turned back into a skip (so REQ-HOOK-30 can vanish instead of failing) | REQ-HOOK-30 |
+| `key()` normalisation dropped, or the `new=` count no longer suppressed on a first review | REQ-HOOK-31 |
 
 This table is per-fix: it records which case guards which repair. It is **not** the same property as the
 selfcheck below, which asks about the whole hook at once.
@@ -102,14 +110,14 @@ selfcheck below, which asks about the whole hook at once.
 ## The selfcheck, and why "all cases pass" is not enough
 
 A passing suite does not by itself mean the hook enforces anything. Stub the hook out entirely
-(`#!/bin/sh` + `exit 0`) and the suite is still green for **10 of its 26 offline cases**, because those
-cases do not depend on the hook refusing something:
+(`#!/bin/sh` + `exit 0`) and the suite is still green for a large share of its offline cases, because
+those cases do not depend on the hook refusing something:
 
 | Group | Cases | Why a neutered hook still passes them |
 |---|---|---|
 | permissive by design | REQ-HOOK-07, 08, 09, 10 | they assert something is **not** blocked (`commit -a` with a scratch file, a reviewed deletion, a reviewed rename, an empty commit), so blocking nothing satisfies them |
 | bypass hatches | REQ-HOOK-14, 15 | they assert `--no-verify` / `PREFLIGHT_SKIP=1` work |
-| orthogonal | REQ-HOOK-20, 22, 26, 27 | `20` checks a file's presence rather than a block; `22`, `26` and `27` exercise the *example* hooks in `files/githooks/`, different files, which stubbing `files/preflight-hook` cannot affect |
+| orthogonal | REQ-HOOK-20, 22, 26, 27, 28, 29, 31 | they do not test the hook at all: `20` checks a file's presence, `22`, `26` and `27` exercise the *example* hooks in `files/githooks/`, and `28`/`29`/`31` exercise the review helper - different files, which stubbing `files/preflight-hook` cannot affect |
 
 That is correct per case, but it leaves a hole: nothing stopped the **enforcement-sensitive** set from
 silently losing its teeth. A case could be added that is meant to catch an unreviewed commit, pass with
@@ -131,7 +139,7 @@ It reports the split, so drift is visible in the output:
 
 ```
   PASS  a neutered hook fails exactly the enforcement-sensitive cases  [REQ-SELF-01]
-        16 enforcement-sensitive, 10 insensitive, 26 ids exercised
+        <n> enforcement-sensitive, <n> insensitive, <n> ids exercised
 ```
 
 The selfcheck is itself mutation-tested: adding a temporary case that passes with the hook neutered must

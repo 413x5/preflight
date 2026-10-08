@@ -24,8 +24,49 @@ Loop until `preflight-gate` exits 0:
    `review.estimated_effort_to_review_[1-5]`, `review.risk_level`, `review.merge_recommendation`).
 2. Fix **every** entry in `key_issues_to_review[]` and anything under `security_concerns` in one pass - the
    review is a single, complete report, so there is no reason to fix one finding and re-run for the next.
-3. Re-run `preflight review`, then `preflight-gate`. Repeat until it passes.
-4. The branch is then ready for the pull request; committing and pushing are the user's call.
+3. Re-run `preflight review`, then `preflight-gate`.
+4. Stop when it passes, **or** when the new run adds nothing you did not already answer (see below).
+5. The branch is then ready for the pull request; committing and pushing are the user's call.
+
+### Stop condition: fix new findings, answer repeats
+
+The loop converges on *new* findings, not on an empty review. A reviewer reading a diff cannot tell a
+deliberate, documented trade-off from an oversight, and each round tends to critique the code and comments
+the previous round wrote - so re-running produces findings that were already considered. Treating those as
+work to do is what turns the loop into a treadmill.
+
+The summary line reports this directly. `new=N/M` means N of the M findings were not in the previous
+review; `new=0` means every one of them was already raised:
+
+```
+preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
+```
+
+- **`new=` above zero** - there is something the last round did not see. Fix those.
+- **`new=0`** - stop and read, do not re-fix. For each finding decide which it is, and act accordingly:
+  - *a real defect* - fix it (this happens, and is the whole reason the loop exists);
+  - *already answered* - a limit, trade-off or alternative that the code, a comment or the docs already
+    address. Do not "fix" it by churning the code. If the reasoning is not yet written down, write it
+    down once - that is what stops the next round raising it - and do not rewrite the design to satisfy a
+    preference;
+  - *wrong* - say so and move on.
+- **Two rounds with `new=0`** is the point to stop and hand off, whatever remains. Note in the pull
+  request which findings you judged as answered and why, so a human sees the reasoning rather than the
+  loop's history.
+
+`new=` is a strong hint, not a verdict: it matches finding text (per pr-agent's own dedupe key), so a
+lightly reworded repeat can still read as new. It is absent on a first review, and absent if the previous
+review is unreadable. When it is absent, judge the findings yourself - and never re-fix a finding you have
+already answered in this branch.
+
+The review is configured to report **all** findings in one pass: it raises the finding cap, tells the
+model to report everything it is confident about, and reviews an oversized diff in chunks (merging the
+chunks' findings) instead of pruning files. Still, **read the coverage note**: if the summary line
+contains `coverage=PARTIAL`, the token budget left files out of the review and `review.md` names them
+(the full text is `coverage=PARTIAL (token budget left files out - see review.md)`). A low `issues=`
+count on a partial review means "the rest was not looked at", not "the change is clean" - raise
+`max_model_tokens`/`custom_model_max_tokens` (see the bundle's `docs/TROUBLESHOOTING.md`) rather than
+round-tripping until the omitted files happen to come into view.
 
 - **Do not commit to be reviewed.** The loop needs no commit - work in the working tree, review, fix, re-review.
   Committing between rounds is what produces a stack of near-identical commits, and the review does not require

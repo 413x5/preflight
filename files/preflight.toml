@@ -44,6 +44,41 @@ num_max_findings = 20
 # One clear go/no-go signal, in the same review (handy for preflight-gate):
 require_risk_assessment = true
 require_merge_recommendation = true
+# The other half of the cascade - the half num_max_findings does NOT fix. That setting caps how many
+# findings are *returned*; it cannot help when the model only ever sees part of the diff. When the diff
+# exceeds the token budget pr-agent prunes files and reviews the first patch, so each round exposes a
+# different slice of the tree and the next round "reveals" findings that were there all along. This text
+# is injected verbatim into the reviewer's system prompt (verified), and it is the only lever that tells
+# the model to look at the whole change before answering rather than stopping at the first issue.
+#
+# Two instructions matter, and both are about *completeness*, not severity:
+#   - enumerate the whole change and check each file, so the model does not report one issue and stop;
+#   - report every issue it is confident about, so "I found something" is not read as "I am done".
+# Kept short deliberately: it is prompt budget on every run.
+extra_instructions = """
+Report EVERY issue you are confident about in this diff in a single review - do not stop at the first
+one, and do not hold findings back for a later run. Work through the whole diff file by file and check
+each changed hunk for a concrete defect (a wrong value, a missing guard, an unchecked error path, a
+resource left open, a security-relevant input) before you answer. If you find one issue, keep looking:
+most real diffs have several. List them all, most severe first.
+"""
+
+# The mechanical half of the same problem. `num_max_findings` and `extra_instructions` shape what the
+# model *reports*; neither can help if the model was never shown the whole diff. When a diff exceeds the
+# token budget pr-agent's default is to PRUNE files and review only the first patch, so a "complete"
+# review silently covers a slice of the tree - and the next run, with different content, surfaces findings
+# that were there all along. That reads exactly like a loop that will not converge.
+#
+# Turning chunking on changes the fallback from "review a slice, drop the rest" to "split the diff,
+# review it in chunks and union the findings into one review". It is inert unless the budget actually
+# leaves files out, so a normal diff still costs exactly one AI call.
+enable_large_pr_chunking = true
+# How many chunks may be REVIEWED, not merely how much output is kept: a diff needing more chunks than
+# this has the extra chunks never sent to the model, so their findings are never produced at all. The
+# remaining files are then listed in the review's coverage footer, which is what `coverage=PARTIAL` on
+# the summary line points at - that line is the signal, not the cap. Raise this to cover a larger diff;
+# raising `config.max_model_tokens` instead lets the whole diff fit in one call.
+max_number_of_calls = 3
 
 [pr_code_suggestions]
 # Same idea for `preflight improve` (default is 3 suggestions per chunk):

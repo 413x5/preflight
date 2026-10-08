@@ -8,6 +8,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A convergence signal on the summary line: `new=N/M`.** Reporting every finding in one pass is not
+  enough to make the loop end, because a reviewer cannot tell a deliberate, documented trade-off from an
+  oversight - and each round necessarily reviews the code, comments and docs the previous round wrote, so
+  re-running keeps producing findings that were already considered. Chasing those is what turns the loop
+  into a treadmill, at a full model call per round. Each run now compares its findings against the
+  previous run's and reports how many are new:
+
+  ```
+  preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
+  ```
+
+  Identity is pr-agent's own dedupe key - `(relevant_file, issue_header, issue_content)`, normalised - so
+  a different issue in the same file is still new. `new=0` is the stopping signal: judge each finding as a
+  real defect, already answered, or wrong, and fix only the first. The hint deliberately does not say
+  "done": it compares against the previous *run*, not against what you decided, so a deferred finding
+  looks like a repeat. Text matching means a lightly reworded repeat can still read as new - a strong
+  hint, not a verdict, absent on a first review or when the previous one is unreadable.
+  `AGENTS-review-snippet.md` documents the stop condition, and `docs/DESIGN.md` the reasoning and limits.
+
+  Reviewing this feature found that its own tests were the weakest part, and each gap is fixed:
+  the assertions were **skipped wherever pr-agent is absent** - which is always, in CI - so the headline
+  logic ran under no check at all; they now live in a pr-agent-independent case (`REQ-HOOK-31`) that runs
+  in CI. A simulated upstream change to the footer bullet format now fails loudly instead of quietly
+  retiring the marker. And `COVERAGE_RE` no longer requires the emoji: the lenient read that keeps the
+  counts on a non-UTF-8 `review.md` replaces an invalid emoji with U+FFFD, so requiring it meant the
+  marker could never fire on exactly the file it was written to tolerate.
+
+  Review also caught a doc bug worth naming: the troubleshooting advice pointed at
+  `config.callback_timeout_seconds` when pr-agent reads it from `[litellm]`, so anyone following it would
+  have changed nothing and kept hanging. A wrong config path fails silently, so `REQ-HOOK-29` now checks
+  every `section.key` the docs name against pr-agent's own defaults - the guidance cannot rot unnoticed
+  again.
+- **One review now reports everything, instead of one finding at a time.** The `review → fix → re-review`
+  loop was slow because it had two independent causes, and only one of them was configured for.
+  `pr_reviewer.num_max_findings` caps how many findings a review *returns* (upstream default 3), and it
+  was already raised to 20 - but raising it does nothing when the model was only *shown* part of the
+  diff. When a diff exceeds the token budget, pr-agent's default is to prune files and review the first
+  patch, so a "complete" review silently covered a slice of the tree, and the next run surfaced findings
+  that were there all along. `files/preflight.toml` now also sets:
+  - `pr_reviewer.extra_instructions` - injected verbatim into the reviewer's system prompt (verified),
+    telling the model to work through the whole diff and report every issue it is confident about rather
+    than stopping at the first;
+  - `pr_reviewer.enable_large_pr_chunking = true` (`max_number_of_calls = 3`) - an oversized diff is
+    split, up to `max_number_of_calls` chunks are reviewed, and the per-chunk findings are unioned into one review instead of
+    files being pruned. It is inert unless the budget actually leaves files out, so an ordinary diff
+    still costs exactly one AI call.
+  Anything still uncovered is reported rather than hidden: `preflight` now appends
+  `coverage=PARTIAL (token budget left files out - see review.md)` to its summary line, so a low
+  `issues=` count on a partially-reviewed diff is not mistaken for a clean change. CI asserts the
+  completeness settings, because a regression in any of them shows up as a loop that will not converge
+  rather than as a failing build.
+  The marker decides **structurally, then textually**: findings render inside the review `<table>` and
+  pr-agent emits the footer after it, so a match only counts past the last `</table>`, with the footer's
+  wording as a secondary check. Text matching alone could not hold - one phrase, two independent
+  substrings, and the contiguous sentence each false-positived on a real review of this very feature,
+  because the model reproduces the footer while explaining it. Both directions matter: a missed footer
+  retires the marker and a partial review reads as complete; a spurious match fires it on a complete one
+  and teaches the reader to ignore it. CI checks the surface that needs no network (the marker matches
+  the footer literal from pr-agent's source, and ignores prose and in-table quotes); `tests/run.sh`
+  `REQ-HOOK-28` re-checks against the **installed** pr-agent's own footer source and skips where the tool
+  is absent, so an upstream rewording is caught on a machine that has it.
 - **`preflight --help` and `preflight --version`** (plus `-h`/`-V` and `preflight-gate --help`). Both are
   answered before anything touches git or the config, so they work outside a repository too (`--help` is
   the first thing a new user runs, and it must not need a repo or a configured key). `--version`
@@ -59,12 +120,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `preflight hook` subcommand and `preflight-hook` helper; `install.sh` installs both plus the example
     hooks into `~/.config/preflight/`.
   - Covered by an integration suite in `tests/` (`./tests/run.sh`): real repositories, the real hook
-    files, no framework and no network. 27 cases (26 offline plus one live end-to-end), one per
-    requirement (`REQ-HOOK-01`..`27`, mapped in `tests/README.md`), each protecting a specific behaviour -
-    including the seven bypasses found while building this (unreviewed deletions, renames, symlink
-    typechanges, `git rm --cached`, reviewed files whose names git quotes, gitlinks, and an unset `HOME`).
-    Every fix was reverted in turn to confirm the matching case fails without it; a neutered hook turns 16
-    offline cases red.
+    files, no framework and no network. One check per requirement (`REQ-HOOK-nn`, mapped in
+    `tests/README.md`), each protecting a specific behaviour - including the bypasses found while
+    building this (unreviewed deletions, renames, symlink typechanges, `git rm --cached`, reviewed files
+    whose names git quotes, gitlinks, and an unset `HOME`).
+    Every fix was reverted in turn to confirm the matching case fails without it, and the selfcheck
+    below requires that a neutered hook turns exactly the enforcement-sensitive cases red.
   - Path listings use `-z` and the paths are handled as raw bytes. `--name-only` without `-z` wraps any
     path that needs quoting in double quotes and backslash-escapes it, and `core.quotePath` cannot
     disable that for the characters that matter. Handing such a name back to git asks about a path that
@@ -74,17 +135,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     candidate path. `git cat-file -e "HEAD:sub"` fails for a **gitlink**, so a submodule removal was
     classified as "not tracked at HEAD" and slipped through unreviewed.
 - **A selfcheck for the hook test suite** (`./tests/run.sh selfcheck`, wired into CI). A green suite was
-  not evidence that the hook enforced anything: stubbing the hook out entirely still satisfied 10 of the 26
-  offline cases, because those assert *acceptance* (a reviewed deletion, `commit -a`, a reviewed rename),
-  exercise a deliberate bypass, or test the separate example hooks. Nothing kept the enforcement-sensitive
-  cases sensitive, so a case claiming to catch an unreviewed commit could have passed with the hook
-  disabled and nobody would have known. The selfcheck re-runs the whole suite against a neutered hook and
-  requires exactly the declared enforcement-sensitive cases to fail, reports the split
-  (16 sensitive / 10 insensitive), and **requires every case to be classified** - an unclassified case, or
-  a sensitive case that passes or skips, fails it. The check is itself mutation-tested.
+  not evidence that the hook enforced anything: stubbing the hook out entirely still satisfied a large
+  share of the offline cases, because those assert *acceptance* (a reviewed deletion, `commit -a`, a
+  reviewed rename), exercise a deliberate bypass, or test the separate example hooks. Nothing kept the
+  enforcement-sensitive cases sensitive, so a case claiming to catch an unreviewed commit could have
+  passed with the hook disabled and nobody would have known. The selfcheck re-runs the whole suite
+  against a neutered hook and requires exactly the declared enforcement-sensitive cases to fail, reports
+  the split, and **requires every case to be classified** - an unclassified case, or a sensitive case
+  that passes or skips, fails it. The check is itself mutation-tested.
 
 ### Fixed
 
+- **The `new=` count was suppressed after a clean review.** It was computed only when the previous
+  review had findings, so a run following a clean pass reported no convergence signal - the one round
+  most likely to be re-running for no reason. It is now computed whenever a previous review was *loaded*,
+  and a clean previous review correctly makes every current finding new.
+- **The temp file used to compare against the previous review could leak.** `mktemp` created it, but a
+  failed copy cleared the variable, so the exit trap no longer knew to remove the file. The path is now
+  assigned only after a successful copy.
+- **`REQ-HOOK-30` could vanish instead of failing.** It asserted on `.preflight/review.md` inside an
+  `if [ -f ... ]`, so a review that reported a pass without writing the file produced neither a pass nor
+  a failure - the requirement silently retired, which is exactly the "a guard that did not run proves
+  nothing" rule the selfcheck applies to skips. A missing `review.md` now fails the case.
+- **`max_number_of_calls` was documented as capping cost without losing findings.** It caps how many
+  chunks are *reviewed*: a diff needing more chunks has the excess never sent to the model, so their
+  findings are never produced and the files appear only in the coverage footer. The comment now says so
+  instead of implying chunking always covers the whole diff.
 - **`preflight review` blocked every commit on Debian/Ubuntu.** The helper ran the gate with `sh
   "$gate_bin"`, but `preflight-gate` is a **bash** script (`set -euo pipefail`) and on Debian/Ubuntu
   `/bin/sh` is dash, which rejects `pipefail` on the first line. The gate died with exit 2, and since
@@ -191,6 +267,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream default (`["gpt-5.6-terra"]`) is a bare id, which the endpoint rejects (ids must be
   `provider/model`), so a failed primary model retried against a dead one; it is now
   `["openai/cline-pass/glm-5.3-flash"]`.
+
+### Known issue
+
+- **`preflight review` can complete and then never exit.** Both artifacts are written, and then
+  pr-agent's post-run wait for litellm callbacks fails to finish - measured at 4-13 minutes, in two
+  shapes: sleeping in `kevent`, or spinning at 100% CPU in the asyncio loop. The review itself is
+  finished and correct, so a scripted loop that waits on the process stalls for no reason; stop it and
+  use the artifacts. The summary line (`issues=`, `new=`) is printed after pr-agent exits, so a hang
+  hides the counts too - read them from `review.json`. `config.ai_timeout` bounds the model request, not
+  this wait, which has its own budget at `[litellm] callback_timeout_seconds` (not `[config]` - the
+  wrong section is silently ignored). That bound has **not** been confirmed to stop the hang. Not fixed
+  by wrapping the command in a shorter timeout, which would risk cutting off a slow but valid review -
+  the silent-truncation failure this project works hardest to avoid. Diagnosis, the two contributing
+  conditions, and what remains untested are recorded in `docs/TROUBLESHOOTING.md`, with the follow-up
+  work in `ROADMAP.md`.
 
 ## [0.1.0] - 2026-10-07
 

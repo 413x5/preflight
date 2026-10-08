@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The pending commit is now the default review scope.** `preflight review` used to review the whole
+  branch since the default branch. It now reviews exactly what a commit would contain - HEAD to the working
+  tree, untracked files included - which is the case the tool exists for: reviewing a change before it is
+  submitted. This needs no remote, no base resolution and no `git commit-tree`, so the default path makes
+  no network round trip and cannot fail with "cannot tell which branch to diff against".
+
+  `PREFLIGHT_SCOPE=worktree` still reviews the whole branch, and `=head` still reviews committed content
+  only; both are unchanged, including the exit-4 failure when no base resolves.
+
+  Reviewing commit by commit covers a multi-commit branch completely. The pre-commit hook binds content,
+  not time - it deliberately does not check that the recorded `HEAD` still equals `HEAD` - and it compares
+  the reviewed tree against the tree being committed, so it constrains only the commit being made. Every
+  commit is therefore reviewed against the tree it commits, and the union of those reviews covers the
+  branch. A branch review, by contrast, is a sample of the final state and enforces nothing.
+
+  `coverage=PARTIAL` is now emitted only for the branch scopes: a pending-commit diff is far below the
+  token budget, so pr-agent never prunes it and there is nothing to announce. Guarded by `REQ-HOOK-33`,
+  whose three mutations (default reverted, `worktree` losing its base, unknown scope accepted) were each
+  confirmed to fail the case.
+- **A hung shutdown no longer hides a review's results, and no longer blocks the loop.** `preflight
+  review` has been observed writing both artifacts and then never exiting, because pr-agent's post-run
+  callback drain blocked on a stalled socket. The review was complete the whole time. The summary is now
+  read from `review.json` *before* waiting, so a hang cannot hide `issues=`/`new=`/`coverage=` - the signal
+  the loop stops on - and a process that has not exited `PREFLIGHT_SHUTDOWN_WAIT` (default 120s) after
+  writing its artifact is stopped, with the run still succeeding and its sidecar recorded. The review's own
+  wait is bounded too, at an hour by default: it is a backstop against a hang, not a performance target. A
+  run stopped without an artifact keeps its non-zero status, so a missing review cannot read as a pass.
+  Covered by `REQ-HOOK-32`.
+- **The reasoning budget is set, and it was the largest lever on review time.** A ~500-line diff was
+  measured at ~23,500 completion tokens in 111s, of which only ~2,500 characters reached `review.md` - the
+  rest was hidden reasoning, invisible in the artifacts, so a slow review read as a slow provider.
+  `files/preflight.toml` sets `[config] reasoning_effort` together with the
+  `[config] additional_reasoning_effort_models` entry required for it to arrive: pr-agent forwards the
+  setting only to a model litellm's metadata calls reasoning-capable, and `cline-pass/*` is not in that
+  table - the same gap that forces `custom_model_max_tokens` - so without the second key the value was
+  read, logged as the default, and silently dropped. Measured interleaved on one diff: mean **~18.6s /
+  ~4,051 completion tokens** unforwarded against **~9.2s / ~1,689** with `low` forwarded. Measure any
+  change here against `new=N/M`: a cheaper round that reports fewer findings just moves the cost into a
+  second round.
+
 - **A convergence signal on the summary line: `new=N/M`.** Reporting every finding in one pass is not
   enough to make the loop end, because a reviewer cannot tell a deliberate, documented trade-off from an
   oversight - and each round necessarily reviews the code, comments and docs the previous round wrote, so

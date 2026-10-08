@@ -8,15 +8,23 @@
 #   hook    — verify that the content being committed was already reviewed. This is what a repo's
 #             .githooks/pre-commit calls; it is read-only and never runs a review. See docs/DESIGN.md.
 #
-# Base (PREFLIGHT_BASE):
+# Base (PREFLIGHT_BASE), used only by the `worktree` and `head` scopes:
 #   the ref the diff is taken against. Unset, it is resolved as origin/HEAD, then the remote's own
-#   HEAD, then origin/main|master, then main|master. Set it to target anything else.
+#   HEAD, then origin/main|master, then main|master. Set it to target anything else. The `commit`
+#   scope needs no base - it always diffs against HEAD.
 #
 # Scope (PREFLIGHT_SCOPE):
-#   worktree (default) — reviews committed + UNCOMMITTED + untracked changes, so you can
-#                        iterate in the working tree and commit only once, when it's clean.
+#   commit (default)   — reviews exactly what a commit would contain: HEAD -> working tree, including
+#                        untracked files. No remote, no base, no fetch: this is the "review before you
+#                        commit" case, and it is what the pre-commit hook enforces.
+#   worktree           — reviews the whole BRANCH: the default branch -> your working tree. Use this to
+#                        review a feature branch before opening its PR; it needs a resolvable base.
 #   head               — reviews committed changes only (base...HEAD). Cannot be enforced by a
 #                        pre-commit hook, which by construction runs before the commit exists.
+#
+#   Reviewing commit by commit covers a multi-commit branch completely: each commit is checked against
+#   the tree that was reviewed for it, so the union of the per-commit reviews covers the branch, and
+#   content cannot reach it unreviewed.
 #
 # Artifacts (dir = PREFLIGHT_DIR, default .preflight), auto-excluded from git:
 #   review -> review.md + review.json (+ review.meta.json, the hook's record of what was reviewed)
@@ -80,11 +88,19 @@ Options:
 Environment:
   PREFLIGHT_BASE       ref to diff against (default: origin/HEAD, then the remote's HEAD,
                        then origin/main|master, then main|master)
-  PREFLIGHT_SCOPE      worktree (default) | head  (head cannot be enforced by the hook)
+  PREFLIGHT_SCOPE      commit (default) | worktree | head
+                       commit  = the pending change (HEAD -> worktree); enforced by the hook
+                       worktree= the whole branch vs the default branch; enforced by the hook
+                       head    = committed changes only; cannot be enforced by the hook
   PREFLIGHT_DIR        artifact dir (default .preflight)
   PREFLIGHT_HOME       config dir (default ~/.config/preflight) - the toml, the
                        secrets relink and the hook helper are all read from here
   PREFLIGHT_SKIP=1     (hook only) bypass the commit check once
+  PREFLIGHT_REVIEW_WAIT   seconds to wait for a review to produce its artifact (default 3600)
+  PREFLIGHT_SHUTDOWN_WAIT seconds to wait for pr-agent to EXIT after the artifact exists
+                          (default 120); on expiry it is stopped and the run still succeeds,
+                          because the review is already complete and preflight-gate decides
+                          the verdict. See docs/TROUBLESHOOTING.md ("never exits").
 
 Config:  <dir>/preflight.toml, where <dir> is PREFLIGHT_HOME or ~/.config/preflight
          (any OpenAI-compatible endpoint; see README "Using another provider")
@@ -118,7 +134,15 @@ case "$cmd" in
 esac
 
 dir="${PREFLIGHT_DIR:-.preflight}"
-scope="${PREFLIGHT_SCOPE:-worktree}"
+# `commit` (default) reviews only what a commit would contain: HEAD -> working tree. That is the case this
+# tool exists for - reviewing a change before it is submitted - and it needs no remote, because HEAD is
+# already the reference point. `worktree` and `head` review the whole branch since the default branch,
+# which needs a base and a fetch; they remain for reviewing a feature branch before its PR.
+scope="${PREFLIGHT_SCOPE:-commit}"
+case "$scope" in
+  commit|worktree|head) ;;
+  *) echo "preflight: unknown PREFLIGHT_SCOPE '$scope' (expected commit, worktree or head)" >&2; exit 2 ;;
+esac
 
 # `hook` is a verifier, not a review: it must not fetch, snapshot or require a config. Dispatch it
 # before any of that, because it runs on every commit.
@@ -138,7 +162,12 @@ fi
 root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo 'preflight: not inside a git repository' >&2; exit 1; }
 cd "$root"
 git rev-parse --verify -q HEAD >/dev/null 2>&1 || { echo 'preflight: repository has no commits yet' >&2; exit 3; }
-git fetch --quiet origin 2>/dev/null || echo 'preflight: warning: could not fetch origin' >&2
+# The branch scopes need an up-to-date base, and a remote to get it from; `commit` needs neither, so it
+# does no network round trip at all. Skipping the fetch is not just faster - it is what makes the default
+# work offline, and it removes the whole class of base-resolution failures from the common path.
+if [ "$scope" != 'commit' ]; then
+  git fetch --quiet origin 2>/dev/null || echo 'preflight: warning: could not fetch origin' >&2
+fi
 
 # The base to diff against. First candidate that resolves to a commit wins:
 #
@@ -183,13 +212,18 @@ resolve_base() {
   return 1
 }
 
-base="$(resolve_base)" || {
-  echo 'preflight: cannot tell which branch to diff against.' >&2
-  echo 'preflight: looked for PREFLIGHT_BASE, origin/HEAD, the remote HEAD, then origin/main|master and main|master.' >&2
-  echo 'preflight: name it explicitly, e.g.  PREFLIGHT_BASE=origin/develop preflight review' >&2
-  exit 4
-}
-echo "preflight: base=${base}" >&2
+if [ "$scope" = 'commit' ]; then
+  base='HEAD'
+else
+  base="$(resolve_base)" || {
+    echo 'preflight: cannot tell which branch to diff against.' >&2
+    echo 'preflight: looked for PREFLIGHT_BASE, origin/HEAD, the remote HEAD, then origin/main|master and main|master.' >&2
+    echo 'preflight: name it explicitly, e.g.  PREFLIGHT_BASE=origin/develop preflight review' >&2
+    echo "preflight: or use PREFLIGHT_SCOPE=commit to review only the pending change." >&2
+    exit 4
+  }
+  echo "preflight: base=${base}" >&2
+fi
 
 # Ensure the artifact dir is git-ignored in THIS repo (per-repo git metadata, never committed),
 # so the worktree snapshot below can't sweep the artifacts into the reviewed diff.
@@ -216,12 +250,19 @@ else
   GIT_INDEX_FILE="$idxf" git add -A
   tree="$(GIT_INDEX_FILE="$idxf" git write-tree)"
   # This tree is the exact content handed to pr-agent, so it is the record the commit hook
-  # compares against. Captured here, on the same temp index, rather than recomputed later.
+  # compares against. Captured here, on the same temp index, rather than recomputed later. The hook's
+  # containment check is unchanged by the scope: it compares every path being committed against this tree.
   hook_tree="$tree"
-  synth="$(GIT_AUTHOR_NAME=preflight GIT_AUTHOR_EMAIL=preflight@localhost \
-            GIT_COMMITTER_NAME=preflight GIT_COMMITTER_EMAIL=preflight@localhost \
-            git -c commit.gpgsign=false commit-tree "$tree" -p HEAD -m 'preflight worktree snapshot')"
-  diff_ref="${base}...${synth}"
+  if [ "$scope" = 'commit' ]; then
+    # HEAD -> worktree. This is the change a commit would contain, so a synthetic commit is unnecessary:
+    # `git diff HEAD <tree>` is exactly `git diff --cached`, without needing an index or a base.
+    diff_ref='HEAD'
+  else
+    synth="$(GIT_AUTHOR_NAME=preflight GIT_AUTHOR_EMAIL=preflight@localhost \
+              GIT_COMMITTER_NAME=preflight GIT_COMMITTER_EMAIL=preflight@localhost \
+              git -c commit.gpgsign=false commit-tree "$tree" -p HEAD -m 'preflight worktree snapshot')"
+    diff_ref="${base}...${synth}"
+  fi
 fi
 
 case "$cmd" in
@@ -234,7 +275,11 @@ esac
 
 mkdir -p "$dir"
 cfg="file://${cfgdir}/preflight.toml"
-echo "preflight: ${cmd} (scope=${scope}) — $(git rev-parse --abbrev-ref HEAD) vs ${base} -> ${dir}/" >&2
+if [ "$scope" = 'commit' ]; then
+  echo "preflight: ${cmd} (scope=commit) — pending change since HEAD -> ${dir}/" >&2
+else
+  echo "preflight: ${cmd} (scope=${scope}) — $(git rev-parse --abbrev-ref HEAD) vs ${base} -> ${dir}/" >&2
+fi
 
 # Set the PREVIOUS review aside before this run overwrites it, so the summary can report whether the
 # run surfaced anything NEW. This is the loop's convergence signal. The loop's failure mode is not
@@ -253,67 +298,15 @@ if [ -n "$out_json" ] && [ -f "$out_json" ]; then
   if cp "$out_json" "$cand" 2>/dev/null; then prev_json="$cand"; else rm -f "$cand"; fi
 fi
 
-if [ -n "$out_json" ]; then
-  git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
-    --output "$out_md" --json-output "$out_json" "$cmd" "$@"
-else
-  git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
-    --output "$out_md" "$cmd" "$@"
-fi
-
-echo "preflight: wrote ${out_md}${out_json:+ and ${out_json}}" >&2
-
-# Record what was reviewed so the commit hook can verify it later. The hook reads gate.verdict,
-# which comes from the same rules preflight-gate applies (kept in one place: the gate itself).
-if [ "$cmd" = 'review' ] || [ "$cmd" = 'review_pr' ]; then
-  if [ -n "$out_json" ] && [ -f "$out_json" ]; then
-    verdict="fail"
-    gate_code=0
-    gate_bin=''
-    for cand in "$(cd "$(dirname "$0")" && pwd)/preflight-gate" "${HOME:-}/.local/bin/preflight-gate"; do
-      if [ -f "$cand" ]; then gate_bin="$cand"; break; fi
-    done
-    if [ -n "$gate_bin" ]; then
-      # Run it with the interpreter its shebang names, NOT `sh`. preflight-gate is bash (`set -o
-      # pipefail`), and on Debian/Ubuntu /bin/sh is dash, which rejects pipefail outright - the gate
-      # died on its first line, the exit code was read as a failed verdict, and every commit was then
-      # blocked with "the last review did not pass" for a reason unrelated to the review. Executing it
-      # directly honours the shebang, and there is deliberately no `|| sh` fallback: that would
-      # reintroduce exactly this silently-wrong verdict on any host where the shebang cannot be used.
-      PREFLIGHT_DIR="$dir" "$gate_bin" >/dev/null 2>&1 || gate_code=$?
-      if [ "$gate_code" = 126 ] || [ "$gate_code" = 127 ]; then
-        echo "preflight: warning: could not execute ${gate_bin}; the gate verdict is unknown" >&2
-      fi
-    else
-      gate_code=127
-    fi
-    [ "$gate_code" = "0" ] && verdict="pass"
-    python3 - "$dir/review.meta.json" "$scope" "$dir" "$hook_tree" "$(git rev-parse HEAD)" "$verdict" "$gate_code" <<'PY' || true
-import json, sys, datetime
-path, scope, d, tree, head, verdict, code = sys.argv[1:8]
-meta = {}
-try:
-    with open(path) as fh:
-        meta = json.load(fh)
-except Exception:
-    meta = {}
-meta.update({
-    "scope": scope,
-    "dir": d,
-    "head": head,
-    "reviewed_tree": tree,
-    "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "gate": {"verdict": verdict, "exit": int(code)},
-})
-with open(path, "w") as fh:
-    json.dump(meta, fh, indent=2, sort_keys=True)
-    fh.write("\n")
-PY
-    echo "preflight: recorded reviewed content for the commit hook (${verdict})" >&2
-  fi
-fi
-if [ -n "$out_json" ] && [ -f "$out_json" ]; then
-  PREFLIGHT_PREV_JSON="$prev_json" python3 - "$out_json" "$out_md" <<'PY' >&2 2>/dev/null || true
+# Report the counts from the artifact, so they survive a hang. Called from both points, hence idempotent.
+# The flag is set only on a successful read: an artifact caught mid-write must not retire the retry.
+emit_summary() {
+  [ -z "${summary_printed:-}" ] || return 0
+  [ -f "$out_json" ] || return 0
+  local rc=0
+  if [ "$scope" = 'commit' ]; then coverage_scope='0'; else coverage_scope='1'; fi
+  PREFLIGHT_PREV_JSON="$prev_json" PREFLIGHT_SCOPE_IS_BRANCH="$coverage_scope" \
+    python3 - "$out_json" "$out_md" <<'PY' >&2 2>/dev/null || rc=$?
 import json, os, re, sys
 d = json.load(open(sys.argv[1]))
 r = d.get('review') or {}
@@ -383,7 +376,11 @@ except OSError:
 # reader to ignore it. This line is an AID that points at the authoritative footer in review.md, not a
 # guarantee - `review.md` is what to read to settle whether coverage was complete.
 tail = md[md.rfind('</table>') + len('</table>'):] if '</table>' in md else md
-if COVERAGE_RE.search(tail):
+# Only the branch scopes can hit this: a pending-commit diff is orders of magnitude below the token
+# budget, so pr-agent never prunes it. For them the marker is a real safety net - a pruned branch diff
+# means `issues=1` reads as "one problem" when it means "the rest was never looked at". Under `commit`
+# scope there is nothing to announce, so it is not emitted rather than emitted-and-always-absent.
+if os.environ.get('PREFLIGHT_SCOPE_IS_BRANCH') == '1' and COVERAGE_RE.search(tail):
     line += " coverage=PARTIAL (token budget left files out - see review.md)"
 
 # How many findings are NEW since the previous review, and how many repeat one already answered here.
@@ -395,8 +392,10 @@ if COVERAGE_RE.search(tail):
 # Two things make "repeat" decidable without guessing:
 #   - identity is (file, header, content) per pr-agent's own dedupe key, so a genuinely different issue
 #     in the same file still counts as new;
-#   - `files/preflight.toml` pins `temperature`, and the prompt is deterministic, so a re-review of
-#     unchanged content tends to reproduce the same text rather than a paraphrase.
+#   - the prompt is fixed, so a re-review of unchanged content tends to reproduce the same text. There is
+#     deliberately no sampling pin: `temperature`/`seed` are NOT set here, so a paraphrase is a normal
+#     outcome and a reworded repeat still reads as new. That is the honest limit, not a defect to paper
+#     over - see docs/DESIGN.md, which explains why the lever is left unset.
 # A reworded repeat can therefore still read as new, which is the honest limit: the count is a strong
 # hint, not a verdict. `new=0` with issues>0 is the signal to stop and read the findings, not to fix
 # them; `new=N` means there is something the last round did not see.
@@ -432,4 +431,134 @@ if new is not None:
         line += " (unchanged since the previous review: judge each, do not re-fix blind)"
 print(line)
 PY
+  # Always return 0: a function's status propagates under `set -e`, so a failed read would abort the run
+  # instead of deferring to the retry after the process exits.
+  [ "$rc" = 0 ] && summary_printed=1
+  return 0
+}
+
+# Run the review in the background and report its counts from the artifact, so a pr-agent that finishes the
+# review and then hangs on shutdown cannot hide `issues=`/`new=`/`coverage=` - the signal the loop stops on.
+# Split into two bounded phases, because a hang can happen before OR after the artifacts are written.
+if [ -n "$out_json" ]; then
+  # Remove the previous run's artifacts BEFORE launching, so phase 1 waits for THIS run's output. Without
+  # this the wait sees the old file, never waits, and reports the previous review's counts - worse than
+  # printing nothing, because it reads like a verdict. Removing after the launch would be a race.
+  rm -f "$out_json" "$out_md" 2>/dev/null || true
+
+  git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
+    --output "$out_md" --json-output "$out_json" "$cmd" "$@" &
+  pr_pid=$!
+
+  # Phase 1: the review itself. `kill -0` tests liveness without reaping, so the exit status survives.
+  waited=0
+  review_limit="${PREFLIGHT_REVIEW_WAIT:-3600}"
+  while { [ ! -f "$out_json" ] || [ ! -f "$out_md" ]; } \
+        && kill -0 "$pr_pid" 2>/dev/null && [ "$waited" -lt "$review_limit" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  emit_summary
+
+  # Phase 2: the shutdown. Bounded and short, because the review is already on disk by now.
+  shutdown_waited=0
+  shutdown_limit="${PREFLIGHT_SHUTDOWN_WAIT:-120}"
+  while kill -0 "$pr_pid" 2>/dev/null && [ "$shutdown_waited" -lt "$shutdown_limit" ]; do
+    sleep 1
+    shutdown_waited=$((shutdown_waited + 1))
+  done
+
+  complete=''
+  if [ -f "$out_json" ] && [ -f "$out_md" ]; then complete=1; fi
+
+  stopped=''
+  if kill -0 "$pr_pid" 2>/dev/null; then
+    stopped=1
+    if [ -n "$complete" ]; then
+      printf 'preflight: warning: pr-agent did not exit within %ss after writing %s; stopping it (the review is complete and usable)\n' \
+        "$shutdown_limit" "$out_json" >&2
+    else
+      printf 'preflight: warning: pr-agent did not exit within %ss and did not write %s; stopping it (this run produced no review)\n' \
+        "$shutdown_limit" "$out_json" >&2
+    fi
+    kill -TERM "$pr_pid" 2>/dev/null || true
+    hold=0
+    while kill -0 "$pr_pid" 2>/dev/null && [ "$hold" -lt 5 ]; do sleep 1; hold=$((hold + 1)); done
+    kill -KILL "$pr_pid" 2>/dev/null || true
+  fi
+
+  pr_status=0
+  wait "$pr_pid" 2>/dev/null || pr_status=$?
+
+  # A process WE stopped after a complete review is not a failure - `preflight-gate` decides the verdict on
+  # the artifact. Anything else (including a stopped run that wrote nothing) keeps its own status, so a bad
+  # key, a real error, or a hang that produced no review still fails the run.
+  if [ -n "$stopped" ] && [ -n "$complete" ]; then
+    case "$pr_status" in
+      143|137) pr_status=0 ;;
+    esac
+  fi
+
+  [ -n "$complete" ] && emit_summary
+  [ "$pr_status" = 0 ] || exit "$pr_status"
+else
+  # describe/improve/ask write no JSON artifact, so there is nothing to salvage - they are not bounded, and
+  # a timeout must never cut off slow-but-valid work.
+  git diff "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
+    --output "$out_md" "$cmd" "$@" &
+  pr_pid=$!
+  wait "$pr_pid" 2>/dev/null || exit $?
 fi
+echo "preflight: wrote ${out_md}${out_json:+ and ${out_json}}" >&2
+
+# Record what was reviewed so the commit hook can verify it later. The hook reads gate.verdict,
+# which comes from the same rules preflight-gate applies (kept in one place: the gate itself).
+if [ "$cmd" = 'review' ] || [ "$cmd" = 'review_pr' ]; then
+  if [ -n "$out_json" ] && [ -f "$out_json" ]; then
+    verdict="fail"
+    gate_code=0
+    gate_bin=''
+    for cand in "$(cd "$(dirname "$0")" && pwd)/preflight-gate" "${HOME:-}/.local/bin/preflight-gate"; do
+      if [ -f "$cand" ]; then gate_bin="$cand"; break; fi
+    done
+    if [ -n "$gate_bin" ]; then
+      # Run it with the interpreter its shebang names, NOT `sh`. preflight-gate is bash (`set -o
+      # pipefail`), and on Debian/Ubuntu /bin/sh is dash, which rejects pipefail outright - the gate
+      # died on its first line, the exit code was read as a failed verdict, and every commit was then
+      # blocked with "the last review did not pass" for a reason unrelated to the review. Executing it
+      # directly honours the shebang, and there is deliberately no `|| sh` fallback: that would
+      # reintroduce exactly this silently-wrong verdict on any host where the shebang cannot be used.
+      PREFLIGHT_DIR="$dir" "$gate_bin" >/dev/null 2>&1 || gate_code=$?
+      if [ "$gate_code" = 126 ] || [ "$gate_code" = 127 ]; then
+        echo "preflight: warning: could not execute ${gate_bin}; the gate verdict is unknown" >&2
+      fi
+    else
+      gate_code=127
+    fi
+    [ "$gate_code" = "0" ] && verdict="pass"
+    python3 - "$dir/review.meta.json" "$scope" "$dir" "$hook_tree" "$(git rev-parse HEAD)" "$verdict" "$gate_code" <<'PY' || true
+import json, sys, datetime
+path, scope, d, tree, head, verdict, code = sys.argv[1:8]
+meta = {}
+try:
+    with open(path) as fh:
+        meta = json.load(fh)
+except Exception:
+    meta = {}
+meta.update({
+    "scope": scope,
+    "dir": d,
+    "head": head,
+    "reviewed_tree": tree,
+    "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "gate": {"verdict": verdict, "exit": int(code)},
+})
+with open(path, "w") as fh:
+    json.dump(meta, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+    echo "preflight: recorded reviewed content for the commit hook (${verdict})" >&2
+  fi
+fi
+

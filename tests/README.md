@@ -71,6 +71,8 @@ the selfcheck itself is `REQ-SELF-nn`, listed in its own table below.
 | REQ-HOOK-28 | The coverage marker matches pr-agent's footer and ignores prose, including a verbatim quote of the footer inside the review table | the marker keying on text alone - one phrase, two substrings, or the contiguous sentence each false-positived on a real review that discussed coverage; and the footer being reworded upstream, which would silently retire the marker |
 | REQ-HOOK-29 | The completeness keys sit in the `[pr_reviewer]` section pr-agent reads them from, **and** every config path the docs name exists in pr-agent's own defaults | a key in the wrong table (or renamed upstream) leaving the finding cap or chunking silently inert while CI, which only checks presence, stays green; and documented advice pointing at a path pr-agent ignores - which fails silently for whoever follows it, as `config.callback_timeout_seconds` once did (it is `[litellm]`) |
 | REQ-HOOK-31 | The convergence signal: `new=N/M` counts new findings, `new=0` flags repeats with the judge-don't-refix hint, and the field is absent on a first or unreadable previous review | a count that never converges (repeats read as new), stops early (a new finding is misread as a repeat), or claims a signal it cannot support; the branch had no test at all, and its assertions sat inside a case that skips wherever pr-agent is absent - i.e. always, in CI |
+| REQ-HOOK-33 | `commit` is the default scope (it reviews the pending change, not the branch), `worktree` still resolves a base and keeps the branch diff, and an unknown scope is refused with exit 2 | a silent regression of the default back to a branch scope, which would make every review a whole-branch review - the cost problem the scope exists to fix - while still producing a valid review, so nothing else would notice; or the branch machinery being lost while the scope name still claims it works |
+| REQ-HOOK-32 | A hung shutdown still reports the counts, bounds its wait, stops the stalled process, and lets the run succeed with its sidecar written | the post-run hang swallowing `issues=`/`new=` (they were printed only after the call returned), blocking the loop forever, or - the subtler half - turning a complete, usable review into a failed run that then blocks the next commit. The case drives a fake `pr-agent` that writes both artifacts and hangs, so it needs no key or network; it runs the helper under its own watchdog, because a regression here hangs rather than fails, and a test that stalls the suite reports nothing |
 | REQ-HOOK-30 | A real `review.md` renders the `</table>` the coverage marker's structural restriction relies on | plain-diff output no longer emitting the table, which would make that restriction inert on real reviews; a missing `review.md` fails rather than vanishing, so the requirement cannot retire silently (the case rides in the live run, so it is not exercised where no live review can run) |
 
 The selfcheck is its own requirement, since it checks the suite rather than the hook:
@@ -103,9 +105,19 @@ reverted in turn and the expected case was confirmed to fail:
 | a completeness key moved out of `[pr_reviewer]`, or renamed | REQ-HOOK-29 |
 | the live case's `review.md` presence turned back into a skip (so REQ-HOOK-30 can vanish instead of failing) | REQ-HOOK-30 |
 | `key()` normalisation dropped, or the `new=` count no longer suppressed on a first review | REQ-HOOK-31 |
+| the shutdown bound disabled (a plain blocking `wait`) | REQ-HOOK-32 |
+| the exit status normalised on `stopped` alone (so a hang that wrote no review exits 0) | REQ-HOOK-32 |
+| the default `PREFLIGHT_SCOPE` reverted to `worktree` | REQ-HOOK-33 |
+| the `worktree` scope made to diff HEAD, losing the branch diff | REQ-HOOK-33 |
+| an unknown `PREFLIGHT_SCOPE` silently accepted instead of exiting 2 | REQ-HOOK-33 |
 
 This table is per-fix: it records which case guards which repair. It is **not** the same property as the
 selfcheck below, which asks about the whole hook at once.
+
+**Every row here must have been run**: apply the mutation, watch the case fail, revert, watch it pass. An
+earlier version of this table listed mutations no case could distinguish - claimed coverage that did not
+exist - which is the same "an inability to check is indistinguishable from a pass" failure this repo guards
+against elsewhere. Keep the table short and true rather than complete and aspirational.
 
 ## The selfcheck, and why "all cases pass" is not enough
 

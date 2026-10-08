@@ -12,10 +12,12 @@ preflight-gate     # exit 0 = pass, 1 = changes required or key issues, 2 = secu
 `preflight --help` lists every command and the environment variables; `preflight --version` reports the
 installed bundle version (useful when you are not sure this machine has the current bundle).
 
-`preflight review` reviews what is on disk: committed work **plus uncommitted and untracked changes**. Its diff
-comes from a throwaway snapshot of the working tree, so reviewing never stages, commits or rewrites anything -
-the index is untouched and HEAD does not move. (`PREFLIGHT_SCOPE=head preflight review` reviews committed content
-only.)
+`preflight review` reviews **the pending commit**: everything HEAD does not yet contain, tracked and untracked.
+Its diff comes from a throwaway snapshot of the working tree, so reviewing never stages, commits or rewrites
+anything - the index is untouched and HEAD does not move. Reviewing commit by commit covers a multi-commit
+branch completely, because each commit is checked against the tree that was reviewed for it.
+(`PREFLIGHT_SCOPE=worktree preflight review` reviews the whole branch against the default branch instead;
+`=head` reviews committed content only.)
 
 Loop until `preflight-gate` exits 0:
 
@@ -53,6 +55,55 @@ preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (unchanged since t
 - **Two rounds with `new=0`** is the point to stop and hand off, whatever remains. Note in the pull
   request which findings you judged as answered and why, so a human sees the reasoning rather than the
   loop's history.
+
+### How much to change: fix the defect, not the narrative
+
+The stop condition above is necessary but not sufficient, because there is a second way to keep the loop
+alive: **changing more than the finding requires, so the next round has more to review.** Code fixes are
+usually small. The prose written *about* them is not, and a reviewer reads both.
+
+The failure looks like this. A round reports one bug. You fix the code in ~10 lines, then also: rewrite the
+surrounding comments to explain the fix, add a paragraph to the docs, add a changelog bullet, and add a
+test-table row asserting the new test covers the fix. The next round reviews the *claims* you just made -
+"this is guarded", "only these statuses are treated as non-failures" - and reports that some of them are
+inaccurate. They often are, because prose written to describe a fix is not verified the way the fix is. You
+correct the prose, which adds more prose, and the loop has no reason to stop. Measured on one real change:
+about **56 lines of executable logic and 271 lines of comment** about it, over five rounds in which the
+only findings still arriving were about the writing.
+
+So, when applying a round's findings:
+
+- **Change the code the finding requires and little else.** Do not rewrite comments, docs or the changelog
+  unless the finding is *about* them.
+- **Do not add a sentence describing a fix.** If the code is now correct, that is the record. A comment
+  explaining what you just changed is the most reviewable text in the diff and the least useful: it
+  duplicates the diff, and it can only be checked by reading the diff.
+- **Never write an unverified claim about coverage.** "This is guarded by test X" and "every mutation is
+  listed" are factual claims; a reviewer will check them, and if you did not run them yourself they are
+  usually wrong in the direction of overclaiming. Either verify by mutation (see below) or do not write it.
+- **Prefer deleting a claim to qualifying it.** When a finding says a comment overstates something, the fix
+  is usually to remove the sentence, not to add a caveat to it. Sub-clauses about limits are exactly the
+  surface the next round spends its budget on.
+- **When `new=0`, default to no change at all.** "Write it down once" above means *only* if the reasoning is
+  genuinely missing from the code and someone would re-raise it without it. It does not mean documenting
+  the review.
+
+A useful test before submitting: if a reviewer saw only your diff, would it have more *claims* to check
+than *code* to check? If yes, cut until it does not.
+
+### Verifying a claim cheaply, when you must make one
+
+Claims about tests and guards are sometimes unavoidable - a requirement table, a coverage note. The rule is
+that the claim is only true if you **ran** the failure it describes:
+
+1. apply the mutation (break the guard);
+2. run the suite;
+3. confirm the specific case FAILS;
+4. revert the mutation, and re-run to confirm it passes again.
+
+A case that stays green with its guard removed is worth nothing, and its table row is a false assertion that
+will be caught - possibly several rounds later, at full cost, after you have forgotten writing it. If you
+cannot run the mutation, do not write the claim.
 
 `new=` is a strong hint, not a verdict: it matches finding text (per pr-agent's own dedupe key), so a
 lightly reworded repeat can still read as new. It is absent on a first review, and absent if the previous
@@ -115,7 +166,8 @@ What the hook does, and does not do:
 - The **first** commit in a repository with no history is allowed but not enforced - `preflight review`
   cannot run before a first commit exists, so blocking would make the hook impossible to adopt.
 - `PREFLIGHT_SCOPE=head` reviews cannot be enforced (a head-scope review covers content that already
-  exists, and a pre-commit hook runs before the commit it would cover). Use the default worktree scope.
+  exists, and a pre-commit hook runs before the commit it would cover). The default `commit` scope is
+  enforceable.
 - A second hook, `post-commit`, is **advisory** - it cannot block, since the commit already exists. It
   exists to break the silence when enforcement did not apply, and it reports two things: a review that
   used `head` scope (nothing you have committed since was verified), and a review sidecar it cannot read

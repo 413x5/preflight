@@ -708,6 +708,10 @@ def summary(body, prev=None, current=None):
         env["PREFLIGHT_PREV_JSON"] = prev_path
     else:
         env.pop("PREFLIGHT_PREV_JSON", None)
+    # The coverage marker only fires for the branch scopes: a pending-commit diff is far below the token
+    # budget, so pr-agent never prunes it and there is nothing to announce. This case exercises the
+    # marker's matching, so it runs in the scope where the marker can appear at all.
+    env["PREFLIGHT_SCOPE_IS_BRANCH"] = "1"
     return subprocess.run([sys.executable, script, json_path, md],
                           capture_output=True, text=True, env=env).stdout
 
@@ -781,7 +785,18 @@ defaults_path, ours_path = sys.argv[1:3]
 # extra_instructions) are declared in many tool sections upstream, so "first occurrence wins" would
 # resolve a key to whichever section happens to be listed first and fail on a correctly-configured repo.
 # The assertion is therefore "pr_reviewer declares it", not "nothing else does".
-wanted = ("num_max_findings", "extra_instructions", "enable_large_pr_chunking", "max_number_of_calls")
+# Each key with the section pr-agent reads it from. The COMPLETENESS keys live in [pr_reviewer]; the
+# reasoning knob lives in [config] and only reaches the model because the model id is also registered in
+# [config] additional_reasoning_effort_models - a key that is read, logged, and then silently dropped when
+# the id is missing, which is exactly how the default looked applied while being inert.
+wanted = {
+    "num_max_findings": "pr_reviewer",
+    "extra_instructions": "pr_reviewer",
+    "enable_large_pr_chunking": "pr_reviewer",
+    "max_number_of_calls": "pr_reviewer",
+    "reasoning_effort": "config",
+    "additional_reasoning_effort_models": "config",
+}
 sections = {key: set() for key in wanted}
 section = None
 for line in open(defaults_path, encoding="utf-8", errors="replace"):
@@ -792,15 +807,17 @@ for line in open(defaults_path, encoding="utf-8", errors="replace"):
     if m and m.group(1) in sections and section:
         sections[m.group(1)].add(section)
 
-wrong = [k for k in wanted if "pr_reviewer" not in sections[k]]
+wrong = [k for k in sorted(wanted) if wanted[k] not in sections[k]]
 if wrong:
-    print("pr-agent no longer reads these from [pr_reviewer]: " + ", ".join(wrong))
+    print("pr-agent no longer reads these from the section the bundle sets them in: "
+          + ", ".join(f"{k} (expected [{wanted[k]}])" for k in wrong))
     sys.exit(2)
 
 ours = tomllib.load(open(ours_path, "rb"))
-missing = [k for k in wanted if k not in ours.get("pr_reviewer", {})]
+missing = [k for k in sorted(wanted) if k not in ours.get(wanted[k], {})]
 if missing:
-    print("files/preflight.toml does not set these under [pr_reviewer]: " + ", ".join(missing))
+    print("files/preflight.toml does not set these: "
+          + ", ".join(f"{k} under [{wanted[k]}]" for k in missing))
     sys.exit(3)
 
 # The DOCS also tell an operator which keys to set - and a wrong key path is silently ignored, so the
@@ -847,6 +864,210 @@ PY
         "each key under [pr_reviewer]" "not where pr-agent reads it" \
         "a completeness key is in the wrong table or was renamed upstream, so the finding cap or chunking is silently inert while every check stays green"
   fi
+}
+
+case_scope_defaults() {
+  # The scope switch: `commit` (the pending change) is the default, and the branch scopes still work.
+  #
+  # Two things are asserted, and both fail silently without this case:
+  #   - the DEFAULT is what the tool's purpose requires. If it regresses to a branch scope, every review
+  #     becomes a whole-branch review - the cost problem this scope exists to fix - and nothing else
+  #     would notice, because both modes produce a valid review.
+  #   - `worktree` still resolves a base and diffs the branch. The branch machinery must survive the
+  #     default changing; a refactor that gated `resolve_base` on the wrong value would leave the
+  #     branch scope diffing HEAD and reviewing only the pending change while claiming to review the branch.
+  #
+  # Driven with a stubbed `pr-agent` that records the diff it is handed, so no key or network is needed.
+  local d fake out
+  d="$work/scope"; fake="$work/scope-bin"
+  mkdir -p "$d" "$fake"
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+cat > "$SCOPE_DIFF_OUT"
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent"
+
+  ( cd "$d" \
+      && git init -q -b main . \
+      && printf 'a\n' > f.txt \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m init \
+      && git checkout -q -b feature \
+      && printf 'b\n' > g.txt \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m "feat: g" \
+      && printf 'c\n' >> f.txt ) >/dev/null 2>&1
+
+  local problems=""
+  # Default scope: no PREFLIGHT_SCOPE set. Must review only the pending change (f.txt), not g.txt, which
+  # is already committed on this branch.
+  out="$work/scope-commit.diff"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" SCOPE_DIFF_OUT="$out" \
+      PREFLIGHT_HOME="$work/scope-cfg" PREFLIGHT_BASE=main \
+      bash "$repo_root/files/preflight" review ) >"$work/scope-commit.txt" 2>&1
+  if ! grep -q "scope=commit" "$work/scope-commit.txt"; then
+    problems="$problems
+        | the default scope is not commit: $(grep -o 'scope=[a-z]*' "$work/scope-commit.txt" | head -1)"
+  fi
+  if grep -q "^+++ b/g.txt" "$out" 2>/dev/null; then
+    problems="$problems
+        | the default scope reviewed already-committed content (g.txt), so it is not reviewing the pending change"
+  fi
+  grep -q "^+++ b/f.txt" "$out" 2>/dev/null || problems="$problems
+        | the default scope did not review the uncommitted change to f.txt"
+
+  # Branch scope: must still resolve a base and include the committed work.
+  out="$work/scope-worktree.diff"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" SCOPE_DIFF_OUT="$out" \
+      PREFLIGHT_SCOPE=worktree PREFLIGHT_HOME="$work/scope-cfg" PREFLIGHT_BASE=main \
+      bash "$repo_root/files/preflight" review ) >"$work/scope-worktree.txt" 2>&1
+  if ! grep -q "scope=worktree" "$work/scope-worktree.txt"; then
+    problems="$problems
+        | PREFLIGHT_SCOPE=worktree did not take effect"
+  fi
+  grep -q "^+++ b/g.txt" "$out" 2>/dev/null || problems="$problems
+        | the worktree scope missed already-committed content (g.txt), so the branch diff is gone"
+
+  # An unknown scope must be refused rather than silently treated as a known one.
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" SCOPE_DIFF_OUT="$work/scope-bad.diff" \
+      PREFLIGHT_SCOPE=nonsense PREFLIGHT_HOME="$work/scope-cfg" PREFLIGHT_BASE=main \
+      bash "$repo_root/files/preflight" review ) >/dev/null 2>&1
+  bad_rc=$?
+  [ "$bad_rc" = 2 ] || problems="$problems
+        | an unknown PREFLIGHT_SCOPE exited $bad_rc rather than 2"
+
+  if [ -z "$problems" ]; then ok "the commit scope is the default and the branch scopes still work" "REQ-HOOK-33"
+  else bad "the commit scope is the default and the branch scopes still work" "REQ-HOOK-33" \
+        "default=commit, worktree=base, unknown=exit 2" "see below" "$problems
+"; fi
+}
+
+# ---------------------------------------------------------------------------- shutdown bound
+
+case_bounded_shutdown() {
+  # The post-run hang, without a network or a key: a fake `pr-agent` writes the two artifacts and then
+  # sleeps, which is the observed shape (the review is complete; only the exit is stuck). Five behaviours
+  # are asserted, each one a way the helper previously failed:
+  #
+  #   1. the counts are still reported, so a hang cannot hide `issues=`/`new=`;
+  #   2. the hung process is stopped rather than blocking the loop;
+  #   3. the run SUCCEEDS and records its sidecar, because the review is complete and `preflight-gate`
+  #      decides the verdict - otherwise a saved run would leave the next commit blocked;
+  #   4. a request that writes no artifact (`describe`) is never bounded, since there is nothing to
+  #      salvage and a timeout must not cut off valid work;
+  #   5. a hang that produced no review FAILS, so a caller's loop cannot read a missing review as a pass.
+  #
+  # The helper runs under a watchdog: a regression here hangs rather than fails, and a test that stalls the
+  # suite reports nothing. The fake publishes its own PID ($FAKE_PID) so the watchdog can stop it too -
+  # killing only the subshell would orphan its `sleep`.
+  local d fake slow cfg fpid
+  d="$work/shutdown"; fake="$work/shutdown-bin"; slow="$work/shutdown-slow"
+  cfg="$work/shutdown-cfg"; fpid="$work/shutdown-fake.pid"
+  mkdir -p "$d/.githooks" "$fake" "$slow" "$cfg"
+  cp "$repo_root/files/preflight.toml" "$cfg/preflight.toml"
+
+  # Writes both artifacts, then hangs. `exec` makes this PID the sleeper, so stopping it stops the sleep.
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$js" ] && printf '{"review":{"key_issues_to_review":[{"relevant_file":"a.py","issue_header":"H","issue_content":"c"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3},"usage":{"total_tokens":123}}\n' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+[ -n "$FAKE_PID" ] && printf '%s\n' "$$" > "$FAKE_PID"
+exec sleep 600
+FAKE
+  # Writes only the markdown, like describe/improve/ask, and takes longer than the shutdown cap.
+  cat > "$slow/pr-agent" <<'SLOW'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+sleep 6
+[ -n "$out" ] && printf 'a description\n' > "$out"
+[ -n "$FAKE_PID" ] && printf '%s\n' "$$" > "$FAKE_PID"
+exit 0
+SLOW
+  chmod +x "$fake/pr-agent" "$slow/pr-agent"
+
+  cp -R "$here/sample/." "$d/"
+  ( cd "$d" && git init -q -b main . \
+      && git -c commit.gpgsign=false add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m "chore: sample" ) >/dev/null 2>&1
+  git -C "$d" rev-parse --verify -q HEAD >/dev/null 2>&1 || {
+    bad "a hung shutdown still reports, bounds and succeeds" "REQ-HOOK-32" "a seeded repository" "no commit" \
+        "the case could not build its fixture, so the shutdown behaviour was never exercised"
+    return
+  }
+  printf '\n\n# unreviewed\n' >> "$d/util.py"
+
+  local out_file="$work/shutdown-out.txt" problems="" rc
+  rm -f "$fpid"
+  ( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" PREFLIGHT_BASE=main \
+      PREFLIGHT_SHUTDOWN_WAIT=3 PREFLIGHT_REVIEW_WAIT=30 FAKE_PID="$fpid" \
+      bash "$repo_root/files/preflight" review > "$out_file" 2>&1; echo $? > "$work/shutdown-rc.txt" ) &
+  local run_pid=$! held=0 timed_out=''
+  while kill -0 "$run_pid" 2>/dev/null && [ "$held" -lt 25 ]; do sleep 1; held=$((held + 1)); done
+  if kill -0 "$run_pid" 2>/dev/null; then
+    timed_out=1
+    # The fake first, then the subshell: killing only the subshell leaves the fake (and its `sleep`) alive.
+    # Validate before signalling: `kill -KILL 0` (what a bare `|| echo 0` fallback would produce) sends
+    # SIGKILL to the CALLER'S WHOLE PROCESS GROUP - the suite and its parent shell included. An empty or
+    # missing pid file must mean "nothing to stop", not "kill everything".
+    fake_pid="$(cat "$fpid" 2>/dev/null || true)"
+    case "$fake_pid" in
+      ''|*[!0-9]*) ;;
+      *) kill -KILL "$fake_pid" 2>/dev/null || true ;;
+    esac
+    kill -TERM "$run_pid" 2>/dev/null || true
+    sleep 1; kill -KILL "$run_pid" 2>/dev/null || true
+  fi
+  wait "$run_pid" 2>/dev/null || true
+  out="$(cat "$out_file" 2>/dev/null || true)"
+  rc="$(cat "$work/shutdown-rc.txt" 2>/dev/null || echo 124)"
+
+  [ -z "$timed_out" ] || problems="$problems
+        | the helper never returned, so the shutdown bound is not in force"
+  case "$out" in *"issues=1"*) ;; *) problems="$problems
+        | (1) the counts were not reported, so a hang still hides issues=/new=: $out" ;; esac
+  case "$out" in *"did not exit"*) ;; *) problems="$problems
+        | (2) the stalled process was not reported and stopped" ;; esac
+  [ "$rc" = 0 ] || problems="$problems
+        | (3) the run failed (exit $rc) despite a complete, usable artifact"
+  [ -f "$d/.preflight/review.meta.json" ] || problems="$problems
+        | (3) no sidecar was recorded, so the next commit would be blocked despite a complete review"
+
+  # (4) describe writes no artifact, so it must be allowed to finish: no cap, no kill.
+  rm -rf "$d/.preflight"
+  ( cd "$d" && PATH="$slow:$PATH" PREFLIGHT_HOME="$cfg" PREFLIGHT_BASE=main \
+      PREFLIGHT_SHUTDOWN_WAIT=2 bash "$repo_root/files/preflight" describe ) >"$work/shutdown-desc.txt" 2>&1
+  grep -q 'did not exit' "$work/shutdown-desc.txt" && problems="$problems
+        | (4) describe was bounded and killed: a command with no artifact must not be cut off"
+  [ -f "$d/.preflight/description.md" ] || problems="$problems
+        | (4) describe produced no output, so its run was lost"
+
+  # (5) A hang that never writes a review must FAIL - exiting 0 would read as a pass to a caller's loop.
+  rm -rf "$d/.preflight"
+  printf '#!/bin/sh\nexec sleep 600\n' > "$fake/pr-agent"; chmod +x "$fake/pr-agent"
+  dead_rc=0
+  ( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" PREFLIGHT_BASE=main \
+      PREFLIGHT_SHUTDOWN_WAIT=3 PREFLIGHT_REVIEW_WAIT=5 \
+      bash "$repo_root/files/preflight" review ) >/dev/null 2>&1 || dead_rc=$?
+  [ "$dead_rc" != 0 ] || problems="$problems
+        | (5) a hang that wrote no review exited 0, so a missing review reads as a pass"
+
+  if [ -z "$problems" ]; then ok "a hung shutdown still reports, bounds and succeeds" "REQ-HOOK-32"
+  else bad "a hung shutdown still reports, bounds and succeeds" "REQ-HOOK-32" \
+        "counts printed, process stopped, exit 0, sidecar written, describe untouched, no-review fails" "see below" "$problems
+"; fi
 }
 
 # ---------------------------------------------------------------------------- live end-to-end
@@ -930,7 +1151,8 @@ REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK
 #   bypass                assert the documented escape hatches work.
 #   orthogonal            do not test blocking at all, or test a different file.
 insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
-REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31'
+REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31
+REQ-HOOK-32 REQ-HOOK-33'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -1055,7 +1277,9 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_missing_helper_fails_closed_unset_home \
     case_post_commit_advisory \
     case_convergence_signal \
-    case_coverage_marker_matches_real_footer
+    case_coverage_marker_matches_real_footer \
+    case_bounded_shutdown \
+    case_scope_defaults
   say ""
 fi
 

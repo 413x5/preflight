@@ -119,6 +119,13 @@ jobs:
           assert rv["enable_large_pr_chunking"] is True, "a token-budget-pruned diff would be reviewed as a slice"
           assert rv["max_number_of_calls"] >= 2, "chunking is on but capped at a single call, so it cannot cover the diff"
           assert rv["require_risk_assessment"] and rv["require_merge_recommendation"], "no go/no-go signal"
+          # The reasoning budget, which is the largest lever on how long a review takes and is invisible
+          # without it: pr-agent forwards reasoning_effort only to a model litellm's metadata calls
+          # reasoning-capable, and cline-pass/* is not in that table. Both keys are needed or the value
+          # is read, logged and then silently dropped - a set-and-inert config that looks applied.
+          assert cfg["reasoning_effort"], "reasoning_effort is unset: the model decides its own budget"
+          assert cfg["additional_reasoning_effort_models"], \
+              "additional_reasoning_effort_models is empty, so reasoning_effort never reaches the model"
           print("config parses:", cfg["model"], "->", cfg["fallback_models"])
           PY
           rm -rf "$tmp"
@@ -269,8 +276,13 @@ jobs:
           def summary(body):
               md = os.path.join(d, "review.md")
               open(md, "w", encoding="utf-8").write(body)
+              # The marker only fires for the branch scopes: a pending-commit diff is far below the token
+              # budget, so pr-agent never prunes it. This step exercises the marker's matching, so it runs
+              # in the scope where the marker can appear at all.
+              env = dict(os.environ)
+              env["PREFLIGHT_SCOPE_IS_BRANCH"] = "1"
               return subprocess.run([sys.executable, script, json_path, md],
-                                    capture_output=True, text=True).stdout
+                                    capture_output=True, text=True, env=env).stdout
 
           # pr-agent emits: "\n\n<hr>\n\n" + the header + the sentence + "\n" + bullet lines.
           footer = ("\n\n<hr>\n\n\u26a0\ufe0f **Review coverage:** The following files were not "

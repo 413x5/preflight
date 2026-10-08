@@ -152,7 +152,7 @@ Check, in order:
 - `PREFLIGHT_SKIP=1` in the environment (or a shell profile) silently disables the check.
 - Your last review used `PREFLIGHT_SCOPE=head`. Head-scope reviews cover already-committed content, so a
   pre-commit hook could never vouch for a commit that did not exist when it ran - the hook says so on
-  stderr and allows the commit. Use the default worktree scope for enforcement.
+  stderr and allows the commit. The default `commit` scope is enforceable.
 
 ## The hook does not run in a git worktree
 
@@ -199,41 +199,106 @@ per upgrade; if it happens every run, the symlink target is being deleted - chec
 
 ## `preflight review` prints nothing more and never exits
 
-Check `.preflight/review.json` first. If it exists, is recent, and parses, the review **finished** - the
-artifacts are written before pr-agent's shutdown step - and only the exit is stuck. Stop the process; the
-review is usable, so continue with `preflight-gate` and carry on. `preflight review` prints its summary
-line (`issues=... new=N/M ...`) only after pr-agent exits, so a hang also hides the counts: read them from
-`review.json` (`review.key_issues_to_review`, `usage.total_tokens`) instead.
+**As of this version the helper handles this itself, so you should not have to.** It reports the counts
+from `.preflight/review.json` as soon as the artifact exists - before waiting for pr-agent - and if
+pr-agent has still not exited `PREFLIGHT_SHUTDOWN_WAIT` seconds (default 120) after writing it, the
+helper says so, stops the process, and lets the run succeed. The review is complete at that point;
+`preflight-gate` is what decides the verdict, and the sidecar is still recorded so the commit hook does
+not then block on a review that in fact passed. Expected output:
 
-**Diagnosis.** Two distinct shapes have been observed on this machine, both *after* the artifacts were
-written, so both are shutdown problems rather than review problems:
+```
+preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (...)
+preflight: warning: pr-agent did not exit within 120s after writing .preflight/review.json; stopping it (the review is complete and usable)
+```
+
+If you see that warning, the review is fine - read `.preflight/review.md`. The warning means pr-agent's
+shutdown step is still misbehaving on this machine, which is worth reporting upstream, not a reason to
+re-run the review.
+
+**Why it happens.** pr-agent waits after the run for litellm's deferred callbacks to flush
+(`drain_litellm_callbacks`), and on this machine that wait has been measured running 4-13 minutes despite
+its own budget. Two distinct shapes have been observed, both *after* the artifacts were written, so both
+are shutdown problems rather than review problems:
 
 | Shape | Process state | Where it sits |
 |---|---|---|
 | waiting | `S`, ~0% CPU | `select_kqueue`/`kevent` - blocked on a socket read that never delivers |
 | spinning | `R`, ~100% CPU | the asyncio loop re-entering `task_step`/`context_run` without settling |
 
-pr-agent waits after the run for litellm's deferred callbacks to flush
-(`drain_litellm_callbacks`). That wait is *supposed* to be bounded by `DEFAULT_CALLBACK_TIMEOUT_SECONDS`
-(30s, overridable) but has been measured running for 4-13 minutes.
+**What is and is not known.** Two conditions plausibly contribute and which dominates has **not** been
+isolated: `config.litellm.force_streaming_api_base_substrings` makes the response arrive as a long-lived
+SSE connection (a stalled or half-closed stream is exactly what blocks `kevent`), and very large
+completion-token counts produce far more callback traffic to drain. Several routine reviews run during
+this investigation did *not* hang at all, so this is intermittent rather than deterministic - which is
+itself the reason the fix above is a bound rather than a diagnosis.
 
-Two conditions on this machine plausibly contribute, and which dominates has **not** been isolated:
-`config.litellm.force_streaming_api_base_substrings` makes the response arrive as a long-lived SSE
-connection (a stalled or half-closed stream is exactly what blocks `kevent`), and `extra_instructions`
-makes the model emit far more output than a default review, so there is far more callback traffic to
-drain.
+**The levers, in order of usefulness:**
 
-**Do not bound the whole command.** A timeout that cuts off a slow but valid review is the
-silent-truncation failure this project works hardest to avoid, and a review is expensive enough that
-losing one is worse than waiting.
+1. **Bring the reasoning output down.** The hang correlates with completion volume, and
+   `[config] reasoning_effort` is the largest lever on that (see the next section). Less output is less
+   callback traffic.
+2. **`PREFLIGHT_SHUTDOWN_WAIT`** (env, default 120) bounds only the tail *after* the artifact exists. It
+   is a safety net, not a fix, and it deliberately never bounds the review itself: a timeout that cut off
+   a slow but valid review is the silent-truncation failure this project works hardest to avoid.
+3. **`[litellm] callback_timeout_seconds`** (default 30) is the drain's own budget. Note the section: it is
+   **`[litellm]`**, not `[config]` - `cli.py` reads
+   `get_settings().litellm.get("callback_timeout_seconds", 30)`, and a key placed under `[config]` is
+   silently ignored, so an operator who "sets" the wrong one keeps hanging with no feedback. Lowering it
+   has **not** been confirmed to stop the hang; treat it as a lever to test, not a known fix. The model
+   *request* is bounded separately by `config.ai_timeout` (default 120s), which does not cover this wait.
 
-**If it becomes routine**, the shutdown wait has its own budget:
-`[litellm] callback_timeout_seconds` (default 30) in `~/.config/preflight/preflight.toml`. Note the
-section: it is **`[litellm]`**, not `[config]` - `cli.py` reads
-`get_settings().litellm.get("callback_timeout_seconds", 30)`, and a key placed under `[config]` is
-silently ignored, so an operator who "sets" the wrong one keeps hanging with no feedback. The model
-*request* is bounded separately by `config.ai_timeout` (default 120s), which does not cover this wait.
+## `preflight review` is slow, and the output looks tiny for it
 
-Lowering `callback_timeout_seconds` has **not** been confirmed to stop the hang - one attempt was
-inconclusive because it used the wrong section, and no verified bound has been measured. Treat it as a
-lever to test, not a known fix.
+Check the run-details footer in `.preflight/review.md`:
+
+```
+- Tokens: 23,400 in / 8,137 out / 31,537 total
+- Time cost: 34.6s
+```
+
+That "out" count is the number to watch, and it is usually far larger than the review text. A review of a
+~500-line diff on this machine has reported **23,467 completion tokens in 111s**, of which only about
+2,500 characters reached `review.md`. The rest was **hidden reasoning**: tokens the model spent
+deliberating and then discarded, invisible in `review.json` and on the summary line. That is the extreme
+end rather than the norm - the same diff has also completed in 11s / 2,126 tokens - which is exactly why
+the count is worth watching: a slow review looks like a slow provider when it may be an unset reasoning
+budget, and the same content can take ten times longer from one run to the next.
+
+`[config] reasoning_effort` is the lever, and there is a trap in it:
+
+- pr-agent forwards `reasoning_effort` **only** to a model litellm's bundled metadata calls
+  reasoning-capable. `cline-pass/*` is not in that table - the same gap that forces
+  `custom_model_max_tokens` - so the value is read, logged as the config default, and then **silently
+  dropped**. Confirmed by probing the constructed request: `reasoning_effort=None` with the default
+  config, `reasoning_effort='low'` once `[config] additional_reasoning_effort_models` names the model id.
+- `files/preflight.toml` therefore sets both keys. If you change the model id, update
+  `additional_reasoning_effort_models` too, or the lever goes inert again with no error.
+
+Measured with the two settings **interleaved** on one 525-line diff (base, low, base, low, ...), so
+endpoint load is shared rather than attributed to whichever arm ran first:
+
+| Setting | Forwarded? | Elapsed | Completion tokens | Findings |
+|---|---|---|---|---|
+| `medium` (upstream default) | no | 11.0 / 23.7 / 21.2s | 2,126 / 5,593 / 4,434 | 2 / 20 / 2 |
+| `low` | yes | 8.7 / 10.6 / 8.4s | 1,587 / 2,037 / 1,444 | 2 / 3 / 2 |
+
+Mean elapsed ~18.6s vs ~9.2s; mean completion ~4,051 vs ~1,689 tokens. The `low` arm is tighter as well as
+smaller - the unforwarded default swung by a factor of 2.6 between runs of the same diff, and one of those
+runs returned 20 findings, which reads as much like padding as thoroughness.
+
+Two honest caveats, because the measurement is the kind that is easy to overclaim:
+
+- **Interleaving matters.** A first, sequential pass put the default at 22-38s and `low` at 14s, and a
+  later run of the *default* on the same diff took 11s - so some of the initial gap was endpoint load, not
+  the setting. The table above is the controlled version and is the one to quote.
+- **The prompt is what decides finding quality, not this knob.** If you change `reasoning_effort`, measure
+  it against `new=N/M`: a cheaper round that reports fewer findings just moves the cost into a second
+  round, which is the failure this whole loop exists to avoid.
+
+**Related, and also invisible by default:** pr-agent pins `config.temperature` (upstream default `0.2`)
+and its `seed` (default `-1`, which means unset). Neither is set by this bundle, so each review samples
+freely and a re-review of unchanged content can legitimately word a finding differently. That matters
+for the stop signal: `new=N/M` counts a reworded repeat as new. `[config] seed` accepts a positive integer
+that also pins `temperature` to 0; the endpoint accepts both. It is left unset deliberately - pinning can
+reduce finding coverage, and the loop's judgement step is what handles a reworded repeat - but it is the
+lever to reach for if `new=` never settles.

@@ -67,11 +67,18 @@ eval "$assignments"
 # A head-scope review covers already-committed content, which cannot be graded before the *next*
 # commit exists. Say so plainly rather than pretending to enforce it. Checked before the tree,
 # because a head-scope sidecar deliberately records no reviewed tree.
-if [ "${pf_scope:-}" != "worktree" ]; then
-  printf 'preflight: not enforced: the last review used scope=%s (hook enforcement needs worktree scope).\n' "${pf_scope:-unknown}" >&2
-  printf "preflight: run 'preflight review' with the default scope to enforce commits.\n" >&2
-  exit 0
-fi
+# Both `commit` and `worktree` reviews record a reviewed_tree, so both can be enforced. `commit` is the
+# default: it reviews exactly what a commit would contain (HEAD -> working tree). `head` records no tree -
+# it reviews already-committed content, which cannot be graded before the *next* commit exists - so it is
+# reported rather than enforced.
+case "${pf_scope:-}" in
+  commit|worktree) ;;
+  *)
+    printf 'preflight: not enforced: the last review used scope=%s (hook enforcement needs commit or worktree scope).\n' "${pf_scope:-unknown}" >&2
+    printf "preflight: run 'preflight review' with the default scope to enforce commits.\n" >&2
+    exit 0
+    ;;
+esac
 
 [ -n "${pf_tree:-}" ] || fail "the review sidecar does not name a reviewed tree"
 

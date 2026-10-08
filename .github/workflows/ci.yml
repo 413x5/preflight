@@ -276,8 +276,13 @@ jobs:
           def summary(body):
               md = os.path.join(d, "review.md")
               open(md, "w", encoding="utf-8").write(body)
+              # The marker only fires for the branch scopes: a pending-commit diff is far below the token
+              # budget, so pr-agent never prunes it. This step exercises the marker's matching, so it runs
+              # in the scope where the marker can appear at all.
+              env = dict(os.environ)
+              env["PREFLIGHT_SCOPE_IS_BRANCH"] = "1"
               return subprocess.run([sys.executable, script, json_path, md],
-                                    capture_output=True, text=True).stdout
+                                    capture_output=True, text=True, env=env).stdout
 
           # pr-agent emits: "\n\n<hr>\n\n" + the header + the sentence + "\n" + bullet lines.
           footer = ("\n\n<hr>\n\n\u26a0\ufe0f **Review coverage:** The following files were not "

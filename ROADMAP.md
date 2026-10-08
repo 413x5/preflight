@@ -178,10 +178,9 @@ Wanted; needs a little design.
 
       1. **Trim the helper commentary.** This change added a lot of it; the block that handles the review job
          and both waits is roughly half comments. Cut to what is load-bearing and re-measure.
-      2. **Re-run the live `e2e`** (`./tests/run.sh e2e`) - the offline suite and selfcheck are green, but the
-         live path has not been exercised since the scope default changed.
-      3. **Review the change with the tool itself and stop at `new=0`.** The change was committed without a
-         review pass, deliberately, so this is the outstanding verification.
+      2. **Review the change with the tool itself and stop at `new=0`.** It was committed and pushed
+         *without* a review pass, at the maintainer's direction, so this is the outstanding verification.
+         PR: <https://github.com/413x5/preflight/pull/5> - CI green on both platforms, live `e2e` green.
 
 - [ ] **Record the convergence evidence in CI.** `REQ-HOOK-31` covers the counting logic, but nothing
       checks that a real review's summary *emits* `new=` (the live case does not assert it). A cheap

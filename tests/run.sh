@@ -1165,6 +1165,31 @@ FAKE
         | (2) an absent effort did not degrade to effort=n/a: $out" ;; esac
   case "$out" in *"tokens=n/a"*) ;; *) problems="$problems
         | (2) an absent usage object did not degrade to tokens=n/a: $out" ;; esac
+  # A malformed CONTAINER is the other half: a `review` or `usage` that is not an object raised on
+  # `.get` and lost the line, before any field was even read. The gate still refuses it (exit 3), so this
+  # is about keeping the counts visible, not about softening the verdict.
+  local badshape="$work/verdict-badshape"
+  mkdir -p "$badshape"
+  cat > "$badshape/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$js" ] && printf '%s\n' '{"review":"text","usage":5}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$badshape/pr-agent"
+  rc=0
+  out="$( cd "$d" && rm -rf .preflight && PATH="$badshape:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
+            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+  case "$out" in *"issues=0"*) ;; *) problems="$problems
+        | (5) a non-object review/usage lost the summary line instead of degrading: $out" ;; esac
+
   # The general shape, so a fifth field added later cannot reintroduce the same leak: no field on the
   # line may print the literal None.
   case "$out" in *"=None"*) problems="$problems

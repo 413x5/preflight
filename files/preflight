@@ -287,7 +287,14 @@ emit_summary() {
     python3 - "$out_json" "$out_md" <<'PY' >&2 2>/dev/null || rc=$?
 import json, os, re, sys
 d = json.load(open(sys.argv[1]))
-r = d.get('review') or {}
+# The review is model output, so guard the SHAPE of the containers too, not only the values inside them:
+# a `review` or `usage` that is not an object (a string, list, int) raised on `.get` and lost the whole
+# line. preflight-gate exits 3 on a malformed review, which is what decides the verdict - so falling back
+# here keeps the counts visible without softening anything the gate enforces.
+def mapping(value):
+    return value if isinstance(value, dict) else {}
+r = mapping(d.get('review'))
+usage = mapping(d.get('usage'))
 # `len()` on a non-list is not just a wrong count: `"no issues"` reports 9, and an int or bool raises,
 # which kills the heredoc and takes `issues=`, `new=` and `coverage=` with it. preflight-gate exits 3 on
 # a non-list for the same reason; the summary cannot exit, so it falls back to an empty list and the line
@@ -316,7 +323,7 @@ sec = as_text(r.get('security_concerns'))
 risk = as_text(r.get('risk_level'))
 rec = as_text(r.get('merge_recommendation'))
 effort = as_text(r.get('estimated_effort_to_review_[1-5]'))
-tokens = as_text((d.get('usage') or {}).get('total_tokens'))
+tokens = as_text(usage.get('total_tokens'))
 line = (f"preflight: issues={len(issues)} security={sec or 'n/a'}"
         f" risk={risk or 'n/a'} merge={rec or 'n/a'}"
         f" effort={effort or 'n/a'} tokens={tokens or 'n/a'}")

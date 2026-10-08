@@ -288,7 +288,12 @@ emit_summary() {
 import json, os, re, sys
 d = json.load(open(sys.argv[1]))
 r = d.get('review') or {}
-issues = r.get('key_issues_to_review') or []
+# `len()` on a non-list is not just a wrong count: `"no issues"` reports 9, and an int or bool raises,
+# which kills the heredoc and takes `issues=`, `new=` and `coverage=` with it. preflight-gate exits 3 on
+# a non-list for the same reason; the summary cannot exit, so it falls back to an empty list and the line
+# still prints. An explicit null keeps its meaning as "no findings".
+_raw_issues = r.get('key_issues_to_review')
+issues = _raw_issues if isinstance(_raw_issues, list) else []
 # Every field on this line is read by an agent, so an absent or wrongly-typed one degrades to n/a rather
 # than printing a bare `None`, raising, or reading as a verdict of its own. A raise is the worst of the
 # three: it kills the heredoc, so `issues=`, `new=` and `coverage=` are lost together. Coercion matches

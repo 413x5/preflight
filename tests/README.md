@@ -120,6 +120,8 @@ reverted in turn and the expected case was confirmed to fail:
 | `tokens` interpolated raw with no fallback, so a payload without `usage` prints `tokens=None` | REQ-HOOK-35 |
 | the executable bit stripped from `files/githooks/pre-commit` (on disk) | REQ-HOOK-36 |
 | the `commit` scope made to diff `HEAD` instead of the snapshot tree, so untracked files leave the reviewed diff | REQ-HOOK-37 |
+| `security_concerns` coerced with a raw `.strip()` again, so a boolean payload kills the summary line | REQ-HOOK-35 |
+| `key_issues_to_review` left un-coerced, so a non-list reports a wrong count or loses the line | REQ-HOOK-35 |
 
 This table is per-fix: it records which case guards which repair. It is **not** the same property as the
 selfcheck below, which asks about the whole hook at once.

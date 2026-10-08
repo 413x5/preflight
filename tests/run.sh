@@ -1051,8 +1051,9 @@ FAKE
     return
   }
 
-  # An empty PREFLIGHT_HOME keeps ensure-link.sh and the gate resolution out of the run: this case is
-  # about the summary line, and the gate's verdict is written to the sidecar afterwards regardless.
+  # A config dir with no ensure-link.sh or preflight.toml: this case is about the summary line, and the
+  # gate is still resolved from the helper's own directory and run afterwards, writing the sidecar
+  # regardless of its verdict.
   run_once() {
     ( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$work/wiring-cfg" \
         bash "$repo_root/files/preflight" review ) 2>&1
@@ -1157,9 +1158,9 @@ FAKE
   case "$out" in *"merge=n/a"*) ;; *) problems="$problems
         | (2) an absent merge_recommendation did not degrade to merge=n/a: $out" ;; esac
   # effort and tokens are the third and fourth fields on the line, and each was missed in turn: effort
-  # printed a literal `effort=None`, and once that was fixed `tokens` did the same, because the sparse
-  # fixture below still carried a `usage` object. Assert BOTH, against a payload with neither the effort
-  # value nor a `usage` object at all - that is the shape that exposed each leak in turn.
+  # printed a literal `effort=None`, and once that was fixed `tokens` did the same against a payload with
+  # no `usage` object. Assert BOTH against the sparse payload below, which carries neither the effort
+  # value nor a `usage` object.
   case "$out" in *"effort=n/a"*) ;; *) problems="$problems
         | (2) an absent effort did not degrade to effort=n/a: $out" ;; esac
   case "$out" in *"tokens=n/a"*) ;; *) problems="$problems
@@ -1197,6 +1198,32 @@ FAKE
         | (3) a boolean security_concerns destroyed the summary line instead of degrading: $out" ;; esac
   case "$out" in *"security=yes"*) ;; *) problems="$problems
         | (3) a boolean security_concerns was not coerced to yes/no: $out" ;; esac
+
+  # `key_issues_to_review` is the one field whose TYPE feeds `len()`, so a wrong type does not just print
+  # wrong - `"no issues"` reported `issues=9`, and an int or bool raised and lost the whole line. The gate
+  # exits 3 on a non-list; the summary cannot exit, so it must fall back and still print.
+  local badlist="$work/verdict-badlist"
+  mkdir -p "$badlist"
+  cat > "$badlist/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":"no issues","security_concerns":"No"}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$badlist/pr-agent"
+  rc=0
+  out="$( cd "$d" && rm -rf .preflight && PATH="$badlist:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
+            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+  case "$out" in *"issues=0"*) ;; *) problems="$problems
+        | (4) a non-list key_issues_to_review did not degrade to issues=0
+        |     (a string reports its character count, and an int or bool loses the line): $out" ;; esac
 
   if [ -z "$problems" ]; then ok "the summary line reports the fields the gate fails on" "REQ-HOOK-35"
   else bad "the summary line reports the fields the gate fails on" "REQ-HOOK-35" \

@@ -208,6 +208,17 @@ A review is token-heavy (roughly 15-23k tokens). Do not run one in a loop.
 Note when testing the *gate*: `PREFLIGHT_GATE_ALLOW_ISSUES=1` relaxes key issues only.
 `security_concerns` and `merge_recommendation=changes_required` still fail, regardless of the opt-out.
 
+## Before you start: check ROADMAP.md for handoff state
+
+`ROADMAP.md` is the working document, and its **Now** and **Next** sections carry anything a previous
+session left unfinished - including work that is *implemented but uncommitted* in the working tree, which
+is invisible from `git log`. Read the top of `Next` first; one item there is written as an explicit
+handoff because it is mid-implementation and the next session needs to know exactly what is done, what is
+not, and which constraints will bite.
+
+Do not assume a clean tree means a clean slate, and do not assume the last commit describes the current
+state. `git status` is the first thing to check in this repo.
+
 ## Working on docs
 
 The docs are part of the product, and they drift. Before claiming something works, run it - several
@@ -216,6 +227,41 @@ that could not work, and a reference to a file that never existed). If you chang
 place that describes it: `README.md`, `AGENTS-review-snippet.md`, `ROADMAP.md`, `CHANGELOG.md`,
 `docs/DESIGN.md`, `docs/TROUBLESHOOTING.md`, `tests/README.md`, `CONTRIBUTING.md`. Case counts, the
 requirement table, and the containment table go stale fastest.
+
+## Keep each round's change small, or the loop will not converge
+
+This repo's own loop is the thing being built, so it is worth knowing how it fails to end. There are three
+ways, and the first two are already handled: what the model reports, what it was shown, and - this one -
+**how much you change between rounds.**
+
+A round reports one defect. Fix the code: usually a few lines. Then the temptation is to also rewrite the
+comments around it, add a docs paragraph, add a changelog bullet, and add a row to the mutation table
+asserting the new test covers the fix. That is a much larger diff than the fix, and the next round reviews
+*all of it* - including the claims, which are the part most likely to be wrong, because prose written to
+describe a fix is not verified the way the fix is. Correcting the prose adds more prose. That is a loop with
+no stopping condition, and it has happened here: one change measured **~56 lines of executable logic and
+~271 lines of comment about it**, across five rounds whose later findings were almost entirely about the
+writing.
+
+So:
+
+- **Change the code the finding requires, and little else.** Do not rewrite comments, docs or the changelog
+  unless the finding is *about* those files.
+- **Do not add a sentence saying you fixed something.** The diff is the record. A comment narrating a fix
+  duplicates the diff and can only be checked against it, which spends a round to learn nothing.
+- **Do not write a claim you have not verified.** "This is guarded by REQ-HOOK-nn" and "every mutation is
+  listed" are factual assertions that a reviewer will check. If you did not run the mutation, the claim is
+  usually wrong in the direction of overclaiming - and a wrong claim about coverage is the same failure this
+  repo guards against everywhere else, just applied to its own documentation.
+- **Delete a claim rather than qualify it.** When a review says a comment overstates, the fix is normally to
+  remove the sentence, not to add a caveat. The caveats are the surface the next round works on.
+- **`new=0` means judge, and usually means change nothing.** Two rounds at `new=0` is the hand-off point.
+- **The mutation-table rule is not a formality.** Every row in `tests/README.md` must have been *run*: apply
+  the mutation, watch the case fail, revert, watch it pass. A row claiming coverage that no case provides is
+  worse than no row, because it retires the requirement without testing it.
+
+Test before submitting: would a reviewer find more *claims* to check in this diff than *code*? If yes, cut
+until it does not.
 
 ## Commits
 

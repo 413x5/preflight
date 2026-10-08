@@ -142,7 +142,7 @@ git config core.hooksPath .githooks              # RELATIVE - required for workt
   submodule gitlink counts as a reviewed entry like any other, so removing one is blocked as well.
 - Renaming a reviewed file (`git mv`) or swapping one for a symlink is blocked as well.
 - The first commit in a repo with no history is allowed but not enforced; `preflight review` needs `HEAD`.
-- `PREFLIGHT_SCOPE=head` reviews cannot be enforced; use the default worktree scope.
+- `PREFLIGHT_SCOPE=head` reviews cannot be enforced; the default `commit` scope can.
 - `post-commit` is advisory and cannot block: it warns when the last review used `head` scope (so no commit
   was actually verified), and when it cannot read the review sidecar at all - a missing `python3`, or a
   malformed/`scope`-less sidecar. Silence is reserved for "verified" and "no review has run yet".

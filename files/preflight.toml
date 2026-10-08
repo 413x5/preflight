@@ -22,6 +22,38 @@ fallback_models = ["openai/cline-pass/glm-5.3-flash"]
 custom_model_max_tokens = 1000000   # declares DeepSeek V4.1 Flash's 1M window (unknown to LiteLLM/MAX_TOKENS)
 max_model_tokens = 1000000          # raise the packing clamp (default 32000) so it isn't cut to 32k; 0 disables the clamp
 output_run_details = true           # show which model actually served the run
+
+# How much hidden reasoning the model does before it answers. This is the largest single lever on how
+# long a review takes, and it is invisible unless you look for it: on this endpoint a review of a
+# ~500-line diff reported 23,467 completion tokens in 111s, of which only ~2,500 characters reached
+# review.md. The rest was reasoning the model discarded. Nothing in review.json or the summary line
+# separates the two, so a slow review reads as a slow provider rather than as a reasoning budget.
+#
+# `low` rather than the upstream default `medium`, measured with the two settings INTERLEAVED on one
+# 525-line diff (base, low, base, low, ...) so endpoint load is shared rather than credited to whichever
+# arm happened to run first:
+#
+#   reasoning_effort  forwarded?   elapsed             completion tokens     findings
+#   medium (default)  no           11.0/23.7/21.2s     2,126/5,593/4,434     2/20/2
+#   low               yes          8.7/10.6/8.4s       1,587/2,037/1,444     2/3/2
+#
+# Mean ~18.6s vs ~9.2s elapsed, and ~4,051 vs ~1,689 completion tokens. The smaller arm is also the
+# tighter one: the default swung by a factor of 2.6 on the same diff, and one of its runs returned 20
+# findings - which reads as much like padding as thoroughness.
+#
+# The first, sequential attempt to measure this put the default at 22-38s against `low` at 14s; a later
+# run of the default on the same diff took 11s. Interleaving is what separates the setting from the
+# endpoint, so quote the table above, not that one. And the honest reading either way is "do not assume
+# reasoning helps": measure your own change against `new=N/M`, since a cheaper round that reports fewer
+# findings just moves the cost into a second round.
+reasoning_effort = "low"
+# pr-agent forwards reasoning_effort only to a model litellm's bundled metadata calls reasoning-capable,
+# and `cline-pass/*` is not in that table - the same gap that forces custom_model_max_tokens above. The
+# key is read, logged, and then silently dropped, so the default looked applied while every run used the
+# provider's own default. This is the documented escape hatch for exactly that case, and it is what makes
+# `reasoning_effort` above take effect rather than merely look set. Point it at your own model id when
+# you change the endpoint, or the lever goes inert again.
+additional_reasoning_effort_models = ["openai/cline-pass/deepseek-v4.1-flash"]
 # git_provider intentionally left unset -> defaults to 'github' (keeps GitHub Actions drop-in ready)
 
 [litellm]

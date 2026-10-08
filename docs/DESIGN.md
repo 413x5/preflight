@@ -20,7 +20,20 @@ PR-Agent's plain-diff mode only sees what you hand it as a diff. To review *unco
 5. that commit is diffed against the base branch.
 
 The real index, `HEAD`, and history are never touched - the scratch index is deleted on exit.
-`PREFLIGHT_SCOPE=head` skips all of this and diffs `base...HEAD` instead.
+
+`PREFLIGHT_SCOPE` chooses what step 5 diffs against:
+
+| Scope | Diffs | Needs a base? |
+|---|---|---|
+| `commit` (**default**) | `HEAD` -> the snapshot, i.e. exactly what a commit would contain | no |
+| `worktree` | the default branch -> the snapshot (the whole branch, plus uncommitted work) | yes |
+| `head` | `base...HEAD`, committed content only | yes |
+
+`commit` is the default because it is the case the tool exists for: reviewing a change before it is
+submitted. It does no fetch and resolves no base, so it works offline and cannot fail the way base
+resolution can. Reviewing commit by commit also *covers* a multi-commit branch completely - the hook
+checks each commit against the tree that was reviewed for it, so the union of the per-commit reviews
+covers the branch, and content cannot reach it unreviewed.
 
 `preflight` also fetches `origin` first, so it never diffs a stale base. The base is the first of these
 that resolves to a commit: `PREFLIGHT_BASE` (the explicit override), `origin/HEAD`, the remote's own
@@ -217,6 +230,32 @@ A commit can only be verified once it exists, so enforcement is inherently about
   dir is a working-directory path, so it is already per worktree, and each worktree is reviewed and
   committed independently.
 
+## Where a review's time goes (the reasoning budget)
+
+A review is one model call, and on this endpoint most of that call is **hidden reasoning** - tokens the
+model spends deliberating and then discards. It is invisible in the artifacts: `review.json` carries
+`usage` totals and `review.md` carries the same numbers in its run-details footer, but neither splits
+reasoning from the text that actually became the review. A measured example, a ~500-line diff on this
+repo: **23,467 completion tokens in 111s**, of which roughly 2,500 characters reached `review.md` - and
+the same diff has also completed in 11s / 2,126 tokens, so the spread matters as much as the peak.
+
+That invisibility is the problem, not the cost. A slow review looks like a slow provider, so the budget
+that dominates the wall clock is the one nobody sets. `files/preflight.toml` therefore sets
+`[config] reasoning_effort`, and the measurement behind the value is in the file itself.
+
+The trap worth knowing about, because it is the same shape as the token-budget one: pr-agent forwards
+`reasoning_effort` **only** to a model litellm's bundled metadata calls reasoning-capable.
+`cline-pass/*` is not in that table, so the key is read, logged as the config default, and then silently
+never sent - the setting looks applied while every run uses the provider's own default. The documented
+escape hatch is `[config] additional_reasoning_effort_models`, which names the id explicitly. Both keys
+are required for the lever to do anything, and `REQ-HOOK-29` asserts each sits in the section pr-agent
+reads it from, because a wrong path fails with no feedback at all.
+
+There is deliberately **no sampling pin**. `config.temperature` (upstream default 0.2) and `config.seed`
+(default -1, i.e. unset) are left alone, so reviews sample freely; see the convergence section for why
+that is a stated limit of `new=N/M` rather than an oversight. `seed` is the lever to reach for if the
+count ever needs to settle, at the cost of whatever coverage pinning removes.
+
 ## The gate
 
 `preflight-gate` is a small, dependency-free check over `review.json`:
@@ -322,9 +361,16 @@ preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (unchanged since t
 
 `new=N/M` means N of the M findings were not in the previous review. Identity is the tuple pr-agent
 itself uses to dedupe - `(relevant_file, issue_header, issue_content)`, whitespace- and case-normalised -
-so a different issue in the same file is still new while the same sentence is not. `files/preflight.toml`
-pins `temperature` and the prompt is fixed, so a re-review of unchanged content tends to reproduce the
-same text rather than a paraphrase.
+so a different issue in the same file is still new while the same sentence is not.
+
+There is **no sampling pin**, and earlier revisions of this file claimed one. `files/preflight.toml` does
+not set `config.temperature` or `config.seed`, so each review samples freely: an earlier draft said the
+config "pins `temperature`", which was simply false of the file it described. The prompt is fixed, which
+is what makes a re-review tend to reproduce its wording, but a paraphrase is a normal outcome rather than
+a bug - and it is why a reworded repeat can still read as new. `[config] seed` (a positive integer, which
+also pins temperature to 0) is the lever if that instability ever needs removing; it is left unset
+deliberately, because pinning can cost finding coverage, and shrinking what the loop finds is the worse
+failure when the judgement step already exists to handle a repeat.
 
 `new=0` is the stopping signal: **judge, do not re-fix**. Each finding is one of three things, and only
 the first is work:
@@ -350,6 +396,34 @@ invented.
 A related hazard, and the reason the loop must not be driven blindly: `preflight review` has been observed
 completing a review and writing both artifacts, then **never exiting** because pr-agent's post-run
 callback drain blocked on a stalled socket. The artifacts are complete and correct - only the exit hangs -
-so a scripted loop that waits for the process would stall forever. If a review appears to hang, check
-whether `.preflight/review.json` was already written; if it was, the review is usable and the process can
-be stopped. See `docs/TROUBLESHOOTING.md`.
+so a scripted loop that waits for the process would stall forever.
+
+`preflight` handles that itself rather than leaving it to the reader. The review runs as a background job,
+and the counts are read from `review.json` as soon as it exists - *before* waiting for pr-agent - so a hang
+cannot hide `issues=`/`new=`/`coverage=`, which is the signal the loop stops on. The wait is then split:
+`PREFLIGHT_SHUTDOWN_WAIT` (default 120s) bounds only the tail *after* the artifact was written, and when
+it expires the helper says so, stops the process, and still succeeds, because the review is complete and
+`preflight-gate` is what decides the verdict.
+
+Three boundaries are deliberate and each replaces a specific wrong answer:
+
+- **Both phases are bounded, and neither bound is short.** Phase 1 (`PREFLIGHT_REVIEW_WAIT`, default
+  3600s) covers the review itself; phase 2 (`PREFLIGHT_SHUTDOWN_WAIT`, default 120s) covers only the tail
+  after the artifacts exist. Phase 1 exists because a pr-agent that hangs *before* writing anything would
+  otherwise block forever - the same hang, one phase earlier. Its default is deliberately an hour: it is a
+  backstop against a hang, not a performance target, and a timeout that cut off a slow but valid review
+  would be the silent-truncation failure this project avoids everywhere else.
+- **A stopped hang is not a failed review - but only if it produced one.** When this code stops a process
+  that had already written both artifacts, the killed status (143/137) is normalised to success and the
+  sidecar is still recorded, because `preflight-gate` grades the artifact and propagating the status would
+  turn a cosmetic exit problem into a blocked commit. A run stopped *without* an artifact keeps its
+  non-zero status, so a caller's loop cannot read a missing review as a pass. Any status other than this
+  code's own TERM/KILL is propagated unchanged, so a genuine pr-agent failure is not swallowed either.
+
+The behaviour is guarded offline by `REQ-HOOK-32`, which drives fake `pr-agent` scripts - the review
+cannot be reproduced in CI (no key, no network), and "the artifact is fine, the process is not" is
+precisely the shape being guarded. It runs the helper under its own watchdog, because a regression here
+hangs rather than fails and a test that stalls the suite reports nothing.
+
+See `docs/TROUBLESHOOTING.md` for the measured symptoms, what is and is not known about the cause, and the
+reasoning-budget lever that correlates with it.

@@ -6,6 +6,8 @@ Work that is agreed but not yet done, plus ideas worth keeping. Nothing here is 
 
 Small, ready to do.
 
+- [ ] **Finish the `commit` scope.** See the handoff under **Next** - it is the one item with an unfinished
+      implementation already in the working tree, so start there.
 - [ ] **Pin the PR-Agent version** in `install.sh` (`pr-agent==0.47.0`) for reproducible installs.
 - [ ] **Mirror the snippet** into `.github/copilot-instructions.md` and/or `.clinerules` so agents
       that do not read `AGENTS.md` still follow the loop.
@@ -71,40 +73,116 @@ Small, ready to do.
 
 Wanted; needs a little design.
 
-- [ ] **Diagnose and bound the post-run hang (highest-value work; the next PR).** Confirmed again on the
-      final review of this branch: the watchdog saw the process still alive 480s after the model call had
-      finished, with no summary line printed. Treat this as the known entry condition, not a new symptom.
+- [x] **Make the post-run hang survivable, and stop it hiding the counts.** `preflight review` writes
+      both artifacts and then sometimes never exits (4-13 minutes, in two shapes - sleeping in `kevent`,
+      spinning in the asyncio loop), because pr-agent's post-run callback drain blocks after the review is
+      finished. The helper now reads the summary from `review.json` *before* waiting, so a hang cannot hide
+      `issues=`/`new=`/`coverage=`, and it stops a process that has not exited `PREFLIGHT_SHUTDOWN_WAIT`
+      seconds (default 120) after writing the artifact - reporting it, succeeding anyway, and still
+      recording the sidecar, so a saved run does not become a blocked commit. The review's own wait is
+      bounded too (an hour by default), because a pr-agent that hangs before writing anything is the same
+      fault one phase earlier; a run stopped without an artifact keeps its non-zero status. Guarded by
+      `REQ-HOOK-32` (fake `pr-agent` scripts, under a watchdog).
 
-      `preflight review` completes, writes `review.md` + `review.json`, and then sometimes never exits -
-      measured at 4-13 minutes, in two shapes (sleeping in `kevent`, or spinning at 100% CPU in the
-      asyncio loop). Full symptom notes are in `docs/TROUBLESHOOTING.md` ("prints nothing more and never
-      exits"), which also records what is **not** yet known. What a future session needs:
+      **Still open, and deliberately not papered over:** the hang itself is not fixed, only made
+      survivable, and its cause is still not isolated. Two contributors remain candidates - the forced
+      streaming endpoint, and completion volume. Several routine reviews during this work did *not* hang at
+      all, so it is intermittent. The experiments a future session should run, in order of cost:
+      1. **`[litellm] callback_timeout_seconds`** (the drain's own budget). The earlier attempt used
+         `[config]`, which pr-agent ignores, so it proved nothing. Set it under `[litellm]` and see whether
+         the process exits promptly. If it does not, the block is inside the stream/transport and no config
+         key will fix it.
+      2. **Reasoning volume.** The strongest correlation found so far is completion volume, and
+         `reasoning_effort` is the largest lever on it (see the item below) - so confirm whether the hang
+         still reproduces at the much lower output this now produces.
+      3. **Streaming.** Point at a non-streaming endpoint and re-test, to separate the SSE connection from
+         the callback drain.
+- [x] **Make the model call cheaper and faster - the reasoning budget was unset and invisible.** A review
+      of a ~500-line diff reported ~23,500 completion tokens in 111s, of which only ~2,500 characters
+      reached `review.md`; the rest was hidden reasoning, so a slow review read as a slow provider rather
+      than as an unset budget. `[config] reasoning_effort` now takes effect - which needed `[config]
+      additional_reasoning_effort_models` as well, because pr-agent forwards the setting only to a model
+      litellm's metadata calls reasoning-capable and `cline-pass/*` is not in that table (`REQ-HOOK-29` and
+      CI assert both keys). Measured with the arms INTERLEAVED on one diff (mean **~18.6s / ~4,051
+      completion tokens** unforwarded, versus **~9.2s / ~1,689** with `low` forwarded). A first sequential
+      pass overstated the gap as 22-38s vs 14s; a later default run took 11s, so interleaving is what
+      separates the setting from endpoint load. The lesson is recorded in `docs/TROUBLESHOOTING.md`.
 
-      - The hang is in pr-agent's shutdown step (`drain_litellm_callbacks`), *after* the artifacts are
-        complete - so it never corrupts a review, and stopping the process is always safe.
-      - **Not isolated:** two plausible contributors on this machine - the forced streaming endpoint
-        (`config.litellm.force_streaming_api_base_substrings = ["api.cline.bot"]`, a long-lived SSE
-        connection is exactly what blocks `kevent`) and the increased output volume from
-        `extra_instructions`. Test them separately: point at a non-streaming endpoint, or temporarily
-        empty `extra_instructions`, and see whether the hang disappears.
-      - **Not yet tested correctly:** `[litellm] callback_timeout_seconds` is the drain's own budget and
-        `cli.py` reads it from `[litellm]`, *not* `[config]`. One attempt placed it under the wrong
-        section, so it proved nothing. The correct experiment is a run with it set under `[litellm]`;
-        if the process still hangs, the block is inside the stream/transport and no config key will fix
-        it.
-      - **The summary line is printed after pr-agent exits**, so a hang also hides `issues=`/`new=`. If
-        this is not fixed, `preflight` could emit the counts *before* the drain (it already has
-        `review.json`) so a hung run still reports what it found. That is a smaller, independent fix and
-        worth doing regardless.
-      - Do **not** bound the whole command with a short timeout; a timeout that cuts off a slow but valid
-        review is the silent-truncation failure this project avoids. Bound the shutdown phase only.
-- [ ] **Make the model call cheaper and faster.** A single review on this branch costs ~27k prompt tokens
-      and 53-61k completion tokens, and 260-480s of model time - the largest part of a loop iteration.
-      Candidates: trim what the prompt includes (the diff is ~2k lines and every file is sent),
-      reconsider whether `extra_instructions` asking for *every* finding is worth its output volume,
-      and check whether `num_max_findings = 20` invites padding. Any change must be measured against the
-      convergence signal (`new=N/M`) rather than assumed, since completeness is the property that makes
-      the loop terminate at all.
+      **Still open:** whether the reduction holds on the real branch diff (that measurement is a synthetic
+      525-line diff, not the ~2k-line branch), and whether `num_max_findings = 20` invites padding now that
+      rounds are cheap. Also unmeasured: `[config] seed`, which would pin sampling and stabilise `new=N/M`
+      at the cost of whatever coverage pinning removes - left unset deliberately, and documented as the
+      lever to reach for if the count never settles.
+- [ ] **Finish the `commit` scope: make pending-commit review the default (HANDOFF - read this first).**
+      The goal, stated by the maintainer: *"we want a way to review a commit before it is submitted, to
+      catch bugs early on and for a dev/agent to fix before committing."* The current default does not do
+      that - `preflight review` reviews **the whole branch since the default branch**, which is the wrong
+      product for the stated goal and the reason a routine review costs ~25k prompt tokens and minutes of
+      wall clock.
+
+      **State of the working tree (read before touching anything).**
+
+      **Nothing here is committed.** `git log -1` is still the merge of PR #4, and all of the work described
+      below is sitting uncommitted in the working tree of the session that wrote it (12 files, ~722
+      insertions). A new session should decide first whether to land that work as one or two commits before
+      adding to it - the two logical changes are *"the reasoning budget + bounded shutdown"* (complete,
+      tested) and *"the `commit` scope"* (partly done, see below).
+
+      Whatever is landed, the commit must be **GPG-signed** and carry no `Co-authored-by` trailer.
+
+      **The change, and why it is small.**
+
+      `files/preflight` already builds a scratch index (`read-tree HEAD` + `add -A` + `write-tree`) for the
+      `worktree` scope, then diffs `${base}...${synth}`. The new default reuses that exact tree and changes
+      only the diff line:
+
+      ```sh
+      diff_ref='HEAD'        # was: diff_ref="${base}...${synth}"
+      ```
+
+      Verified: `git diff HEAD <tree>` is identical to `git diff --cached`. No base, no remote, no
+      `commit-tree`. `hook_tree="$tree"` is set identically in both branches, so the hook's containment
+      check is **unaffected** - it compares every path being committed against `reviewed_tree`, and a
+      `commit`-scope review records precisely that tree.
+
+      **Why per-commit review is *complete*, not merely cheaper.**
+
+      This is the design argument, and it is why the scope change does not weaken coverage. A PR is usually
+      one commit at the end; when it is several, each is reviewed as it is made. Containment makes that an
+      induction rather than a hope: the hook binds **content, not time** (it deliberately does *not* check
+      that the recorded `HEAD` equals `HEAD`, because that "would forbid splitting one reviewed change
+      across commits"), and it compares `reviewed_tree -> staged_tree`, so it constrains only the commit
+      being made. Therefore every commit was reviewed against the tree it committed, and the union covers
+      the branch. A branch review, by contrast, is a *sample* of the final state - subject to token-budget
+      pruning, and it enforces nothing.
+
+      **DONE and committed.** The `commit` scope is the default; the branch scopes and the containment rule are
+      unchanged.
+
+      - `scope="${PREFLIGHT_SCOPE:-commit}"`, with `commit|worktree|head` validated and an unknown value
+        rejected with exit 2.
+      - `resolve_base()` and the fetch run **only** for `worktree`/`head`; `commit` sets `base='HEAD'` and
+        does no network round trip.
+      - `coverage=PARTIAL` is gated to the branch scopes (a pending-commit diff is never pruned, so there is
+        nothing to announce).
+      - `files/preflight-hook` accepts `commit` **and** `worktree` (it previously required `worktree`, so
+        without this the hook would have refused to enforce the new default); `head` is still unenforced.
+      - the helper header, `--help`, `README.md`, `docs/DESIGN.md`, `docs/TROUBLESHOOTING.md` and
+        `AGENTS-review-snippet.md` all describe the three scopes and the per-commit coverage argument.
+      - `REQ-HOOK-33` guards it: the default is `commit`, `worktree` still resolves a base and keeps the
+        branch diff, and an unknown scope exits 2. All three were confirmed by mutation (the case fails with
+        each applied), and the mutations are listed in `tests/README.md`.
+      - `./tests/run.sh hook` (31 cases) and `selfcheck` are green.
+
+      **Still open here (not done):**
+
+      1. **Trim the helper commentary.** This change added a lot of it; the block that handles the review job
+         and both waits is roughly half comments. Cut to what is load-bearing and re-measure.
+      2. **Re-run the live `e2e`** (`./tests/run.sh e2e`) - the offline suite and selfcheck are green, but the
+         live path has not been exercised since the scope default changed.
+      3. **Review the change with the tool itself and stop at `new=0`.** The change was committed without a
+         review pass, deliberately, so this is the outstanding verification.
+
 - [ ] **Record the convergence evidence in CI.** `REQ-HOOK-31` covers the counting logic, but nothing
       checks that a real review's summary *emits* `new=` (the live case does not assert it). A cheap
       addition to `case_e2e_real_review`.

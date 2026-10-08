@@ -128,10 +128,20 @@ Instructions are easy to forget. A committed pre-commit hook makes the repo **re
 was never reviewed:
 
 ```sh
-cp ~/.config/preflight/githooks/* .githooks/     # shipped by install.sh
-git add .githooks && git commit -m "chore: enforce preflight before commits"
+mkdir -p .githooks
+install -m 0755 ~/.config/preflight/githooks/* .githooks/   # -m: git IGNORES a non-executable hook
+git add .githooks
+git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit   # see the note below
+git commit -m "chore: enforce preflight before commits"
 git config core.hooksPath .githooks              # RELATIVE - required for worktrees
 ```
+
+`install -m` sets the mode on disk, and `git update-index --chmod=+x` sets it **in the index**, which is
+what a fresh clone checks out. The second step matters on a filesystem or a git configured with
+`core.fileMode=false` (some mounted and network filesystems), where `git add` records `100644` however the
+file was installed. Git **ignores a hook that is not executable** - it prints a hint and commits anyway -
+so a repo whose hooks lost that bit enforces nothing while looking fully installed. Confirm with
+`git ls-files -s .githooks/` (both lines must read `100755`).
 
 - It **verifies** that the content being committed is exactly what `preflight review` reviewed; an edit
   after the review, or a newly staged unreviewed file, blocks the commit and names the paths.

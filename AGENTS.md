@@ -195,7 +195,9 @@ R="$(mktemp -d)"; cd "$R"; git init -q -b main .
 printf 'def add(a, b):\n    return a + b\n' > util.py
 git add -A
 git -c commit.gpgsign=false commit -q --no-verify -m init
-mkdir -p .githooks && cp ~/.config/preflight/githooks/* .githooks/
+mkdir -p .githooks && install -m 0755 ~/.config/preflight/githooks/* .githooks/
+git add .githooks
+git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit   # git IGNORES a non-executable hook
 git config core.hooksPath .githooks
 preflight review && preflight-gate          # expect a pass, then the commit is accepted
 ```

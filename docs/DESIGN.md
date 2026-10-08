@@ -356,7 +356,7 @@ compares its findings against the previous run's (saved before the artifacts are
 how many are new:
 
 ```
-preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
+preflight: issues=2 security=No risk=low merge=review carefully effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
 ```
 
 `new=N/M` means N of the M findings were not in the previous review. Identity is the tuple pr-agent

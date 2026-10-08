@@ -145,6 +145,15 @@ it exists to prevent. `git commit --no-verify` bypasses it deliberately.
 
 Check, in order:
 
+- **The hook file is executable.** Git ignores a hook that is not, printing only
+  `hint: The '.githooks/pre-commit' hook was ignored because it's not set as executable` - and then
+  committing anyway. This is the one that looks installed: `git config core.hooksPath` is right, the file
+  is committed, and the commit still goes through. Check the **committed** mode with
+  `git ls-files -s .githooks/` - it must be `100755` - as well as the file on disk, because a fresh clone
+  checks out whatever the index says. Fix both halves: `install -m 0755` for the file, then
+  `git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit` for the index. The second step
+  is what covers a git running with `core.fileMode=false`, where `git add` records `100644` however the
+  file was installed.
 - `git config core.hooksPath` - if it is empty, the repo is still using `.git/hooks` and the committed
   `.githooks/` files are not being run. Set it to the **relative** `.githooks`.
 - The branch actually contains `.githooks/pre-commit`. A branch created before the hooks were committed
@@ -207,7 +216,7 @@ helper says so, stops the process, and lets the run succeed. The review is compl
 not then block on a review that in fact passed. Expected output:
 
 ```
-preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (...)
+preflight: issues=2 security=No risk=low merge=review carefully effort=3 tokens=71791 new=0/2 (...)
 preflight: warning: pr-agent did not exit within 120s after writing .preflight/review.json; stopping it (the review is complete and usable)
 ```
 

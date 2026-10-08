@@ -286,9 +286,25 @@ d = json.load(open(sys.argv[1]))
 r = d.get('review') or {}
 issues = r.get('key_issues_to_review') or []
 sec = (r.get('security_concerns') or '').strip()
+# Every field on this line is read by an agent, so an absent one degrades to n/a rather than printing a
+# bare Python artefact (`None`, or an empty value that reads as a verdict of its own). `merge_recommendation`
+# is also one of the four things preflight-gate fails on (`effort`, `security`, `merge_recommendation`,
+# issues), and it used to appear only in the gate's own output - so `preflight review` could report a
+# review the gate would then refuse, discoverable only by running a second command. `risk_level` is
+# reported for the reader and NOT enforced: the gate reads it only to print it, so a low `risk` alongside
+# real findings (observed: `risk=low` with two key issues) passes the gate regardless. All five fields go
+# through the same helper, including `tokens`: reviewing this very change with the tool found `effort=None`
+# first and `tokens=None` after that, each one the same class of leak, so the guard is applied to every
+# field rather than the reported one.
+def as_text(value):
+    return str(value).strip() if value is not None else ''
+risk = as_text(r.get('risk_level'))
+rec = as_text(r.get('merge_recommendation'))
+effort = as_text(r.get('estimated_effort_to_review_[1-5]'))
+tokens = as_text((d.get('usage') or {}).get('total_tokens'))
 line = (f"preflight: issues={len(issues)} security={sec or 'n/a'}"
-        f" effort={r.get('estimated_effort_to_review_[1-5]')}"
-        f" tokens={(d.get('usage') or {}).get('total_tokens')}")
+        f" risk={risk or 'n/a'} merge={rec or 'n/a'}"
+        f" effort={effort or 'n/a'} tokens={tokens or 'n/a'}")
 # Coverage belongs on the line an agent actually reads: a pruned diff means the model was shown part
 # of the tree, so `issues=1` does NOT mean "one problem in the change" - it means the rest was never
 # looked at. Reported only for the branch scopes; see the gate below.

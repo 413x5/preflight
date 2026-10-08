@@ -130,15 +130,34 @@ answered part is kept for context, and the **Still open** paragraph under each i
       **Still open: it has never been reviewed by the tool itself.** It was committed and pushed without a
       review pass, at the maintainer's direction.
 
-- [ ] **Record the convergence evidence in CI.** `REQ-HOOK-31` covers the counting logic, but nothing
-      checks that a real review's summary *emits* `new=` (the live case does not assert it). A cheap
-      addition to `case_e2e_real_review`.
+- [x] **Surface `risk_level` / `merge_recommendation` in `preflight`'s summary line.** The summary carried
+      only the two counts the gate fails on (issues, security), so `preflight review` could report a change
+      the gate then refused, discoverable only by running a second command. Both fields are now on the line
+      and degrade to `n/a` when absent. `REQ-HOOK-35` asserts both, and that an omitted field does not
+      print an empty or `None` value.
+- [x] **Make the hook recipe mode-safe.** Found by reviewing this repo with the tool: `git` ignores a
+      non-executable hook, and the documented `cp` recipe depended on a mode that a fresh clone does not
+      inherit from the source file. Now `install -m 0755` everywhere, with `REQ-HOOK-36` guarding the
+      shipped files' mode on disk and in the index. See `CHANGELOG.md`.
+- [x] **Assert the convergence signal on a real run.** The roadmap called for adding `new=` to the live
+      `case_e2e_real_review`. That would have cost a *second* keyed model call (a `new=` count needs a
+      previous review, and `reset_case` wipes `.preflight`) and still would not run in CI. Instead
+      `REQ-HOOK-34` drives the real helper twice against a stub `pr-agent` that writes both artifacts - the
+      pattern `REQ-HOOK-32` established. That closes a wiring gap `REQ-HOOK-31` cannot see (it runs the
+      counting block standalone, so `emit_summary` never being called would pass it), costs no tokens, and
+      runs on every PR.
 - [ ] **One review packet.** Optionally run `preflight review` + `preflight improve` together so a
       coding agent gets the findings *and* concrete suggested diffs in a single round (fewer
       iterations). The single-review completeness work (chunking, `extra_instructions`, the coverage
       line) is done; this is the remaining half - not yet a second report per round.
-- [ ] **Surface `risk_level` / `merge_recommendation` in `preflight`'s summary line** (today it prints
-      issues/security/effort/tokens only). The gate already uses both.
+- [ ] **`risk_level` is reported but never enforced - decide what it is for.** The gate reads it only to
+      print it; the verdict comes from effort/security/`merge_recommendation`/issues. Measured over four
+      consecutive reviews of this repo it was `low, low, medium, low` on similar finding counts, while
+      `merge_recommendation` never moved off `merge_with_caution` - so it is unstable and does not track
+      findings (`risk=low` with two key issues was observed). Making it a gate input (e.g. "block only
+      above low risk") would tie enforcement to the flakiest field; the safer shape is an explicit,
+      deterministic policy such as `block_on = security,changes_required,issues`, or the existing
+      `PREFLIGHT_GATE_ALLOW_ISSUES=1` opt-out. Not yet decided.
 - [ ] **`preflight --since <ref>`** for a pseudo-incremental review - plain-diff mode has no true
       incremental, so this would re-review only what changed since the last pass.
 - [ ] **Remember the last reviewed commit** so a second `preflight review` can skip unchanged work.

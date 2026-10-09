@@ -30,10 +30,9 @@ fail() {
 # Fail closed on a missing interpreter rather than silently passing an unverified commit.
 command -v python3 >/dev/null 2>&1 || fail "python3 is required to read the review sidecar"
 
-# A repository with no commits has nothing to protect: the commit being made *is* the initial
-# content, and `preflight review` cannot run at all before a first commit exists (it needs HEAD to
-# diff against). Blocking here would deadlock adoption - the hook could never be installed before
-# the commit that installs it. Allow it and say so.
+# A repository with no commits has nothing to protect, and `preflight review` cannot run before HEAD
+# exists - so blocking here would deadlock adoption: the hook could never be installed before the
+# commit that installs it.
 git rev-parse --verify -q HEAD >/dev/null 2>&1 || {
   printf 'preflight: not enforced: this repository has no commits yet.\n' >&2
   printf "preflight: run 'preflight review' after this first commit to enforce later ones.\n" >&2
@@ -64,13 +63,10 @@ PY
 [ -n "$assignments" ] || fail "could not read $meta"
 eval "$assignments"
 
-# A head-scope review covers already-committed content, which cannot be graded before the *next*
-# commit exists. Say so plainly rather than pretending to enforce it. Checked before the tree,
-# because a head-scope sidecar deliberately records no reviewed tree.
-# Both `commit` and `worktree` reviews record a reviewed_tree, so both can be enforced. `commit` is the
-# default: it reviews exactly what a commit would contain (HEAD -> working tree). `head` records no tree -
-# it reviews already-committed content, which cannot be graded before the *next* commit exists - so it is
-# reported rather than enforced.
+# `commit` (the default) and `worktree` both record a reviewed_tree, so both are enforceable. A
+# `head`-scope sidecar records no tree - it covers already-committed content, which cannot be graded
+# before the *next* commit exists - so it is reported plainly rather than treated as enforced. Checked
+# before the tree for that reason.
 case "${pf_scope:-}" in
   commit|worktree) ;;
   *)
@@ -84,10 +80,9 @@ esac
 
 [ "${pf_verdict:-}" = "pass" ] || fail "the last review did not pass (${pf_verdict:-unknown})"
 
-# The binding is purely CONTENT-based, deliberately. There is no check that the review's recorded
-# head equals HEAD: committing moves HEAD, so such a check would invalidate the sidecar after every
-# commit and would forbid splitting one reviewed change across commits - while adding nothing, since
-# any real content change is already caught by the comparison below.
+# The binding is CONTENT-based, deliberately: no check that the recorded head equals HEAD, because
+# committing moves HEAD - such a check would invalidate the sidecar after every commit and forbid
+# splitting one reviewed change across commits, while adding nothing the comparison below misses.
 staged=$(git write-tree 2>/dev/null) || fail "could not read the staged tree"
 
 # Containment: every path being committed must match the reviewed tree. The comparison is read
@@ -106,12 +101,10 @@ staged=$(git write-tree 2>/dev/null) || fail "could not read the staged tree"
 # The filter therefore has to be ACMRTU rather than AM. AM silently missed R and T - a renamed or
 # type-changed reviewed path passed unreviewed.
 #
-# D needs one refinement. An untracked scratch file is in the reviewed tree (the snapshot includes
-# untracked files) and not in the staged tree, so it also shows up as D - and blocking that would
-# break `git commit -a`, which is exactly what this rule exists to preserve. The difference is
-# whether the path is tracked in HEAD: a D path that HEAD knows is tracked content genuinely being
-# deleted, while a D path that HEAD does not know was never part of the commit's history and is
-# simply not being committed. Only the former is a real change.
+# D needs one refinement: an untracked scratch file is in the reviewed tree (the snapshot includes
+# untracked files) but not the staged one, so it also shows as D - and blocking that would break
+# `git commit -a`. The discriminator is whether HEAD tracks the path: tracked+D is content genuinely
+# being deleted, untracked+D was never part of the commit's history. Only the former is a real change.
 #
 # Every listing here uses `-z`, and the paths are handled as raw bytes. `--name-only` without `-z`
 # QUOTES any path that needs it - enclosing it in double quotes and backslash-escaping it - and

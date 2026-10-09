@@ -108,24 +108,42 @@ jobs:
           # different half of the review->fix->review cascade, and a regression in any one of them
           # shows up as a loop that will not converge rather than as a failing build:
           #   num_max_findings          - how many findings one review may RETURN
-          #   extra_instructions        - tells the model to report them all, not stop at the first
           #   enable_large_pr_chunking  - review the whole diff instead of a pruned slice of it
           #   max_number_of_calls       - the bound on those extra chunking calls
-          # The last assertion is a separate concern (the gate's go/no-go signals), not a completeness
-          # knob, so it is named after what it checks rather than being counted as one of the four.
+          # A separate concern from the three completeness knobs above - the gate's go/no-go signal - so
+          # it is named after what it checks rather than counted among them.
           rv = d["pr_reviewer"]
           assert rv["num_max_findings"] >= 10, "num_max_findings is back down to a cascade-sized cap"
-          assert rv["extra_instructions"].strip(), "extra_instructions is empty: the model is not told to report everything"
           assert rv["enable_large_pr_chunking"] is True, "a token-budget-pruned diff would be reviewed as a slice"
           assert rv["max_number_of_calls"] >= 2, "chunking is on but capped at a single call, so it cannot cover the diff"
-          assert rv["require_risk_assessment"] and rv["require_merge_recommendation"], "no go/no-go signal"
-          # The reasoning budget, which is the largest lever on how long a review takes and is invisible
-          # without it: pr-agent forwards reasoning_effort only to a model litellm's metadata calls
-          # reasoning-capable, and cline-pass/* is not in that table. Both keys are needed or the value
-          # is read, logged and then silently dropped - a set-and-inert config that looks applied.
-          assert cfg["reasoning_effort"], "reasoning_effort is unset: the model decides its own budget"
-          assert cfg["additional_reasoning_effort_models"], \
-              "additional_reasoning_effort_models is empty, so reasoning_effort never reaches the model"
+          assert rv["require_merge_recommendation"], \
+              "no go/no-go signal: preflight-gate fails on merge_recommendation=changes_required"
+          # The two keys this bundle DELIBERATELY does not set, asserted as absent so neither can be
+          # reintroduced silently. The bundle used to inject extra_instructions; capturing the literal
+          # prompt showed it argued against pr-agent's own text ("prefer not reporting over guessing",
+          # "an empty list is acceptable") by telling the model "most real diffs have several", and it
+          # was the only sentence in an ~8,000-character prompt pushing toward generating findings. The
+          # reasoning_effort pin dated from a synthetic measurement that did not reproduce on real
+          # diffs. Re-adding either is a deliberate act that needs a measurement, not a default.
+          #
+          # `require_risk_assessment` is in the same class: it asks the model for a field the gate only
+          # prints, and which measured unstable (`low, low, medium, low` across four reviews while
+          # merge_recommendation never moved). See ROADMAP.md.
+          assert not rv.get("extra_instructions", "").strip(), \
+              "extra_instructions is set again: it overrides pr-agent's own severity guidance (see ROADMAP)"
+          assert not rv.get("require_risk_assessment"), \
+              "require_risk_assessment is on again: the gate does not use risk_level (see ROADMAP)"
+          assert "reasoning_effort" not in cfg, \
+              "reasoning_effort is pinned again: pr-agent's own default applies (see ROADMAP)"
+          # `additional_reasoning_effort_models` is asserted absent too, though its message is the one
+          # place the reasoning behind that is contested: removing it makes reasoning_effort inert here
+          # (nothing is sent at all), while re-adding it would send a budget we have not chosen. That is an
+          # open decision in ROADMAP.md, not a settled one - so this assertion records the current choice
+          # rather than a principle.
+          assert "additional_reasoning_effort_models" not in cfg, \
+              "additional_reasoning_effort_models is set again: see the open decision in ROADMAP.md"
+          assert "pr_code_suggestions" not in d, \
+              "pr_code_suggestions is configured again: its chunk size only made the padding nudge louder"
           print("config parses:", cfg["model"], "->", cfg["fallback_models"])
           PY
           rm -rf "$tmp"

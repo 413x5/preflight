@@ -5,7 +5,7 @@ review. The reviewer is a machine-local PR-Agent run over the **working tree** -
 commit required:
 
 ```sh
-preflight review   # working tree vs the base branch -> .preflight/review.md + .preflight/review.json
+preflight review   # the pending change (HEAD -> working tree) -> .preflight/review.md + .preflight/review.json
 preflight-gate     # exit 0 = pass, 1 = changes required or key issues, 2 = security concerns, 3 = no review yet
 ```
 
@@ -41,7 +41,7 @@ The summary line reports this directly. `new=N/M` means N of the M findings were
 review; `new=0` means every one of them was already raised:
 
 ```
-preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
+preflight: issues=2 security=No risk=low merge=review carefully effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
 ```
 
 - **`new=` above zero** - there is something the last round did not see. Fix those.
@@ -140,10 +140,19 @@ The loop above only works if someone remembers to run it. To make the repo **ref
 commit a pre-commit hook and point git at it - once per clone, and it then covers every worktree:
 
 ```sh
-cp ~/.config/preflight/githooks/* .githooks/     # ships with the bundle's install.sh
-git add .githooks && git commit -m "chore: enforce preflight before commits"
+mkdir -p .githooks
+install -m 0755 ~/.config/preflight/githooks/* .githooks/   # -m: git IGNORES a non-executable hook
+git add .githooks
+git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit
+git commit -m "chore: enforce preflight before commits"
 git config core.hooksPath .githooks              # RELATIVE - see the note below
 ```
+
+Use `install -m`, not `cp`. `cp` preserves the source mode, so it usually works - but git **ignores a
+hook file that is not executable**, printing a hint and running nothing, so if the mode is ever lost the
+repo silently enforces nothing rather than failing. `git update-index --chmod=+x` then puts the mode in
+the *index*, which is what a fresh clone obeys; `git add` alone records `100644` where git runs with
+`core.fileMode=false`. Check both with `git ls-files -s .githooks/` - each line must read `100755`.
 
 Use the **relative** path. An absolute one breaks git worktrees: every worktree would run the hooks
 directory of whichever checkout the path names, instead of its own.

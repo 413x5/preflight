@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # preflight-pr — run PR-Agent with the global preflight config (hosted/PR mode, needs a token).
 set -euo pipefail
-# Same config dir the `preflight` helper and install.sh use, PREFLIGHT_HOME included, so both
-# helpers read one tree. ${HOME:-} because this runs under `set -u`.
+# The same config dir `preflight` and install.sh use, PREFLIGHT_HOME included, so both helpers read
+# one tree. ${HOME:-} because this runs under `set -u`.
 cfgdir="${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}"
 if [ -f "${cfgdir}/ensure-link.sh" ]; then
   . "${cfgdir}/ensure-link.sh"

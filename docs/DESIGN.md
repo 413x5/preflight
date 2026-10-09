@@ -15,9 +15,12 @@ PR-Agent's plain-diff mode only sees what you hand it as a diff. To review *unco
 1. a temporary `GIT_INDEX_FILE` is pointed at a scratch file;
 2. `git read-tree HEAD` seeds it from `HEAD`;
 3. `git add -A` stages the working tree (tracked edits **and** untracked files) into it;
-4. `git write-tree` + `git commit-tree` turn it into a synthetic commit (authored as
-   `preflight <preflight@localhost>`), with `commit.gpgsign=false` so a global `gpgsign = true` cannot break it;
-5. that commit is diffed against the base branch.
+4. `git write-tree` turns it into a tree. The `worktree` scope additionally wraps that tree in a synthetic
+   commit (`git commit-tree`, authored as `preflight <preflight@localhost>`, with `commit.gpgsign=false` so
+   a global `gpgsign = true` cannot break it); the `commit` scope needs no commit, because a tree is
+   diffable directly;
+5. that tree is diffed according to `PREFLIGHT_SCOPE` - against `HEAD` for the default `commit` scope, or
+   against the base for the branch scopes.
 
 The real index, `HEAD`, and history are never touched - the scratch index is deleted on exit.
 
@@ -27,7 +30,7 @@ The real index, `HEAD`, and history are never touched - the scratch index is del
 |---|---|---|
 | `commit` (**default**) | `HEAD` -> the snapshot, i.e. exactly what a commit would contain | no |
 | `worktree` | the default branch -> the snapshot (the whole branch, plus uncommitted work) | yes |
-| `head` | `base...HEAD`, committed content only | yes |
+| `head` | `base...HEAD`, committed content only (no snapshot: it builds no scratch tree) | yes |
 
 `commit` is the default because it is the case the tool exists for: reviewing a change before it is
 submitted. It does no fetch and resolves no base, so it works offline and cannot fail the way base
@@ -232,29 +235,26 @@ A commit can only be verified once it exists, so enforcement is inherently about
 
 ## Where a review's time goes (the reasoning budget)
 
-A review is one model call, and on this endpoint most of that call is **hidden reasoning** - tokens the
-model spends deliberating and then discards. It is invisible in the artifacts: `review.json` carries
-`usage` totals and `review.md` carries the same numbers in its run-details footer, but neither splits
-reasoning from the text that actually became the review. A measured example, a ~500-line diff on this
-repo: **23,467 completion tokens in 111s**, of which roughly 2,500 characters reached `review.md` - and
-the same diff has also completed in 11s / 2,126 tokens, so the spread matters as much as the peak.
+A review is one model call, and most of it can be **hidden reasoning** - tokens the model deliberates with
+and discards. The artifacts do not split that from the text: `review.json` carries `usage` totals and
+`review.md` repeats them in its run-details footer, but neither separates reasoning from findings. Watch
+the footer's "out" count: a ~500-line diff has reported 23,467 completion tokens in 111s with only ~2,500
+characters reaching `review.md`, and the same diff has also completed in 11s / 2,126 tokens. A slow review
+therefore looks like a slow provider when it may be reasoning volume.
 
-That invisibility is the problem, not the cost. A slow review looks like a slow provider, so the budget
-that dominates the wall clock is the one nobody sets. `files/preflight.toml` therefore sets
-`[config] reasoning_effort`, and the measurement behind the value is in the file itself.
+The lever is `[config] reasoning_effort`, and pr-agent forwards it **only** to a model its bundled litellm
+metadata calls reasoning-capable. `cline-pass/*` is not in that table, so the value is read, logged, and
+never sent - the escape hatch is `[config] additional_reasoning_effort_models`, naming the id explicitly,
+and the two are only useful together.
 
-The trap worth knowing about, because it is the same shape as the token-budget one: pr-agent forwards
-`reasoning_effort` **only** to a model litellm's bundled metadata calls reasoning-capable.
-`cline-pass/*` is not in that table, so the key is read, logged as the config default, and then silently
-never sent - the setting looks applied while every run uses the provider's own default. The documented
-escape hatch is `[config] additional_reasoning_effort_models`, which names the id explicitly. Both keys
-are required for the lever to do anything, and `REQ-HOOK-29` asserts each sits in the section pr-agent
-reads it from, because a wrong path fails with no feedback at all.
+`files/preflight.toml` sets **neither**, so the practical effect is that **no** effort reaches this endpoint
+- not pr-agent's `medium` default either. A probe of the constructed request confirmed it: adding
+`reasoning_effort` produced a byte-identical payload. `ROADMAP.md` carries the open decision on this;
+`docs/TROUBLESHOOTING.md` carries the measurements and the symptom.
 
-There is deliberately **no sampling pin**. `config.temperature` (upstream default 0.2) and `config.seed`
-(default -1, i.e. unset) are left alone, so reviews sample freely; see the convergence section for why
-that is a stated limit of `new=N/M` rather than an oversight. `seed` is the lever to reach for if the
-count ever needs to settle, at the cost of whatever coverage pinning removes.
+There is deliberately **no sampling pin**, and it is inert anyway: `config.temperature` (upstream default
+0.2) and `config.seed` (default -1, i.e. unset) are left alone, and this endpoint ignores `seed` even when
+set. Reviews therefore sample freely - the stated limit of `new=N/M` - and `ROADMAP.md` records the probes.
 
 ## The gate
 
@@ -281,9 +281,10 @@ agent fixes a finding, re-runs, and gets handed a fresh one - so the two are eas
 other, and fixing only one leaves the loop slow.
 
 **The model returns few findings.** `pr_reviewer.num_max_findings` caps how many are returned (upstream
-default 3). `preflight.toml` raises it, and also sets `pr_reviewer.extra_instructions` - injected verbatim
-into the reviewer's system prompt - to tell the model to work through the whole diff and report every
-issue it is confident about, rather than stopping at the first.
+default 3). `preflight.toml` raises it. It does not set `pr_reviewer.extra_instructions`, so pr-agent's
+reviewer prompt is sent unmodified - including its own guidance to prefer not reporting over guessing, and
+its schema's "an empty list is acceptable". See `CHANGELOG.md` for why that text is gone and `ROADMAP.md`
+for the open experiment.
 
 That cap is a prompt instruction, not a hard truncation: pr-agent does not slice the merged list (checked
 against its source - the value feeds the prompt and one resolution heuristic only). It is still a bound,
@@ -356,7 +357,7 @@ compares its findings against the previous run's (saved before the artifacts are
 how many are new:
 
 ```
-preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
+preflight: issues=2 security=No risk=low merge=review carefully effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
 ```
 
 `new=N/M` means N of the M findings were not in the previous review. Identity is the tuple pr-agent

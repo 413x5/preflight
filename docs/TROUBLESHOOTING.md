@@ -57,11 +57,9 @@ works too, while the `openai/` prefix above routes through LiteLLM's OpenAI-comp
 This has **two** causes, and only fixing the first one leaves the loop slow.
 
 **1. A cap on how many findings are returned.** `pr_reviewer.num_max_findings` defaults to 3, so each
-run reports 3 findings, the agent fixes 3 and re-runs to find 3 more. It is set to 20 here, and
-`preflight.toml` also sets `pr_reviewer.extra_instructions`, which is injected into the reviewer's
-system prompt and tells the model to report *everything* it is confident about rather than stopping at
-the first issue. Neither setting changes what the model is *shown* - raise both and a review still only
-covers the content the model received.
+run reports 3 findings, the agent fixes 3 and re-runs to find 3 more. It is set to 20 here. That setting
+does not change what the model is *shown* - raise it and a review still only covers the content the model
+received.
 
 **2. A pruned diff.** That is the half `num_max_findings` cannot fix. When a diff exceeds the token
 budget, pr-agent's default is to **prune files** and review only the first patch, so one "complete"
@@ -145,6 +143,15 @@ it exists to prevent. `git commit --no-verify` bypasses it deliberately.
 
 Check, in order:
 
+- **The hook file is executable.** Git ignores a hook that is not, printing only
+  `hint: The '.githooks/pre-commit' hook was ignored because it's not set as executable` - and then
+  committing anyway. This is the one that looks installed: `git config core.hooksPath` is right, the file
+  is committed, and the commit still goes through. Check the **committed** mode with
+  `git ls-files -s .githooks/` - it must be `100755` - as well as the file on disk, because a fresh clone
+  checks out whatever the index says. Fix both halves: `install -m 0755` for the file, then
+  `git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit` for the index. The second step
+  is what covers a git running with `core.fileMode=false`, where `git add` records `100644` however the
+  file was installed.
 - `git config core.hooksPath` - if it is empty, the repo is still using `.git/hooks` and the committed
   `.githooks/` files are not being run. Set it to the **relative** `.githooks`.
 - The branch actually contains `.githooks/pre-commit`. A branch created before the hooks were committed
@@ -207,7 +214,7 @@ helper says so, stops the process, and lets the run succeed. The review is compl
 not then block on a review that in fact passed. Expected output:
 
 ```
-preflight: issues=2 security=No effort=3 tokens=71791 new=0/2 (...)
+preflight: issues=2 security=No risk=low merge=review carefully effort=3 tokens=71791 new=0/2 (...)
 preflight: warning: pr-agent did not exit within 120s after writing .preflight/review.json; stopping it (the review is complete and usable)
 ```
 
@@ -234,9 +241,9 @@ itself the reason the fix above is a bound rather than a diagnosis.
 
 **The levers, in order of usefulness:**
 
-1. **Bring the reasoning output down.** The hang correlates with completion volume, and
-   `[config] reasoning_effort` is the largest lever on that (see the next section). Less output is less
-   callback traffic.
+1. **Bring the reasoning output down.** The hang correlates with completion volume. `[config]
+   reasoning_effort` is the lever, but note it is currently inert: `files/preflight.toml` leaves it unset
+   AND unregistered, so no effort reaches the endpoint at all (the section below explains both).
 2. **`PREFLIGHT_SHUTDOWN_WAIT`** (env, default 120) bounds only the tail *after* the artifact exists. It
    is a safety net, not a fix, and it deliberately never bounds the review itself: a timeout that cut off
    a slow but valid review is the silent-truncation failure this project works hardest to avoid.
@@ -266,34 +273,15 @@ budget, and the same content can take ten times longer from one run to the next.
 
 `[config] reasoning_effort` is the lever, and there is a trap in it:
 
-- pr-agent forwards `reasoning_effort` **only** to a model litellm's bundled metadata calls
-  reasoning-capable. `cline-pass/*` is not in that table - the same gap that forces
-  `custom_model_max_tokens` - so the value is read, logged as the config default, and then **silently
-  dropped**. Confirmed by probing the constructed request: `reasoning_effort=None` with the default
-  config, `reasoning_effort='low'` once `[config] additional_reasoning_effort_models` names the model id.
-- `files/preflight.toml` therefore sets both keys. If you change the model id, update
-  `additional_reasoning_effort_models` too, or the lever goes inert again with no error.
+**No `reasoning_effort` value reaches this endpoint**, which is why setting one changes nothing: the
+forwarding rule, the probe that confirmed it, and the current choice are in
+[`docs/DESIGN.md`](DESIGN.md) under "Where a review's time goes". Set it only alongside
+`[config] additional_reasoning_effort_models`, or it is read and silently dropped.
 
-Measured with the two settings **interleaved** on one 525-line diff (base, low, base, low, ...), so
-endpoint load is shared rather than attributed to whichever arm ran first:
-
-| Setting | Forwarded? | Elapsed | Completion tokens | Findings |
-|---|---|---|---|---|
-| `medium` (upstream default) | no | 11.0 / 23.7 / 21.2s | 2,126 / 5,593 / 4,434 | 2 / 20 / 2 |
-| `low` | yes | 8.7 / 10.6 / 8.4s | 1,587 / 2,037 / 1,444 | 2 / 3 / 2 |
-
-Mean elapsed ~18.6s vs ~9.2s; mean completion ~4,051 vs ~1,689 tokens. The `low` arm is tighter as well as
-smaller - the unforwarded default swung by a factor of 2.6 between runs of the same diff, and one of those
-runs returned 20 findings, which reads as much like padding as thoroughness.
-
-Two honest caveats, because the measurement is the kind that is easy to overclaim:
-
-- **Interleaving matters.** A first, sequential pass put the default at 22-38s and `low` at 14s, and a
-  later run of the *default* on the same diff took 11s - so some of the initial gap was endpoint load, not
-  the setting. The table above is the controlled version and is the one to quote.
-- **The prompt is what decides finding quality, not this knob.** If you change `reasoning_effort`, measure
-  it against `new=N/M`: a cheaper round that reports fewer findings just moves the cost into a second
-  round, which is the failure this whole loop exists to avoid.
+If you do set it, measure on a real diff, interleaved, against `new=N/M` as well as wall clock. A pin of
+`low` was tried on one synthetic 525-line diff and did not survive real content - a cheaper round that
+reports fewer findings just moves the cost into a later round. `ROADMAP.md` carries the numbers and the
+re-test.
 
 **Related, and also invisible by default:** pr-agent pins `config.temperature` (upstream default `0.2`)
 and its `seed` (default `-1`, which means unset). Neither is set by this bundle, so each review samples

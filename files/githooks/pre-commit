@@ -1,29 +1,23 @@
 #!/bin/sh
 # pre-commit — block a commit whose content was not reviewed by preflight.
 #
-# Commit this file into the repo's own .githooks/ directory, then install it once per clone:
+# Copy into the repo's .githooks/ and enable once per clone with a RELATIVE path:
 #
 #   git config core.hooksPath .githooks
 #
-# Use a RELATIVE path. An absolute one breaks git worktrees: every worktree would run the hooks
-# directory of whichever checkout the path names, instead of the one being used.
+# Relative, because an absolute path breaks git worktrees: every worktree would run the hooks of
+# whichever checkout the path names instead of its own.
 #
-# Escape hatches, for a deliberate one-off:
-#   git commit --no-verify       # skips this hook
-#   PREFLIGHT_SKIP=1 git commit  # same, but only for the check this hook does
+# Deliberate one-off bypasses: `git commit --no-verify`, or `PREFLIGHT_SKIP=1 git commit`.
 #
-# The helper is read-only: it verifies that the content being committed matches what
-# 'preflight review' reviewed. It never runs a review, never stages anything, and never
-# touches the index.
+# The helper is read-only: it verifies the content being committed against what `preflight review`
+# reviewed, and never runs a review, stages anything, or touches the index. See docs/DESIGN.md.
 set -u
 
-# Installed by the preflight bundle's install.sh. A missing helper FAILS the commit rather than
-# letting an unverified commit through - the same stance prism takes with a missing toolchain.
-# That is the point of installing the hook; bypass deliberately with --no-verify when needed.
-#
-# ${HOME:-} rather than $HOME: this script runs with `set -u`, so an unset HOME (a hermetic build
-# script, `env -u HOME git commit`, some CI runners) would abort the shell with "HOME: unbound
-# variable" and a confusing error instead of the message below.
+# ${HOME:-} rather than $HOME: with `set -u` an unset HOME (a hermetic build script, `env -u HOME git
+# commit`, some CI runners) would abort with "unbound variable" instead of the message below. A missing
+# helper FAILS the commit rather than passing an unverified one - that is what installing the hook is
+# for.
 helper="${PREFLIGHT_HOOK:-${HOME:-}/.config/preflight/preflight-hook}"
 if [ ! -x "$helper" ]; then
   printf 'preflight: commit blocked: the preflight helper is missing (%s).\n' "$helper" >&2

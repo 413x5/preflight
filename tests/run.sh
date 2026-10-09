@@ -251,8 +251,7 @@ case_missing_helper_fails_closed_unset_home() {
   reset_case "$d"
   # AFTER reset_case: `git reset --hard` restores the committed .githooks/pre-commit, which would
   # otherwise overwrite the example hook this case needs to test.
-  cp "$repo_root/files/githooks/pre-commit" "$d/.githooks/pre-commit"
-  chmod +x "$d/.githooks/pre-commit"
+  install -m 0755 "$repo_root/files/githooks/pre-commit" "$d/.githooks/pre-commit"
   printf '\n# unreviewed\n' >> "$d/util.py"
   git -C "$d" add util.py
   local out got
@@ -508,8 +507,7 @@ case_post_commit_advisory() {
   # way to cover its own logic.
   local d; d="$(new_repo postcommit)"
   reset_case "$d"
-  cp "$repo_root/files/githooks/post-commit" "$d/.githooks/post-commit"
-  chmod +x "$d/.githooks/post-commit"
+  install -m 0755 "$repo_root/files/githooks/post-commit" "$d/.githooks/post-commit"
   local post="$d/.githooks/post-commit" meta="$d/.preflight/review.meta.json"
 
   run_post() { ( cd "$d" && sh "$post" ) 2>&1; }
@@ -524,11 +522,21 @@ case_post_commit_advisory() {
   [ -z "$out" ] || problems="$problems
         | absent sidecar should be silent, got: $out"
 
-  # A worktree-scope review is the enforced case, so nothing to say.
+  # A worktree-scope review is an enforced case, so nothing to say.
   set_meta '{"scope": "worktree", "reviewed_tree": "abc"}'
   out="$(run_post)"
   [ -z "$out" ] || problems="$problems
         | worktree scope should be silent, got: $out"
+
+  # `commit` is the DEFAULT scope and is enforced - files/preflight-hook accepts `commit|worktree`.
+  # This assertion is the regression guard for an advisory that warned on every default-scope commit:
+  # it only recognised `worktree`, which was correct before `commit` became the default and stale
+  # after, and the message it printed ("run 'preflight review' with the default worktree scope") named
+  # a scope that is no longer the default.
+  set_meta '{"scope": "commit", "reviewed_tree": "abc"}'
+  out="$(run_post)"
+  [ -z "$out" ] || problems="$problems
+        | commit scope is enforced and must be silent, got: $out"
 
   # A head-scope review covers already-committed content, so it cannot vouch for this commit.
   set_meta '{"scope": "head", "reviewed_tree": ""}'
@@ -785,17 +793,14 @@ defaults_path, ours_path = sys.argv[1:3]
 # extra_instructions) are declared in many tool sections upstream, so "first occurrence wins" would
 # resolve a key to whichever section happens to be listed first and fail on a correctly-configured repo.
 # The assertion is therefore "pr_reviewer declares it", not "nothing else does".
-# Each key with the section pr-agent reads it from. The COMPLETENESS keys live in [pr_reviewer]; the
-# reasoning knob lives in [config] and only reaches the model because the model id is also registered in
-# [config] additional_reasoning_effort_models - a key that is read, logged, and then silently dropped when
-# the id is missing, which is exactly how the default looked applied while being inert.
+# Each key with the section pr-agent reads it from. These are the keys the bundle SETS; the ones it
+# deliberately leaves unset (`extra_instructions`, `reasoning_effort`, and the
+# `additional_reasoning_effort_models` that exists only to forward the latter) are not listed here, and
+# CI asserts their absence instead - a key that is absent cannot be put in the wrong section.
 wanted = {
     "num_max_findings": "pr_reviewer",
-    "extra_instructions": "pr_reviewer",
     "enable_large_pr_chunking": "pr_reviewer",
     "max_number_of_calls": "pr_reviewer",
-    "reasoning_effort": "config",
-    "additional_reasoning_effort_models": "config",
 }
 sections = {key: set() for key in wanted}
 section = None
@@ -943,6 +948,314 @@ FAKE
 "; fi
 }
 
+case_commit_scope_reviews_untracked() {
+  # The commit scope must hand the model EVERYTHING a commit would contain, and the containment rule
+  # makes an untracked file the sharp case: `reviewed_tree` is built with `git add -A`, so a new file IS
+  # in the tree the hook compares against - but a bare `git diff HEAD` never lists it. That combination
+  # meant an untracked file was never reviewed while the hook accepted it as reviewed, so a defect in a
+  # new file could be committed with the check passing. This asserts the diff itself, because the
+  # invariant is about what the model was SHOWN, not about which paths the hook allows.
+  local d fake out first second problems=""
+  d="$work/untracked"; fake="$work/untracked-bin"
+  mkdir -p "$d" "$fake"
+  # Records the diff pr-agent is handed, which is the only place this invariant is observable.
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat > "$DIFF_OUT"
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No"}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent"
+
+  ( cd "$d" \
+      && git init -q -b main . \
+      && printf 'x = 1\n' > tracked.py \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m init \
+      && printf '\ndef new_thing(a, b):\n    return a / (b - b)\n' > untracked.py \
+      && printf '\nchanged = True\n' >> tracked.py ) >/dev/null 2>&1
+  git -C "$d" rev-parse --verify -q HEAD >/dev/null 2>&1 || {
+    bad "the commit scope reviews untracked files, not just tracked edits" "REQ-HOOK-37" \
+        "a seeded repository" "no commit" \
+        "the case could not build its fixture, so the reviewed diff was never exercised"
+    return
+  }
+
+  out="$work/untracked.diff"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" DIFF_OUT="$out" \
+      PREFLIGHT_HOME="$work/untracked-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$work/untracked.txt" 2>&1
+
+  grep -q '^+++ b/untracked\.py' "$out" 2>/dev/null || problems="$problems
+        | the new UNTRACKED file was not in the diff handed to the model, yet it is in reviewed_tree - so
+        | the hook would accept it as reviewed while nothing ever looked at it"
+  grep -q '^+++ b/tracked\.py' "$out" 2>/dev/null || problems="$problems
+        | the tracked edit was missing from the reviewed diff"
+
+  if [ -z "$problems" ]; then ok "the commit scope reviews untracked files, not just tracked edits" "REQ-HOOK-37"
+  else bad "the commit scope reviews untracked files, not just tracked edits" "REQ-HOOK-37" \
+        "the diff handed to the model contains untracked.py and tracked.py" "see below" "$problems
+"; fi
+}
+
+# ---------------------------------------------------------------------------- summary wiring
+
+case_summary_wiring() {
+  # REQ-HOOK-31 proves the COUNTING is right by extracting the summary heredoc from files/preflight and
+  # running it standalone - so it never exercises the wiring around it: that `emit_summary` is actually
+  # called, and that the previous review is actually exported to the comparison. A helper whose summary
+  # block is correct but never invoked would pass that case and report no convergence signal at all,
+  # which is the loop's only stopping rule.
+  #
+  # This drives the REAL helper, end to end, against a stubbed `pr-agent` on PATH - the pattern
+  # REQ-HOOK-32 established, so it needs no key and no network, and therefore runs in CI. Two runs:
+  #   - the first has no previous review, so it must print counts and must NOT claim a `new=` count;
+  #   - the second repeats the same finding, so it must report it as a repeat.
+  local d fake out rc problems=""
+  d="$work/wiring"; fake="$work/wiring-bin"
+  mkdir -p "$d" "$fake"
+  # Writes both artifacts, so the helper treats the review as complete and reads the counts from JSON.
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[{"relevant_file":"a.py","issue_header":"H","issue_content":"same"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3,"risk_level":"low","merge_recommendation":"review carefully"},"usage":{"total_tokens":123}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent"
+
+  ( cd "$d" \
+      && git init -q -b main . \
+      && printf 'a\n' > f.txt \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m init \
+      && printf 'b\n' >> f.txt ) >/dev/null 2>&1
+  git -C "$d" rev-parse --verify -q HEAD >/dev/null 2>&1 || {
+    bad "the summary line reports the convergence signal from a real run" "REQ-HOOK-34" \
+        "a seeded repository" "no commit" \
+        "the case could not build its fixture, so the summary wiring was never exercised"
+    return
+  }
+
+  # A config dir with no ensure-link.sh or preflight.toml: this case is about the summary line, and the
+  # gate is still resolved from the helper's own directory and run afterwards, writing the sidecar
+  # regardless of its verdict.
+  run_once() {
+    ( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$work/wiring-cfg" \
+        bash "$repo_root/files/preflight" review ) 2>&1
+  }
+
+  rc=0; out="$(run_once)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | the first run failed (exit $rc), so the summary was never produced: $out"
+  case "$out" in *"issues=1"*) ;; *) problems="$problems
+        | (1) the counts were not reported on a normal run: $out" ;; esac
+  case "$out" in *"new="*) problems="$problems
+        | (1) a first review claimed a new= count, but it has no previous run to compare against" ;; esac
+
+  rc=0; out="$(run_once)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | the second run failed (exit $rc): $out"
+  case "$out" in *"new=0/1"*) ;; *) problems="$problems
+        | (2) a repeat of the previous finding was not reported as new=0/1, so the convergence signal is
+        |     not wired to the previous review: $out" ;; esac
+
+  if [ -z "$problems" ]; then ok "the summary line reports the convergence signal from a real run" "REQ-HOOK-34"
+  else bad "the summary line reports the convergence signal from a real run" "REQ-HOOK-34" \
+        "issues= on the first run with no new=, new=0/1 on the second" "see below" "$problems
+"; fi
+}
+
+# ---------------------------------------------------------------------------- the verdict fields
+
+case_verdict_fields() {
+  # The summary line already carries the two counts `preflight-gate` decides its verdict on - issues and
+  # security - but the other two it fails on, `risk_level` and `merge_recommendation`, appear only in the
+  # gate's own output. So `preflight review` alone reports a change that the gate will then refuse, and the
+  # only way to learn why is to run a second command.
+  #
+  # Asserted against the stub's known values (low / review carefully), which also pins the shape: both are
+  # free-text from the model, so an absent field must degrade to a placeholder rather than print an empty
+  # `risk=` or the literal `None`, which read as a verdict of their own.
+  local d fake out rc problems=""
+  d="$work/verdict"; fake="$work/verdict-bin"
+  mkdir -p "$d" "$fake"
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":3,"risk_level":"low","merge_recommendation":"review carefully"},"usage":{"total_tokens":123}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  # Same stub, but with neither verdict field present: the model is free not to return them.
+  local sparse="$work/verdict-sparse"
+  mkdir -p "$sparse"
+  cat > "$sparse/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No"}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent" "$sparse/pr-agent"
+
+  ( cd "$d" \
+      && git init -q -b main . \
+      && printf 'a\n' > f.txt \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m init \
+      && printf 'b\n' >> f.txt ) >/dev/null 2>&1
+  git -C "$d" rev-parse --verify -q HEAD >/dev/null 2>&1 || {
+    bad "the summary line reports the fields the gate fails on" "REQ-HOOK-35" \
+        "a seeded repository" "no commit" \
+        "the case could not build its fixture, so the summary fields were never exercised"
+    return
+  }
+
+  rc=0
+  out="$( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
+            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | the run failed (exit $rc): $out"
+  case "$out" in *"risk=low"*) ;; *) problems="$problems
+        | (1) risk_level was not reported on the summary line: $out" ;; esac
+  case "$out" in *"merge=review carefully"*) ;; *) problems="$problems
+        | (1) merge_recommendation was not reported on the summary line: $out" ;; esac
+
+  rc=0
+  out="$( cd "$d" && rm -rf .preflight && PATH="$sparse:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
+            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | the run failed (exit $rc) on a review without the verdict fields: $out"
+  case "$out" in *"risk=n/a"*) ;; *) problems="$problems
+        | (2) an absent risk_level did not degrade to risk=n/a (an empty or literal-None value reads as a verdict): $out" ;; esac
+  case "$out" in *"merge=n/a"*) ;; *) problems="$problems
+        | (2) an absent merge_recommendation did not degrade to merge=n/a: $out" ;; esac
+  # effort and tokens are the third and fourth fields on the line, and each was missed in turn: effort
+  # printed a literal `effort=None`, and once that was fixed `tokens` did the same against a payload with
+  # no `usage` object. Assert BOTH against the sparse payload below, which carries neither the effort
+  # value nor a `usage` object.
+  case "$out" in *"effort=n/a"*) ;; *) problems="$problems
+        | (2) an absent effort did not degrade to effort=n/a: $out" ;; esac
+  case "$out" in *"tokens=n/a"*) ;; *) problems="$problems
+        | (2) an absent usage object did not degrade to tokens=n/a: $out" ;; esac
+  # A malformed CONTAINER is the other half: a `review` or `usage` that is not an object raised on
+  # `.get` and lost the line, before any field was even read. The gate still refuses it (exit 3), so this
+  # is about keeping the counts visible, not about softening the verdict.
+  local badshape="$work/verdict-badshape"
+  mkdir -p "$badshape"
+  cat > "$badshape/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$js" ] && printf '%s\n' '{"review":"text","usage":5}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$badshape/pr-agent"
+  rc=0
+  out="$( cd "$d" && rm -rf .preflight && PATH="$badshape:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
+            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+  case "$out" in *"issues=0"*) ;; *) problems="$problems
+        | (5) a non-object review/usage lost the summary line instead of degrading: $out" ;; esac
+
+  # The general shape, so a fifth field added later cannot reintroduce the same leak: no field on the
+  # line may print the literal None.
+  case "$out" in *"=None"*) problems="$problems
+        | (2) a bare None reached the summary line: $out" ;; esac
+
+  # A wrongly-TYPED field is worse than an absent one: `security_concerns: true` (which the model does
+  # return, and which preflight-gate has its own guard for) made `.strip()` raise AttributeError, killing
+  # the heredoc so `issues=`, `new=` and `coverage=` were lost together. Assert the coercion handles the
+  # JSON types the model actually sends, not just absence.
+  local typed="$work/verdict-typed"
+  mkdir -p "$typed"
+  cat > "$typed/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":true},"usage":{"total_tokens":7}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$typed/pr-agent"
+  rc=0
+  out="$( cd "$d" && rm -rf .preflight && PATH="$typed:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
+            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+  # The counts must survive a boolean field: if the line is missing entirely, the heredoc raised.
+  case "$out" in *"issues=0"*) ;; *) problems="$problems
+        | (3) a boolean security_concerns destroyed the summary line instead of degrading: $out" ;; esac
+  case "$out" in *"security=yes"*) ;; *) problems="$problems
+        | (3) a boolean security_concerns was not coerced to yes/no: $out" ;; esac
+
+  # `key_issues_to_review` is the one field whose TYPE feeds `len()`, so a wrong type does not just print
+  # wrong - `"no issues"` reported `issues=9`, and an int or bool raised and lost the whole line. The gate
+  # exits 3 on a non-list; the summary cannot exit, so it must fall back and still print.
+  local badlist="$work/verdict-badlist"
+  mkdir -p "$badlist"
+  cat > "$badlist/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":"no issues","security_concerns":"No"}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$badlist/pr-agent"
+  rc=0
+  out="$( cd "$d" && rm -rf .preflight && PATH="$badlist:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
+            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+  case "$out" in *"issues=0"*) ;; *) problems="$problems
+        | (4) a non-list key_issues_to_review did not degrade to issues=0
+        |     (a string reports its character count, and an int or bool loses the line): $out" ;; esac
+
+  if [ -z "$problems" ]; then ok "the summary line reports the fields the gate fails on" "REQ-HOOK-35"
+  else bad "the summary line reports the fields the gate fails on" "REQ-HOOK-35" \
+        "risk=low merge=review carefully, and no empty value when absent" "see below" "$problems
+"; fi
+}
+
 # ---------------------------------------------------------------------------- shutdown bound
 
 case_bounded_shutdown() {
@@ -1070,6 +1383,60 @@ SLOW
 "; fi
 }
 
+# ---------------------------------------------------------------------------- bundle hygiene
+
+case_bundle_hooks_executable() {
+  # Git IGNORES a hook file that is not marked executable - it prints a hint and runs nothing - so a
+  # `.githooks/pre-commit` committed without its executable bit enforces nothing at all. Verified
+  # directly: in a clone of a repo whose hooks are mode 100644, an unreviewed commit exits 0.
+  #
+  # `cp` preserves the source mode, so the documented recipe works on a machine where the bundle was
+  # installed - but the committed mode is what a FRESH CLONE obeys, and the source file is one editor or
+  # patch away from losing its bit. install.sh already guards this for its own copies (`install -m 0755`,
+  # which is why the recipe tells people to copy the INSTALLED hooks rather than the repo's); this check
+  # guards the repo's shipped files at the source, where a chmod cannot be undone by a patch tool.
+  local f mode problems="" index_note=''
+  # The INDEX half needs $repo_root to be a git working tree. A source tarball or a "Download ZIP" has
+  # no .git, and `ls-files` there returns nothing - which this case would otherwise read as "not tracked"
+  # and report as a defect, when the files are present and fine. Every other case stays inside a temp repo
+  # it creates, so this is the suite's only dependence on the source tree being a repo.
+  #
+  # `core.fileMode=false` is deliberately NOT treated as a reason to skip: that setting governs what
+  # `git add` writes, not what the index already holds, so `ls-files -s` reports the committed mode
+  # either way. Only the recipe (which does the `add`) has to compensate, with `update-index --chmod=+x`.
+  if ! git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1; then
+    index_note="not a git working tree, so the committed mode could not be checked"
+  fi
+  for f in files/githooks/pre-commit files/githooks/post-commit; do
+    [ -f "$repo_root/$f" ] || { problems="$problems
+        | $f is missing"; continue; }
+    [ -x "$repo_root/$f" ] || problems="$problems
+        | $f is not executable on disk, so a repo that copied it would have a hook git ignores"
+    [ -n "$index_note" ] && continue
+    # The mode in the INDEX is what the commit will carry, and what a clone will check out.
+    mode="$(git -C "$repo_root" ls-files -s -- "$f" 2>/dev/null | awk '{print $1}' | head -1)"
+    case "$mode" in
+      100755) ;;
+      100644) problems="$problems
+        | $f is committed mode 100644; a fresh clone would not execute it and would enforce nothing" ;;
+      '') problems="$problems
+        | $f is not tracked by git at all, so it would not be in the commit" ;;
+      *) problems="$problems
+        | $f is committed with unexpected mode $mode" ;;
+    esac
+  done
+  if [ -n "$problems" ]; then
+    bad "the shipped git hooks are executable, on disk and in the index" "REQ-HOOK-36" \
+        "files/githooks/* executable on disk and committed as 100755" "see below" "$problems
+"
+  elif [ -n "$index_note" ]; then
+    skip "the shipped git hooks are executable, on disk and in the index" "REQ-HOOK-36" \
+         "on disk: yes; committed mode: $index_note"
+  else
+    ok "the shipped git hooks are executable, on disk and in the index" "REQ-HOOK-36"
+  fi
+}
+
 # ---------------------------------------------------------------------------- live end-to-end
 # Needs the installed helpers and an API key, so it is skipped when either is absent.
 
@@ -1152,7 +1519,7 @@ REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK
 #   orthogonal            do not test blocking at all, or test a different file.
 insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
 REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31
-REQ-HOOK-32 REQ-HOOK-33'
+REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36 REQ-HOOK-37'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -1278,8 +1645,12 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_post_commit_advisory \
     case_convergence_signal \
     case_coverage_marker_matches_real_footer \
+    case_summary_wiring \
+    case_verdict_fields \
     case_bounded_shutdown \
-    case_scope_defaults
+    case_scope_defaults \
+    case_commit_scope_reviews_untracked \
+    case_bundle_hooks_executable
   say ""
 fi
 

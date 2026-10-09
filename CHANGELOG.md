@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+- **`preflight`'s summary line now carries `risk=` and `merge=`.** `merge_recommendation` is one of the
+  four fields `preflight-gate` fails on, and it previously appeared only in the gate's own output - so
+  `preflight review` could report a change that the gate would then refuse, discoverable only by running a
+  second command. `risk_level` is reported for the reader and **not** enforced: the gate reads it only to
+  print it, so `risk=low` alongside real findings passes regardless (`risk=low` with two key issues was
+  observed). **Every** field on the line degrades to `n/a` when the model omits it - a lesson learned
+  twice: the first version of this change handled `risk`/`merge` and left `effort` printing `effort=None`,
+  and fixing that revealed `tokens` doing the same. Both were found by reviewing the change with the tool
+  itself, and both are now asserted (`REQ-HOOK-35`), including a sweep for any literal `None`.
 - **The pending commit is now the default review scope.** `preflight review` used to review the whole
   branch since the default branch. It now reviews exactly what a commit would contain - HEAD to the working
   tree, untracked files included - which is the case the tool exists for: reviewing a change before it is
@@ -186,6 +196,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `commit` scope never showed untracked files to the model, while the hook accepted them as
+  reviewed.** The diff handed to pr-agent was a bare `git diff HEAD`, but the scope's own comment said
+  `git diff HEAD <tree>`. The snapshot tree is built with `git add -A` and stored as `reviewed_tree`,
+  which is what the pre-commit hook compares against - so a new file was simultaneously never reviewed and
+  accepted as reviewed, and a defect in it could be committed with the containment check passing. Verified
+  before the fix: with a new file containing a divide-by-zero the model was handed no diff for it at all,
+  while `ls-tree reviewed_tree` listed it. The diff is now taken against the snapshot tree with an explicit
+  `HEAD` base. `REQ-HOOK-37` records what the stub `pr-agent` received, and reverting fails it.
+- **A malformed review took the whole summary line with it.** The line's fields are read by an agent, so
+  each now degrades to `n/a` instead of raising: `security_concerns` was still coerced with a raw
+  `.strip()`, so a JSON boolean (which the model returns, and which `preflight-gate` has its own guard for)
+  raised `AttributeError`; `key_issues_to_review` fed `len()` directly, so `"no issues"` reported
+  `issues=9`; and a `review` or `usage` that was not an object raised before any field was read. The gate's
+  verdict is unchanged - it still exits 3 on a malformed review - this only keeps `issues=`, `new=` and
+  `coverage=` visible. `REQ-HOOK-35` covers all three shapes.
+- **The `post-commit` advisory warned on every default-scope commit, and named a scope that no longer
+  exists.** It recognised only `scope=worktree` as enforced, but `commit` became the default scope - and
+  `files/preflight-hook` accepts `commit|worktree`. So the common case printed *"the last review used
+  scope=commit, so this commit was NOT verified by the hook"* for a commit that the hook had in fact
+  enforced, and told the reader to re-run with *"the default worktree scope"*, which had stopped being the
+  default. Found while reviewing the hook's own comments. `REQ-HOOK-27` now asserts `commit` is silent;
+  reverting the fix fails it.
+- **The documented way to install the commit hooks could produce a hook git ignores.** The recipe said
+  `cp ~/.config/preflight/githooks/* .githooks/`. `cp` preserves the source mode, so it works on a machine
+  where `install.sh` put the files down - but git **ignores a hook that is not executable**, printing a
+  hint and committing anyway, and what a *fresh clone* obeys is the mode recorded in the index, not the
+  installer's. A repo whose hooks ever lost that bit enforces nothing while looking completely installed,
+  which is the failure this bundle exists to make impossible. Verified directly: a clone of a repo whose
+  hooks are committed `100644` accepts an unreviewed commit, exit 0.
+
+  The recipe is now `install -m 0755` **plus** `git update-index --chmod=+x` in every place it appears
+  (`README.md`, `AGENTS.md`, `AGENTS-review-snippet.md`, `CONTRIBUTING.md`, `install.sh`'s own
+  instructions, and the suite's fixtures). The second step is not belt-and-braces: it was verified that
+  where git runs with `core.fileMode=false`, `git add` records `100644` however the file was installed,
+  and `update-index --chmod=+x` is the way to force `100755` into the index that a clone obeys.
+  `REQ-HOOK-36` checks the shipped files are executable both on disk and as committed, and skips the
+  index half - reporting why - when `$repo_root` is not a git working tree, so a source tarball does not
+  turn a missing `.git` into a reported defect.
+  `docs/TROUBLESHOOTING.md` now lists this first under "the hook never blocks anything", because it is the
+  cause that looks like a working install.
+- **`--help` still described the old default scope.** After the pending commit became the default review
+  scope, the usage text said `review` was a "review of the working tree vs the base branch" - the branch
+  behaviour it no longer has by default, and a base it never resolves in that scope. `preflight --help`
+  and the script header now describe the pending change, and name `PREFLIGHT_SCOPE=worktree` for the
+  branch review.
 - **The `new=` count was suppressed after a clean review.** It was computed only when the previous
   review had findings, so a run following a clean pass reported no convergence signal - the one round
   most likely to be re-running for no reason. It is now computed whenever a previous review was *loaded*,
@@ -267,6 +322,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`files/preflight.toml` no longer sets `pr_reviewer.extra_instructions` or `[config] reasoning_effort`.**
+  Both are removed, so pr-agent's own reviewer prompt and its own `medium` reasoning default apply.
+
+  The `extra_instructions` text was the more consequential of the two. Capturing the literal request
+  pr-agent sends - a local endpoint that logs the body and returns a canned review, so no key and no cost -
+  showed it appended to a system prompt that already says, in the same payload: *"For lower-severity
+  concerns, be certain before flagging... do not flag it"*, *"Otherwise, prefer not reporting over
+  guessing"*, and, in the schema description, *"An empty list is acceptable if no clear issues are
+  found."* Our text said *"Report EVERY issue you are confident about... If you find one issue, keep
+  looking: most real diffs have several."* That sentence was the only content in an ~8,000-character
+  prompt pushing toward **generating** findings rather than filtering them - the opposite of the loop
+  converging, which is what the bundle exists to achieve. The prompt is now sent unmodified; the effect on
+  finding volume is an open experiment in `ROADMAP.md`, not a settled result.
+
+  `reasoning_effort = "low"` and the `additional_reasoning_effort_models` that existed only to forward it
+  are removed on the evidence rather than on principle. The pin rested on interleaved arms measured on one
+  synthetic 525-line diff (mean ~18.6s / ~4,051 completion tokens unforwarded versus ~9.2s / ~1,689 with
+  `low`). Four consecutive reviews of this repo's own branch, at `low`, spent 23k-34k completion tokens -
+  60-68% of each run's total - and ranged 1m19s-2m30s on similar diffs, so the synthetic figure was not a
+  predictor of real content. CI now asserts these keys are **absent**, so neither can return silently.
+
+- **`require_risk_assessment = true` is removed, and the `[pr_code_suggestions]` override with it.** Both
+  asked the model for more output that nothing acts on: `risk_level` is only *printed* by the gate (the
+  verdict comes from effort, security, `merge_recommendation` and issues), and it measured unstable -
+  `low, low, medium, low` across four reviews of this repo while `merge_recommendation` never moved off
+  `merge_with_caution` - so requiring it bought a go/no-go-looking field with no signal in it.
+  `num_code_suggestions_per_chunk = 20` (upstream 3) is the same nudge as `num_max_findings`, applied to
+  `preflight improve`, and is reverted for the same reason. CI asserts both stay unset.
+- **Comments in `files/` no longer narrate their own history.** Shipped files and the operator docs now
+  state what a value *is* and why; what it replaced, what was measured, and what was reverted live in this
+  changelog. `files/preflight.toml` was 73% comments (61 of 84 lines) after a single documentation pass and
+  is now 48%, with the reasoning it lost recorded here. The rule is written into `AGENTS.md`, with the test
+  "if deleting a comment would not change a reader's next action, it belongs in the changelog or nowhere".
 - The `post-commit` companion hook is now covered by the suite (`REQ-HOOK-27`; classified insensitive,
   since a post-commit hook cannot block) - it previously had only a `sh -n` syntax check, which is why the
   silent-sidecar defect above survived.

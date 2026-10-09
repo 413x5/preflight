@@ -110,7 +110,9 @@ clone-wide, so setting it here would apply to every worktree of this clone:
 ```sh
 R="$(mktemp -d)"; cd "$R"; git init -q -b main .
 printf '# x\n' > README.md; git add README.md; git -c commit.gpgsign=false commit -q -m init
-mkdir -p .githooks && cp ~/.config/preflight/githooks/* .githooks/
+mkdir -p .githooks && install -m 0755 ~/.config/preflight/githooks/* .githooks/
+git add .githooks
+git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit   # git IGNORES a non-executable hook
 git config core.hooksPath .githooks
 
 git -c commit.gpgsign=false commit --allow-empty -m should-block   # no review -> blocked

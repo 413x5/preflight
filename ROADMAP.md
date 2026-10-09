@@ -4,7 +4,7 @@ Work that is agreed but not yet done, plus ideas worth keeping. Nothing here is 
 
 ## Now
 
-Small, ready to do.
+Small and ready - no design needed, no experiment to settle first.
 
 - [x] **Trim the helper commentary.** `files/preflight` was 210 comment lines of 564
       (37%), most densely the coverage-marker block, the summary function and the review-job block. Now
@@ -77,55 +77,73 @@ Shipped on `main`; kept for the reasoning behind each change, not as work to pic
 
 ## Next
 
-Wanted; needs a little design. `[x]` here means shipped; where a `**Still open**` paragraph follows, that
-paragraph is the remaining work - not every `[x]` item has one, and an item without it is simply done.
+Wanted; needs design, or an experiment to settle. Two groups:
 
-- [ ] **The review is not stable enough to converge on a prose-heavy diff (MEASURED).** A convergence test
-      over this branch - five passes, then re-runs on unchanged content - never reached the target of
-      passing in 2-3 passes. Every pass reported all-NEW findings (`new=N/N`), never a repeat:
+- **Open questions on shipped work** (`[x]` items, below the experiments) - the shipping paragraph is
+  context and the `**Still open**` paragraph under it is the work.
+- **Experiments**, each phrased as a question with the result that would settle it. An experiment is
+  cheap, reversible and must state what would falsify it; a design item needs a decision first.
 
-      | pass | findings | what they were about |
-      |---|---|---|
-      | 1 | 1 | stale `--help` text (code) |
-      | 2 | 1 | `security_concerns: true` crashed the summary (code) |
-      | 3 | 1 | untracked files unreviewed but accepted by the hook (code, real bypass) |
-      | 4 | 1 | `REQ-HOOK-37` rows missing from `tests/README.md` (docs) |
-      | 5 | **0** | clean; gate pass |
-      | re-run A | 2 | ROADMAP and CI comments (docs) |
-      | re-run B | 1 | the container guard added in pass 2's fix (code) |
+### Experiments
 
-      **The re-runs were on byte-identical content and returned 0, then 2, then 1 findings** - different
-      findings each time, so this is generation variance, not a stale comparison. `temperature` is 0.2 and
-      `reasoning_effort` is unset (pr-agent's `medium`), so a large diff samples a different subset of
-      plausible concerns per run.
+- [ ] **Which of the untried levers actually stabilise the finding set?** The convergence test showed the
+      blocker is generation variance, and several levers remain untested. The ones below are ordered by
+      cost, and each is cheap to run and to revert.
 
-      The consequence: **`new=N/M` cannot work as a stopping signal while the finding set itself is
-      unstable.** Fixing a round's findings does not reduce the next round's count, because the next round
-      is largely re-rolling rather than re-checking. The test did show the config changes working - passes
-      stayed at ONE finding instead of cascading, and the loop reached a genuine `issues=0`.
+      **Already tested and rejected - do not repeat:** `[config] seed`. It is inert on this endpoint.
+      Direct probes with `seed=42`, `seed=1234` and `temperature=0` each returned a different answer every
+      time (`['Silent-Crimson-47', 'Brisk-Azure-77', 'Swift-Crimson-47', ...]`), and ClinePass accepts the
+      parameter without honouring it. `temperature=0` alone did not stabilise it either. Pinning to
+      `seed` also *fails every review* unless `temperature` is 0 - `ValueError: Seed (42) is not supported
+      with temperature (0.2) > 0` - on the primary and the fallback model, so it is a pair or nothing.
 
-      Untested, cheapest first: (1) `[config] seed` to pin sampling, trading coverage for reproducibility -
-      the one lever that directly attacks this; (2) smaller diffs per review, since the variance may scale
-      with size and `commit`-scope reviews are far smaller; (3) `temperature` of 0.
+      Untried, cheapest first:
+      1. **A smaller diff per review.** The variance may scale with how many plausible concerns a diff
+         admits. The `commit` scope is roughly a tenth the size of a branch diff and reviews in seconds,
+         so this is testable immediately: review one commit three times and compare the finding SETS,
+         not the counts.
+      2. **`model_reasoning`** - a dedicated model for pr-agent's self-reflection (a follow-up call that
+         scores each finding 0-10 and drops the incorrect ones). Unused here. It attacks the *other* half
+         of the problem: not making generation stable, but filtering the noise it produces.
+      3. **`[config] duplicate_examples`** - documented as duplicating the prompt examples "to help the
+         model generate structured output" for weaker models. **Verify it still exists first:** it appears
+         only in one doc example, not in `configuration.toml` and not in any `.py`, so it may be gone.
+      4. **A stronger model.** pr-agent's own recommendation (see below) is that structured output at this
+         input size is what separates commercial models from the rest, which is exactly the failure.
 
-      **A caveat on this test's own validity:** the branch is ~750 insertions with a high prose-to-code
-      ratio, and two re-runs found issues in prose written minutes earlier - the worst case for stability,
-      not the average one.
+      What would settle it: for each lever, review the same content three times and compare the finding
+      SETS. A lever that leaves the sets different has not fixed the thing we measured.
 
-- [ ] **Decide what replaces the removed `extra_instructions` (OPEN EXPERIMENT).** The injected text was
-      removed because capturing the literal prompt showed it arguing against pr-agent's own guidance in
-      the same system prompt (which says "prefer not reporting over guessing" and "an empty list is
-      acceptable"), by asserting "most real diffs have several". It was the only text in the prompt
-      pushing toward generating findings. **Unproven either way:** compare the next reviews against
-      `new=N/M` and finding volume to see whether the loop settles or the model simply under-reports.
-      Reverting is one config block. Details in `CHANGELOG.md`; the capture method is in
+- [ ] **Should `additional_reasoning_effort_models` come back, purely so the lever fails visibly?**
+      Mechanism and the probe: [`docs/DESIGN.md`](docs/DESIGN.md). Adding the key is what makes a configured
+      `reasoning_effort` reach the endpoint at all, and what turns an unsupported value into a
+      provider-side error instead of a silent drop - it does not pin a budget, since pr-agent's default
+      `medium` would then be sent. So the question is: **is a visible failure worth sending a reasoning
+      budget we have not chosen?** If not, leave it out and let DESIGN keep saying the lever is inert here.
+
+- [ ] **Does removing `extra_instructions` help or just make the model under-report?** The injected text
+      was removed because capturing the literal prompt showed it arguing against pr-agent's own guidance
+      in the same system prompt (which says "prefer not reporting over guessing" and "an empty list is
+      acceptable") by asserting "most real diffs have several". It was the only text in the prompt pushing
+      toward generating findings. Unproven either way: compare the next reviews against `new=N/M` and
+      finding volume. Reverting is one config block. Details in `CHANGELOG.md`; the capture method is in
       `docs/TROUBLESHOOTING.md`.
 
-      Unresolved and related: pr-agent's finding schema has **no severity field**, so a broken doc command
-      and a real logic bug both block a commit. A deterministic tier from `relevant_file` (code and
-      `tests/**` blocking, `*.md`/`docs/**` advisory) is designed but **not implemented**. Any such
-      classifier must normalise the path first - the values arrive with a trailing newline
-      (`'README.md\n'`), so a naive `endswith('.md')` would classify every doc as code.
+      **What we now know sits against it:** pr-agent's FAQ recommends the **default configuration** for
+      reducing noise, and names score thresholds and `extra_instructions` as the levers to *add* when
+      feedback is too noisy. `num_max_findings = 20` (4x the default) and our `extra_instructions` were
+      those two levers applied in the wrong direction, so the cascade was not only sampling variance -
+      two noise knobs were deliberately turned up.
+
+- [ ] **Give findings a severity tier, so a doc typo does not block a commit.** pr-agent's finding schema
+      has **no severity field** (`relevant_file`, `issue_header`, `issue_content`, `start_line`,
+      `end_line`), so `preflight-gate` treats every finding alike. A deterministic tier computed from
+      `relevant_file` - code and `tests/**` blocking, `*.md`/`docs/**` advisory, unknown blocking - was
+      designed and is **not implemented**. Any classifier must normalise the path first: values arrive with
+      a trailing newline (`'README.md\n'`), so a naive `endswith('.md')` classifies every doc as code and
+      the advisory tier would never fire.
+
+### Open questions on shipped work
 
 - [x] **Make the post-run hang survivable, and stop it hiding the counts.** `preflight review` writes
       both artifacts and then sometimes never exits (4-13 minutes, in two shapes - sleeping in `kevent`,
@@ -153,7 +171,8 @@ paragraph is the remaining work - not every `[x]` item has one, and an item with
          the callback drain.
 - [ ] **Re-measure the reasoning budget before pinning it again (REVERTED, read this).** The bundle used
       to set `[config] reasoning_effort = "low"` plus `additional_reasoning_effort_models`. Both keys are
-      now removed, so pr-agent's `medium` default applies. The reason: the pin rested on interleaved arms
+      now removed; what that means for forwarding is in [`docs/DESIGN.md`](docs/DESIGN.md). The reason the
+      pin was reverted: it rested on interleaved arms
       measured on **one synthetic 525-line diff** (mean ~18.6s / ~4,051 completion tokens unforwarded
       versus ~9.2s / ~1,689 with `low`), and it did not reproduce on real work - four consecutive reviews
       of this repo's own branch at `low` spent 23k-34k completion tokens (60-68% of each run's total) and
@@ -204,6 +223,40 @@ paragraph is the remaining work - not every `[x]` item has one, and an item with
 - [ ] **`preflight --since <ref>`** for a pseudo-incremental review - plain-diff mode has no true
       incremental, so this would re-review only what changed since the last pass.
 - [ ] **Remember the last reviewed commit** so a second `preflight review` can skip unchanged work.
+
+## What upstream's own docs say (checked against the installed v0.47.0)
+
+Read from the package's shipped `_help_docs/` rather than the website, so it matches what we run. Several
+items bear directly on the convergence problem, and one contradicts a choice this bundle made.
+
+- **Model choice.** `usage-guide/changing_a_model.md` states it plainly: commercial models (GPT-5, Claude
+  Sonnet, Gemini) "have demonstrated robust capabilities in generating **structured output** for code
+  analysis tasks with large input", while most open-source models "face challenges with these complex
+  tasks", and local models are "suitable for experimentation and learning purposes (mainly for the `ask`
+  command), but not suitable for production-level code analysis". For production it recommends commercial
+  models. Our default is a `flash` model, and the failure we measured - an unstable finding set on a
+  large diff - is a structured-output failure at input size. This is the single most relevant line
+  upstream ships.
+- **Noise.** The FAQ recommends the **default configuration** for reducing noise, and lists score
+  thresholds and `extra_instructions` as the levers to *add* when feedback is too noisy. This bundle had
+  raised `num_max_findings` 4x above default and added our own `extra_instructions`, i.e. two noise
+  levers turned up - relevant context for the cascade.
+- **`reasoning_effort`.** Forwarded only to a model litellm's metadata calls reasoning-capable; add the ID
+  to `config.additional_reasoning_effort_models` otherwise, and adding it "surfaces that provider-side
+  error instead of the previous silent drop".
+- **`seed`.** "set positive value to fix the seed (and ensure temperature=0)". The docs make the pair
+  explicit but claim reproducibility without noting that a provider may accept `seed` and ignore it - ours
+  does (see the experiment above).
+- **Default `temperature = 0.2`**, with `no_temperature_models` for models that reject temperature
+  (o1/o3/o4-mini, `gpt-5.x-codex`, adaptive-thinking Claude).
+- **`model_reasoning`** - a "dedicated reasoning model for self-reflection", commented out in
+  `configuration.toml`: the model generates findings, then a follow-up call scores each 0-10 and drops the
+  incorrect ones. Unused here; it filters noise rather than stabilising generation.
+- **`duplicate_examples`** - documented for weak/local models as duplicating prompt examples "to help the
+  model to generate structured output". Verify it still exists before relying on it: it appears in exactly
+  one doc example and in no `.py` or in `configuration.toml`.
+- **`improve`'s `suggestions_score_threshold`** - a documented quality filter; the same
+  self-reflection/score mechanism as `model_reasoning`.
 
 ## Later
 

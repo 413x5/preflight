@@ -135,8 +135,13 @@ jobs:
               "require_risk_assessment is on again: the gate does not use risk_level (see ROADMAP)"
           assert "reasoning_effort" not in cfg, \
               "reasoning_effort is pinned again: pr-agent's own default applies (see ROADMAP)"
+          # `additional_reasoning_effort_models` is asserted absent too, though its message is the one
+          # place the reasoning behind that is contested: removing it makes reasoning_effort inert here
+          # (nothing is sent at all), while re-adding it would send a budget we have not chosen. That is an
+          # open decision in ROADMAP.md, not a settled one - so this assertion records the current choice
+          # rather than a principle.
           assert "additional_reasoning_effort_models" not in cfg, \
-              "additional_reasoning_effort_models is set again: it only exists to forward a pinned reasoning_effort"
+              "additional_reasoning_effort_models is set again: see the open decision in ROADMAP.md"
           assert "pr_code_suggestions" not in d, \
               "pr_code_suggestions is configured again: its chunk size only made the padding nudge louder"
           print("config parses:", cfg["model"], "->", cfg["fallback_models"])

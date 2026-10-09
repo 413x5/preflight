@@ -215,8 +215,15 @@ Note when testing the *gate*: `PREFLIGHT_GATE_ALLOW_ISSUES=1` relaxes key issues
 
 `ROADMAP.md` is the working document, and its **Now** and **Next** sections carry anything a previous
 session left unfinished - including work that is *implemented but uncommitted* in the working tree, which
-is invisible from `git log`. Read **Now** first; in **Next**, an item marked `[x]` is shipped but still
-carries an open question, and the **Still open** paragraph under it is the work.
+is invisible from `git log`. Read **Now** first. **Next** has two groups: **Experiments** (cheap,
+reversible, each phrased as a question with the result that would settle it) and **Open questions on
+shipped work** (`[x]` items whose still-open paragraph is the work). A second section, "What upstream's
+own docs say", records what pr-agent's shipped `_help_docs/` says about models and settings, so it is not
+re-derived.
+
+Two rules it follows, worth keeping: an experiment must state **what would falsify it**, and a lever that
+has been tested and rejected stays in the file **with its result** - re-testing `seed` because nobody
+recorded that it is inert on this endpoint would waste another hour.
 
 Do not assume a clean tree means a clean slate, and do not assume the last commit describes the current
 state. `git status` is the first thing to check in this repo.
@@ -244,6 +251,28 @@ decision journey that produced the line.
   review` with the default worktree scope" - a scope that had not been the default since the `commit` scope
   landed. Trimming that comment is what exposed the matching bug (the advisory warned on every
   default-scope commit), which no test had covered.
+
+## Each fact lives in exactly one file, chosen by audience
+
+Adding a finding to every file that could mention it is the same failure as writing a narrative comment:
+it multiplies the surface a reviewer must check, and the copies drift apart. Each document has one
+audience, and a fact belongs in the one that audience reads:
+
+| File | Audience and purpose | A fact belongs here when... |
+|---|---|---|
+| `README.md` | A new user | it is needed to install, run, or understand what this is |
+| `docs/DESIGN.md` | Someone asking "why is it built this way" | it is a mechanism or the reason a decision was made |
+| `docs/TROUBLESHOOTING.md` | An operator with a symptom | it is a symptom → cause → fix |
+| `AGENTS.md` | An agent changing this repo | it is a rule, trap, or invariant for editing |
+| `ROADMAP.md` | A future session picking up work | it is *not done yet*, or an open decision |
+| `CHANGELOG.md` | Someone asking "what changed" | it is history: what changed and why it changed |
+| `tests/README.md` | Someone auditing coverage | it is which case guards which requirement |
+| `files/*`, `*.toml` | Someone reading the code | it is the current invariant (see above) |
+
+**When a second file needs the same fact, it gets a pointer, not a copy**: one sentence naming the file
+that holds it. Measured cost of not doing this: the `reasoning_effort` forwarding rule ended up stated in
+full in five files, and the copies disagreed - two of them still claimed "pr-agent's `medium` default
+applies" after a probe showed no effort is sent at all. The rule is what makes a fact cheap to correct.
 
 ## Keep each round's change small, or the loop will not converge
 

@@ -242,8 +242,8 @@ itself the reason the fix above is a bound rather than a diagnosis.
 **The levers, in order of usefulness:**
 
 1. **Bring the reasoning output down.** The hang correlates with completion volume. `[config]
-   reasoning_effort` is the lever; `files/preflight.toml` leaves it unset, so pr-agent's `medium` applies
-   (the section below explains how to set it, and the trap if you do).
+   reasoning_effort` is the lever, but note it is currently inert: `files/preflight.toml` leaves it unset
+   AND unregistered, so no effort reaches the endpoint at all (the section below explains both).
 2. **`PREFLIGHT_SHUTDOWN_WAIT`** (env, default 120) bounds only the tail *after* the artifact exists. It
    is a safety net, not a fix, and it deliberately never bounds the review itself: a timeout that cut off
    a slow but valid review is the silent-truncation failure this project works hardest to avoid.
@@ -273,28 +273,15 @@ budget, and the same content can take ten times longer from one run to the next.
 
 `[config] reasoning_effort` is the lever, and there is a trap in it:
 
-- pr-agent forwards `reasoning_effort` **only** to a model litellm's bundled metadata calls
-  reasoning-capable. `cline-pass/*` is not in that table - the same gap that forces
-  `custom_model_max_tokens` - so the value is read, logged as the config default, and then **silently
-  dropped**. Confirmed by probing the constructed request: `reasoning_effort=None` with the default
-  config, `reasoning_effort='low'` once `[config] additional_reasoning_effort_models` names the model id.
-  If you set one, set both, or the lever goes inert with no error.
+**No `reasoning_effort` value reaches this endpoint**, which is why setting one changes nothing: the
+forwarding rule, the probe that confirmed it, and the current choice are in
+[`docs/DESIGN.md`](DESIGN.md) under "Where a review's time goes". Set it only alongside
+`[config] additional_reasoning_effort_models`, or it is read and silently dropped.
 
-`files/preflight.toml` sets **neither**, so pr-agent's `medium` default applies. Pinning `low` was tried and
-reverted, because the measurement behind it did not survive real content:
-
-| Setting | Forwarded? | Elapsed | Completion tokens | Findings |
-|---|---|---|---|---|
-| `medium` (pr-agent default) | no | 11.0 / 23.7 / 21.2s | 2,126 / 5,593 / 4,434 | 2 / 20 / 2 |
-| `low` | yes | 8.7 / 10.6 / 8.4s | 1,587 / 2,037 / 1,444 | 2 / 3 / 2 |
-
-Those are interleaved arms on **one synthetic 525-line diff**. Real reviews at `low` spent 23k-34k
-completion tokens across four consecutive runs (60-68% of each run's total) and ranged 1m19s-2m30s on
-similar diffs - so the table above is not a reliable predictor and is kept only as the method to reuse.
-
-If you change `reasoning_effort`, measure it on a real diff, interleaved, against `new=N/M` as well as wall
-clock: a cheaper round that reports fewer findings just moves the cost into a later round, which is the
-failure this loop exists to avoid.
+If you do set it, measure on a real diff, interleaved, against `new=N/M` as well as wall clock. A pin of
+`low` was tried on one synthetic 525-line diff and did not survive real content - a cheaper round that
+reports fewer findings just moves the cost into a later round. `ROADMAP.md` carries the numbers and the
+re-test.
 
 **Related, and also invisible by default:** pr-agent pins `config.temperature` (upstream default `0.2`)
 and its `seed` (default `-1`, which means unset). Neither is set by this bundle, so each review samples

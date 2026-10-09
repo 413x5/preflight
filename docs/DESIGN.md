@@ -243,19 +243,18 @@ characters reaching `review.md`, and the same diff has also completed in 11s / 2
 therefore looks like a slow provider when it may be reasoning volume.
 
 The lever is `[config] reasoning_effort`, and pr-agent forwards it **only** to a model its bundled litellm
-metadata calls reasoning-capable. `cline-pass/*` is not in that table, so the key is read, logged as the
-config default, and then silently never sent - it looks applied while every run uses the provider's own
-default. The escape hatch is `[config] additional_reasoning_effort_models`, naming the id explicitly; the
-two are only useful together.
+metadata calls reasoning-capable. `cline-pass/*` is not in that table, so the value is read, logged, and
+never sent - the escape hatch is `[config] additional_reasoning_effort_models`, naming the id explicitly,
+and the two are only useful together.
 
-`files/preflight.toml` sets **neither**, so pr-agent's `medium` default applies. Pinning `low` was tried and
-reverted: the measurement behind it came from one synthetic diff and did not hold on real content. See
-`ROADMAP.md` for what to re-measure before pinning it again, and `docs/TROUBLESHOOTING.md` for the numbers.
+`files/preflight.toml` sets **neither**, so the practical effect is that **no** effort reaches this endpoint
+- not pr-agent's `medium` default either. A probe of the constructed request confirmed it: adding
+`reasoning_effort` produced a byte-identical payload. `ROADMAP.md` carries the open decision on this;
+`docs/TROUBLESHOOTING.md` carries the measurements and the symptom.
 
-There is deliberately **no sampling pin**. `config.temperature` (upstream default 0.2) and `config.seed`
-(default -1, i.e. unset) are left alone, so reviews sample freely; see the convergence section for why
-that is a stated limit of `new=N/M` rather than an oversight. `seed` is the lever to reach for if the
-count ever needs to settle, at the cost of whatever coverage pinning removes.
+There is deliberately **no sampling pin**, and it is inert anyway: `config.temperature` (upstream default
+0.2) and `config.seed` (default -1, i.e. unset) are left alone, and this endpoint ignores `seed` even when
+set. Reviews therefore sample freely - the stated limit of `new=N/M` - and `ROADMAP.md` records the probes.
 
 ## The gate
 

@@ -263,12 +263,72 @@ set. Reviews therefore sample freely - the stated limit of `new=N/M` - and `ROAD
 | Exit | Meaning |
 |---|---|
 | 0 | pass |
-| 1 | `merge_recommendation = changes_required`, or key issues present |
+| 1 | `merge_recommendation = changes_required`, or a key issue on non-documentation |
 | 2 | security concerns present |
 | 3 | no review found |
 
-Env knobs: `PREFLIGHT_GATE_ALLOW_ISSUES=1` (ignore key issues), `PREFLIGHT_GATE_MAX_EFFORT=N` (fail above the
-estimated effort).
+Findings carry no severity field from the model, so the gate derives a tier from each finding's
+`relevant_file`: a documentation **file type** (`.md`, `.markdown`, `.rst`, `.adoc` by default) is
+**advisory** - printed and tagged, and never fatal on its own, so a doc typo cannot block a commit
+by itself; `merge_recommendation = changes_required` and `security_concerns` still fail - and everything
+else, including a finding with no file, is **blocking**. The path is normalised before it is matched
+(real payloads carry a trailing newline in `relevant_file`, and a naive `endswith('.md')` would classify
+those as code).
+
+A finding's tier is always printed, and it is kept consistent with the verdict: with `doc_blocks` a
+promoted finding prints `[blocking]`, and with `allow_issues` a waived one prints `[waived]` and is
+counted, because a label that disagrees with the exit code is worse than no label. For the same
+reason an empty entry anywhere in `doc_suffixes` invalidates the whole list rather than being
+dropped with the rest applied - a list the writer got wrong is one value.
+
+The rule is keyed on the **file type, not the directory**: executable code under `docs/` (a Sphinx
+`conf.py`, a build script) keeps blocking, so the tier cannot be defeated by where a file sits. `.txt`
+is deliberately not in the list: `requirements.txt` and `constraints.txt` are dependency manifests, and
+a finding such as "this pin is vulnerable" must keep failing the gate. `.mdx` is out too, being
+Markdown plus executable JSX. The remaining cost is the safe direction - an unusual prose extension is
+treated as code and blocks.
+
+**The tier is a heuristic over model output, and this is its limit.** `relevant_file` is produced by the
+same model being gated, so a finding whose path is mislabeled as documentation is tagged `[advisory]` and
+does not block. The gate cannot detect that on its own: it reads `review.json`, not the diff, so it has
+no independent list of changed files to check the path against. The fail-safe direction bounds the blast
+radius - an absent or unrecognised path blocks - so the exposure is a model that names non-documentation
+as documentation, not an ordinary code finding.
+
+## The gate's policy file
+
+Every gate tunable has a built-in default, so the gate needs no config to run. It is read from two
+optional TOML files - `$PREFLIGHT_HOME/gate.toml` (machine-wide), then `./.preflight-gate.toml` (repo,
+overriding) - and the `PREFLIGHT_GATE_*` environment variables override both, so a one-off invocation
+needs no edit. Keys: `doc_suffixes` (list), `doc_blocks`, `allow_issues` (bools), `max_effort` (int).
+
+**One rule, one place.** A value that is present but invalid is *reported* and the value already in
+force is *kept*. Every key names only how to validate its own value; the warning, the fallback and the
+precedence are not per-key, so a new key cannot invent its own failure behaviour. That is deliberate,
+because the alternative - drop the key, or fall back to a hardcoded default - silently changes
+enforcement, and this class recurred once per key while each had its own setter. The environment is
+applied through the same validator, so a one-off override cannot behave differently from the file value
+it replaces, and validation happens per value and left to right, so a bad value in the repo-local file
+cannot mask a valid one from the home file.
+
+| Situation | What happens |
+|---|---|
+| A value that is present but invalid - `doc_blocks = "ture"`, `max_effort = inf`/`3.5`/`true`, a non-numeric env override, or a boolean given as a number other than the `0`/`1` mirror | warns, naming the key and the reason, and keeps the value already in force. The `0`/`1` restriction matters: "any non-zero number is true" would let `allow_issues = 2` disable the key-issue check, which is the unsafe direction |
+| A suffix entry | validated against one WHITELISTED shape - a leading dot and a few name characters - rather than a list of rejected cases. A dotless `"txt"` is normalised to `.txt` (matching it raw would also match `notes.baktxt`, and the normalisation is reported); a path fragment, `.`, an empty string, or a non-string entry is invalid, and the previous list stands. The whitelist is the point: a blacklist of rejected inputs is unbounded, and every one of these was a bug found in turn |
+| An unknown key | warns; a typo'd key name is how a policy looks configured while doing nothing |
+| A key that is absent | nothing to say: the built-in default, or the value already in force, stands |
+| A malformed (unparseable) config file | warns and falls back. A crash is a non-zero exit, which the commit hook reads as "the review did not pass" |
+| A config file that is present but unreadable | warns and falls back; only an *absent* file is silent |
+| A `tomllib`-less interpreter (Python < 3.11) | no file is read; a present file warns, because a hard dependency would leave the gate unable to run, and it fails closed |
+| The repo-local filename | `.preflight-gate.toml`, not `.preflight/gate.toml` - pr-agent owns `.preflight/` via `--output`/`--json-output` |
+| The trust boundary | a committed `.preflight-gate.toml` can relax enforcement (`allow_issues`, wider `doc_suffixes`) without the operator setting anything. That is accepted, not overlooked: the hook is a local pre-commit check on the committer's own work, and a committer who wants to skip it already has `git commit --no-verify` / `PREFLIGHT_SKIP=1`. It is not a boundary against a hostile repository, and it should not be relied on as one |
+
+Because the tier and the effort ceiling are what decide a verdict, the config file is not cosmetic: a
+policy that silently failed to load would leave a repo believing its rules were in force. `REQ-HOOK-39`
+pins the precedence in both directions and the rule above, driven from a table: one row per key, with
+the two wrong behaviours - dropping the key to a hardcoded default, or applying the invalid value -
+chosen so that each row's exit code differs from both. A new key needs a row there rather than another
+bespoke assertion.
 
 `preflight review` runs the same check to record `gate.verdict` in `review.meta.json`, so the commit hook
 and the gate can never disagree about what counts as a pass.

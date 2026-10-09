@@ -72,6 +72,7 @@ can never miss anything".
 | `files/VERSION` | The bundle version, single source of truth. `preflight --version` and `install.sh` read it; CI fails if it, the `CHANGELOG` heading, and `--version` disagree |
 | `files/preflight.toml` | The global config template (model, provider knobs, review caps) |
 | `files/ensure-link.sh`, `files/secrets.toml.example` | Secrets relink helper; template with an empty key |
+| `files/gate.toml.example` | Template for `preflight-gate`'s policy (`doc_suffixes`, `doc_blocks`, `allow_issues`, `max_effort`); installed only if `$PREFLIGHT_HOME/gate.toml` is absent |
 | `AGENTS-review-snippet.md` | The block pasted into a *consumer* repo's `AGENTS.md` |
 | `tests/run.sh`, `tests/sample/` | Integration tests for the hook; the fixture they build on |
 | `docs/DESIGN.md`, `docs/TROUBLESHOOTING.md` | How/why it works; symptoms and fixes |
@@ -150,6 +151,7 @@ fails.
 | Syntax (hooks/tests are POSIX `sh`) | `for f in files/preflight-hook files/githooks/pre-commit files/githooks/post-commit tests/run.sh; do sh -n "$f" || echo "FAIL $f"; done` |
 | Installer into a throwaway prefix | `PREFLIGHT_HOME=$(mktemp -d)/cfg PREFLIGHT_BIN_DIR=$(mktemp -d) PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 ./install.sh` |
 | Generated config is valid TOML | `python3 -c "import tomllib;print(tomllib.load(open('CFG/preflight.toml','rb'))['config'])"` |
+| Gate policy template is valid TOML | `python3 -c "import tomllib;print(tomllib.load(open('files/gate.toml.example','rb')))"` |
 | Commit-hook integration tests | `./tests/run.sh hook` |
 | Selfcheck (the suite against a neutered hook) | `./tests/run.sh selfcheck` |
 | Version is consistent | `v=$(head -n1 files/VERSION); grep -q "^## \[$v\]" CHANGELOG.md && ./files/preflight --version` |

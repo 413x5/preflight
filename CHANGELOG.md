@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`preflight-gate`'s policy is configurable, with machine, repo and environment layers.** The gate's
+  tunables - which file types count as documentation (`doc_suffixes`), whether a documentation finding
+  blocks (`doc_blocks`), whether key issues are ignored (`allow_issues`), and the effort ceiling
+  (`max_effort`) - now come from two optional TOML files: `$PREFLIGHT_HOME/gate.toml` (created from
+  `files/gate.toml.example` on install, only if absent) and a repo-local `./.preflight-gate.toml` that
+  overrides it. The `PREFLIGHT_GATE_*` environment variables still override both, so nothing that worked
+  before changes. Every key has a built-in default. A malformed file warns and falls back rather than
+  crashing (a crash is a non-zero exit, which the commit hook reads as "the review did not pass"), and on
+  a Python older than 3.11 - where stdlib `tomllib` is unavailable - no file is read and a present file
+  warns, because an unrunnable gate would fail closed and block every commit. Every key in the shipped
+  template is commented out, so an untouched install and no file behave identically and the built-in
+  defaults stay the single source of truth; a live key would freeze today's default into every machine
+  and silently override a later change to it.
+
+  One rule covers every key: a value that is *present but invalid* is reported and the value already
+  in force is kept - never silently dropped, and never coerced permissively - so a repo cannot come to
+  believe its policy is loaded when it is not. The keys name only how to validate their own value;
+  the warning, the fallback and the precedence are shared, so a new key cannot invent its own failure
+  behaviour. Each value's accepted domain is a WHITELIST rather than a list of rejected cases: a
+  suffix must match one extension shape (a dotless `"txt"` is normalised to `.txt` and reported; a
+  path fragment, `.`, an empty string or a non-string entry is invalid), and a boolean accepts
+  `true`/`false` and the `1`/`0` mirror only - "any non-zero number is true" would let
+  `allow_issues = 2` disable the key-issue check. A blacklist is unbounded, and each of those was a
+  bug found in turn. A finding's tier is kept consistent with the verdict - a waived key issue prints
+  `[waived]` and is counted rather than still reading `[blocking]` - and an empty `doc_suffixes`
+  entry invalidates the whole list instead of being dropped with the rest applied. Guarded by
+  `REQ-HOOK-39`, whose invalid-value cases are driven from a table rather than per-key assertions.
+- **Findings on documentation no longer block a commit.** pr-agent's finding schema has no severity
+  field, so `preflight-gate` failed on every finding alike - a typo in a README counted the same as a
+  bug in the hook. The gate now derives a tier from each finding's **file type**: documentation
+  (`.md`, `.markdown`, `.rst`, `.adoc`) is **advisory** - still printed, tagged
+  `[advisory]`, and counted separately - while everything else, including code under `docs/` and a
+  `requirements.txt`, blocks as before. "Advisory" means the finding does not fail the gate on its own:
+  `merge_recommendation = changes_required` and `security_concerns` still fail regardless of tier. Because the tier is applied inside the gate, it reaches the commit hook for
+  free: `preflight` records the gate's exit as the sidecar verdict, and the hook reads that. Advisory by
+  default, so the old strict behaviour is `PREFLIGHT_GATE_DOC_BLOCKS=1`. The path is normalised before
+  matching, since real payloads carry a trailing newline in `relevant_file` (`'README.md\n'`), which a
+  naive `endswith('.md')` classified as code. Guarded by `REQ-HOOK-38`, whose mutations were each
+  confirmed to fail the case.
 - **`preflight`'s summary line now carries `risk=` and `merge=`.** `merge_recommendation` is one of the
   four fields `preflight-gate` fails on, and it previously appeared only in the gate's own output - so
   `preflight review` could report a change that the gate would then refuse, discoverable only by running a

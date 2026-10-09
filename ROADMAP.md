@@ -20,6 +20,21 @@ Small and ready - no design needed, no experiment to settle first.
 
 Shipped on `main`; kept for the reasoning behind each change, not as work to pick up.
 
+- [x] **Give findings a severity tier, so a doc typo does not block a commit.** Implemented in
+      `preflight-gate`: the tier is derived from each finding's **file type**, because pr-agent's schema
+      has no severity field to read. Documentation (`.md`, `.markdown`, `.rst`, `.adoc`) is
+      **advisory** - printed and tagged, but not fatal; everything else, including a finding with no
+      file, blocks as before. The rule is keyed on the file type rather than the directory, so code under
+      `docs/` still blocks and the tier cannot be defeated by where a file sits; `.txt` is excluded
+      because `requirements.txt` is a dependency manifest, not prose. The default is advisory, so the
+      strict behaviour the gate had before is one       variable away (`PREFLIGHT_GATE_DOC_BLOCKS=1`, or `doc_blocks` in the gate's config file).
+      The path is normalised first: values arrive with a trailing newline (`'README.md\n'`), and a naive
+      `endswith('.md')` classified every doc as code.
+
+      The tier decides the *verdict*, so it propagates to the commit hook for free: `preflight` records
+      `preflight-gate`'s exit as the sidecar verdict, and the hook reads that. Guarded by `REQ-HOOK-38`
+      (seven single-site mutations confirmed), plus a CI assertion in the gate-shape step.
+
 - [x] **Make the bundle's version answerable, and stop two silent failures** (found by reviewing a
       consuming repo's session log). `preflight --version` / `--help` (and `preflight-gate --help`), with
       the version single-sourced in `files/VERSION` and CI failing if it, the `CHANGELOG` heading and
@@ -134,14 +149,6 @@ Wanted; needs design, or an experiment to settle. Two groups:
       feedback is too noisy. `num_max_findings = 20` (4x the default) and our `extra_instructions` were
       those two levers applied in the wrong direction, so the cascade was not only sampling variance -
       two noise knobs were deliberately turned up.
-
-- [ ] **Give findings a severity tier, so a doc typo does not block a commit.** pr-agent's finding schema
-      has **no severity field** (`relevant_file`, `issue_header`, `issue_content`, `start_line`,
-      `end_line`), so `preflight-gate` treats every finding alike. A deterministic tier computed from
-      `relevant_file` - code and `tests/**` blocking, `*.md`/`docs/**` advisory, unknown blocking - was
-      designed and is **not implemented**. Any classifier must normalise the path first: values arrive with
-      a trailing newline (`'README.md\n'`), so a naive `endswith('.md')` classifies every doc as code and
-      the advisory tier would never fire.
 
 ### Open questions on shipped work
 

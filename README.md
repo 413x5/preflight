@@ -167,7 +167,7 @@ Use the **relative** hooks path - an absolute one breaks git worktrees. See
 
 - `~/.local/bin/{preflight,preflight-pr,preflight-gate}` — the helpers.
 - `~/.config/preflight/VERSION` — the installed bundle version (`preflight --version` reads it).
-- `~/.config/preflight/{preflight.toml,ensure-link.sh,AGENTS-review-snippet.md,preflight-hook}` — config + helpers.
+- `~/.config/preflight/{preflight.toml,gate.toml,ensure-link.sh,AGENTS-review-snippet.md,preflight-hook}` — config + helpers (`gate.toml` is created only if missing).
 - `~/.config/preflight/githooks/{pre-commit,post-commit}` — the example hooks to copy into a repo's `.githooks/`.
 - `~/.config/preflight/.secrets.toml` — created only if missing, chmod 600.
 - A symlink from that secrets file into the PR-Agent package's `settings/` dir.

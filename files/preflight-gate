@@ -4,8 +4,10 @@
 #   preflight-gate [path-to-review.json]   (default: ${PREFLIGHT_DIR:-.preflight}/review.json)
 #
 # Exit: 0 = pass | 1 = changes required / key issues | 2 = security concerns | 3 = no review
+# Config:  $PREFLIGHT_HOME/gate.toml, then ./.preflight-gate.toml (repo-local, overrides it)
 # Env:  PREFLIGHT_GATE_ALLOW_ISSUES=1  ignore key issues (security/merge-rec still apply)
 #       PREFLIGHT_GATE_MAX_EFFORT=N    fail when estimated_effort_to_review exceeds N
+#       PREFLIGHT_GATE_DOC_BLOCKS=1    count documentation findings as blocking (default: advisory)
 set -euo pipefail
 json="${1:-${PREFLIGHT_DIR:-.preflight}/review.json}"
 
@@ -24,15 +26,202 @@ Exit:   0  pass
         3  no review yet (run 'preflight review' first)
 
 Environment:
-  PREFLIGHT_GATE_ALLOW_ISSUES=1   ignore key issues (security and merge_recommendation still fail)
+  PREFLIGHT_GATE_ALLOW_ISSUES=1   ignore key issues (security and merge_recommendation still fail).
+                                  Waived findings are labelled `[waived]` and counted, so a PASS they
+                                  produced is not mistaken for a review with nothing to say
   PREFLIGHT_GATE_MAX_EFFORT=N     fail when estimated_effort_to_review exceeds N
+  PREFLIGHT_GATE_DOC_BLOCKS=1     count findings on documentation as blocking
+
+Configuration:
+  Optional, and every key has a built-in default. Two TOML files are read, the later overriding the
+  earlier, and the environment variables above override both:
+
+    $PREFLIGHT_HOME/gate.toml    machine-wide (default ~/.config/preflight/gate.toml)
+    ./.preflight-gate.toml       repo-local, for policy that differs per repository
+
+  Keys: doc_suffixes (list), doc_blocks (bool), allow_issues (bool), max_effort (int).
+
+Findings on a documentation file (`.md`, `.markdown`, `.rst`, `.adoc` by default - see
+`doc_suffixes`) are ADVISORY by default: they are printed and counted, but they do not fail the gate,
+so a typo in a README does not fail the gate on its own (merge_recommendation and security_concerns
+still fail regardless). Any other path - including code under `docs/`, or a `requirements.txt` - blocks.
 EOF
     exit 0 ;;
 esac
 
 if [ ! -f "$json" ]; then echo "preflight-gate: no review at $json (run 'preflight review' first)" >&2; exit 3; fi
 python3 - "$json" <<'PY'
-import json, os, sys
+import json, os, re, sys
+
+# ---- policy -------------------------------------------------------------------------------------
+# The gate's tunables come from an optional TOML file (home, then a repo-local override), with the
+# environment taking precedence, because the environment is what a one-off invocation can set without
+# editing a file. Every value has a built-in default, so no config file is required to run.
+#
+# TOML is parsed with `tomllib`, which is stdlib from Python 3.11. On an older interpreter that import
+# fails, and a hard dependency would mean the gate cannot run at all - and an unrunnable gate fails
+# closed, i.e. it would block every commit on that machine. So a failed import degrades to "no config
+# file", which is exactly the built-in defaults.
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
+DEFAULTS = {
+    # Prose formats. `.txt` is deliberately absent: `requirements.txt` is a dependency manifest, and a
+    # finding there ("this pin is vulnerable") must keep failing the gate. `.mdx` is absent too - it is
+    # Markdown plus executable JSX, so a component bug belongs to code. A misclassified prose file
+    # blocks, which is the safe direction; `doc_suffixes` in a config file is how a repo that differs
+    # says so.
+    'doc_suffixes': ('.md', '.markdown', '.rst', '.adoc'),
+    'doc_blocks': False,
+    'allow_issues': False,
+    'max_effort': None,
+}
+
+def _config_files():
+    home = os.path.join(os.environ.get('PREFLIGHT_HOME') or os.path.expanduser('~/.config/preflight'), 'gate.toml')
+    # The repo-local file is deliberately NOT `.preflight/gate.toml`: pr-agent owns the `.preflight`
+    # directory through `--output`/`--json-output`.
+    return [home, '.preflight-gate.toml']
+
+def _warn(message):
+    print(f'preflight-gate: warning: {message}', file=sys.stderr)
+
+# ONE rule, applied in ONE place: a value that is present but invalid is reported and the value already
+# in force is kept. That direction matters - the alternative (drop the key, or fall back to a hardcoded
+# default) silently changes enforcement, which is how a repo comes to believe its policy is loaded when
+# it is not. Each key names only how to validate its OWN value; the reporting and the fallback are not
+# per-key, which is what stops a new key from inventing its own failure behaviour.
+_INVALID = object()
+
+def _validate_bool(value):
+    if isinstance(value, bool):
+        return value, None
+    # Only the integer mirror is accepted, and only 0/1: TOML parses a bare `1` as an int, so
+    # `doc_blocks = 1` mirrors the environment variable. Any other number (`2`, `-1`, `nan`) or a float
+    # is not a boolean, and treating it as true would be the unsafe direction on `allow_issues`.
+    if isinstance(value, int):
+        if value in (0, 1):
+            return value == 1, None
+        return _INVALID, 'not a boolean'
+    if isinstance(value, str) and value.strip().lower() in ('1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'):
+        return value.strip().lower() in ('1', 'true', 'yes', 'on'), None
+    return _INVALID, 'not a boolean'
+
+def _validate_int(value):
+    # A bool is not an integer here even though `int(True)` is 1: `max_effort = true` would otherwise
+    # install a ceiling of 1 and fail every review over it. OverflowError covers `inf`/`1e999`, a TOML
+    # float that `int()` refuses; a non-integral float is rejected rather than truncated.
+    if isinstance(value, bool):
+        return _INVALID, 'not an integer'
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return _INVALID, 'not an integer'
+    if isinstance(value, float) and value != parsed:
+        return _INVALID, 'not an integer'
+    return parsed, None
+
+# A suffix must be a string, and the RESULT must look like one extension. This is a whitelist, not a
+# list of rejected cases: anything that does not match is invalid, which is what makes the domain
+# finitely testable. The rejected cases are worth naming because each was a bug: an empty string
+# (`endswith('')` matches every path), a dotless `"txt"` (matches `notes.baktxt`), a path fragment
+# (`endswith('docs/')` matches everything under it), and a non-string entry like `1`, which `str()`
+# would otherwise coerce into the plausible-looking suffix `.1`.
+_SUFFIX_RE = re.compile(r'^\.[a-z0-9][a-z0-9._+-]*$')
+
+def _validate_suffixes(value):
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return _INVALID, 'not a list of suffixes'
+    kept = []
+    added_dot = 0
+    for entry in value:
+        if not isinstance(entry, str):
+            return _INVALID, f'{entry!r} is not a string'
+        text = entry.strip().lower()
+        # ANY empty entry invalidates the whole list, rather than being dropped with the rest applied: a
+        # list the writer got wrong is one value, and partially honouring it is the kind of silent
+        # difference this rule exists to avoid.
+        if not text:
+            return _INVALID, 'an empty entry is not a file extension'
+        if not text.startswith('.'):
+            text = '.' + text
+            added_dot += 1
+        if not _SUFFIX_RE.match(text):
+            return _INVALID, f'{text!r} is not a file extension'
+        kept.append(text)
+    if not kept:
+        return _INVALID, 'no usable suffixes'
+    if added_dot:
+        return tuple(kept), f'added a leading dot to {added_dot} entr{"y" if added_dot == 1 else "ies"}'
+    return tuple(kept), None
+
+_VALIDATORS = {
+    'doc_suffixes': _validate_suffixes,
+    'doc_blocks': _validate_bool,
+    'allow_issues': _validate_bool,
+    'max_effort': _validate_int,
+}
+
+def _apply(cfg, key, source, value):
+    validated, note = _VALIDATORS[key](value)
+    if validated is _INVALID:
+        _warn(f'ignoring {key} in {source}: {note} (keeping {cfg[key]!r})')
+        return
+    if note:
+        _warn(f'{key} in {source}: {note}')
+    cfg[key] = validated
+
+def _merge(cfg, source, values):
+    if not isinstance(values, dict):
+        return
+    for key, value in values.items():
+        # An unknown key is reported, not silently kept: a typo'd key name is how a policy looks
+        # configured while doing nothing.
+        if key not in _VALIDATORS:
+            _warn(f'ignoring unknown key {key!r} in {source}')
+            continue
+        _apply(cfg, key, source, value)
+
+def _read_file(cfg, path):
+    if tomllib is None:
+        # No stdlib TOML on this interpreter (Python < 3.11), so the gate must still run - but a file
+        # that is present and ignored is the same "policy never loaded" case every other path reports.
+        if os.path.exists(path):
+            _warn(f'ignoring {path}: this python3 has no tomllib (3.11+), so the policy file cannot be read')
+        return
+    try:
+        with open(path, 'rb') as fh:
+            loaded = tomllib.load(fh)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        _warn(f'ignoring unreadable config {path}: {exc}')
+        return
+    except Exception:
+        # Malformed TOML. A crash is a non-zero exit, which the commit hook reads as "the review did
+        # not pass" - so the previous values stay in force and the file is reported.
+        _warn(f'ignoring unparseable config {path}')
+        return
+    _merge(cfg, path, loaded)
+
+def load_policy():
+    cfg = dict(DEFAULTS)
+    for path in _config_files():
+        _read_file(cfg, path)
+    # The environment is applied last, through the same validator, so a one-off override cannot behave
+    # differently from the file value it replaces.
+    for key, var in (('allow_issues', 'PREFLIGHT_GATE_ALLOW_ISSUES'),
+                     ('doc_blocks', 'PREFLIGHT_GATE_DOC_BLOCKS'),
+                     ('max_effort', 'PREFLIGHT_GATE_MAX_EFFORT')):
+        if os.environ.get(var):
+            _apply(cfg, key, var, os.environ[var])
+    return cfg
+
+# ---- finding fields -----------------------------------------------------------------------------
 
 # The review is model output, so each field's JSON type is whatever the model chose. Coerce every
 # field to text: a crash here is not a neutral failure - the hook reads any non-zero exit as "did not
@@ -59,6 +248,7 @@ except Exception as exc:
     print(f'preflight-gate: cannot read {sys.argv[1]}: {exc}', file=sys.stderr)
     sys.exit(3)
 
+POLICY = load_policy()
 # Guard the SHAPE as well as the parse: valid JSON that is not a review object (`[1,2,3]`, or
 # `"review": "..."`) crashed with an AttributeError and blocked commits the same way. A wholly ABSENT
 # `review` key keeps its meaning (no findings, fields n/a), but a key present and not an object -
@@ -92,12 +282,49 @@ if not isinstance(issues, list):
     sys.exit(3)
 sec = as_text(r.get('security_concerns'))
 is_no = lambda v: v.lower() in ('', 'no', 'none', 'n/a', 'false')
-print(f"preflight-gate: effort={eff} risk={risk or 'n/a'} merge={rec or 'n/a'} tests={tests or 'n/a'} issues={len(issues)} security={'yes' if not is_no(sec) else 'no'}")
-for it in issues:
+
+# A finding's severity is deterministic, derived from its FILE TYPE, because the model's schema has no
+# severity field to read (see docs/DESIGN.md). A documentation file is advisory wherever it lives, and
+# code under `docs/` (a Sphinx `conf.py`, a build script) keeps blocking - a location rule would make the
+# tier defeatable by the directory a file sits in.
+DOC_SUFFIXES = POLICY['doc_suffixes']
+
+def is_doc(path):
+    return as_text(path).lower().endswith(DOC_SUFFIXES)
+
+def finding_path(it):
+    return as_text(it.get('relevant_file')) if isinstance(it, dict) else ''
+
+# Reading the file is what the gate is FOR, so the caller sees every finding and the tier that decided
+# its fate; the `blocking=/advisory=` split then makes the verdict legible from the line alone.
+tiers = ['advisory' if is_doc(finding_path(it)) else 'blocking' for it in issues]
+# Advisory by default, so a doc typo does not fail the gate on its own; `doc_blocks` makes the strict
+# behaviour - what
+# the gate did before this tier existed - a config value away. The override rewrites the TIERS, not only
+# the counters, so a promoted finding is labelled `[blocking]` on the line the reader sees: a label that
+# disagreed with the exit code would be worse than no label (found by reviewing this with the tool).
+if POLICY['doc_blocks']:
+    tiers = ['blocking'] * len(issues)
+# The same rule for the other opt-out: with key issues waived, a finding that no longer fails the gate
+# must not still be labelled as if it did. Leaving the label alone is the bug the doc_blocks override
+# above was written to avoid, so  gets the same treatment instead of a different one.
+if POLICY['allow_issues']:
+    tiers = ['waived' if t == 'blocking' else t for t in tiers]
+n_blocking = tiers.count('blocking')
+n_advisory = tiers.count('advisory')
+n_waived = tiers.count('waived')
+
+line = (f"preflight-gate: effort={eff} risk={risk or 'n/a'} merge={rec or 'n/a'} tests={tests or 'n/a'}"
+        f" issues={len(issues)}")
+if n_advisory or n_waived:
+    line += f" blocking={n_blocking} advisory={n_advisory} waived={n_waived}"
+line += f" security={'yes' if not is_no(sec) else 'no'}"
+print(line)
+for it, tier in zip(issues, tiers):
     if isinstance(it, dict):
-        print(f"preflight-gate:   - {as_text(it.get('relevant_file'))}: {as_text(it.get('issue_header'))}")
+        print(f"preflight-gate:   - {as_text(it.get('relevant_file'))}: {as_text(it.get('issue_header'))} [{tier}]")
     else:
-        print(f"preflight-gate:   - {as_text(it)}")
+        print(f"preflight-gate:   - {as_text(it)} [{tier}]")
 # Effort can arrive as an int, a float or a numeric string; anything else is simply not comparable, so
 # the clamp is skipped rather than crashing the gate. OverflowError is in the tuple because JSON has
 # no infinity: a literal like 1e999 (or a 400-digit integer) parses to a non-finite float, and
@@ -107,17 +334,22 @@ try:
     eff_n = int(float(eff))
 except (TypeError, ValueError, OverflowError):
     eff_n = None
-try:
-    me = int(os.environ['PREFLIGHT_GATE_MAX_EFFORT']) if os.environ.get('PREFLIGHT_GATE_MAX_EFFORT') else None
-except ValueError:
-    me = None
+me = POLICY['max_effort']
 if me is not None and eff_n is not None and eff_n > me:
     print(f"preflight-gate: FAIL effort {eff_n} > {me}"); sys.exit(1)
 if not is_no(sec):
     print('preflight-gate: FAIL security concerns present'); sys.exit(2)
 if rec.lower() == 'changes_required':
     print('preflight-gate: FAIL merge_recommendation=changes_required'); sys.exit(1)
-if issues and os.environ.get('PREFLIGHT_GATE_ALLOW_ISSUES', '') not in ('1', 'true', 'yes'):
+if issues and n_blocking and not POLICY['allow_issues']:
     print('preflight-gate: FAIL key issues present'); sys.exit(1)
+if n_advisory:
+    # Reported even on a pass: the findings are real, they are simply not fatal, and `doc_blocks` (or
+    # `PREFLIGHT_GATE_DOC_BLOCKS=1`) is how the reader asks for them to be.
+    print(f'preflight-gate: note: {n_advisory} advisory finding(s) on documentation did not fail the gate')
+if n_waived:
+    # The waiver is an explicit opt-out, so say so: a reader seeing `PASS` otherwise cannot tell that a
+    # key issue was reported and discarded.
+    print(f'preflight-gate: note: {n_waived} key issue(s) waived (allow_issues)')
 print('preflight-gate: PASS'); sys.exit(0)
 PY

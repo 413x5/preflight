@@ -115,6 +115,17 @@ The review ran but the gate verdict was not a pass - `preflight-gate` decides th
 security concerns, `changes_required`, or an effort over the limit). Read `.preflight/review.md`, fix the
 findings, and re-review. The artifacts are left in place on a block precisely so you can read them.
 
+**A finding on documentation does not reach this point.** `preflight-gate` derives a tier from each
+finding's file type and treats documentation (a `.md`/`.markdown`/`.rst`/`.adoc` file) as
+**advisory**: it is printed and tagged `[advisory]`, and it does not fail the gate on its own, so a typo
+in a README no longer blocks a commit by itself. Code under `docs/` and a `requirements.txt` still block,
+and `merge_recommendation = changes_required` fails the gate regardless of tier. A finding on code, or one with no file attached, blocks as before. Set `PREFLIGHT_GATE_DOC_BLOCKS=1` (or `doc_blocks = true` in the gate's config file, see
+`preflight-gate --help`) to make documentation findings block too.
+
+The gate's policy - which file types count as documentation, whether they block, whether key issues are
+ignored, and the effort ceiling - lives in `$PREFLIGHT_HOME/gate.toml` and an optional repo-local
+`.preflight-gate.toml` that overrides it; the `PREFLIGHT_GATE_*` variables still override both.
+
 If you disagree with a finding, opt out deliberately rather than defeating the hook. The recorded verdict
 comes from the gate and is written **only** by `preflight review`, so to turn it into a pass you must
 re-run the review with the gate's opt-out exported:

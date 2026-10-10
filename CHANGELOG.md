@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+## [0.3.0] - 2026-10-11
+
 ### Added
 
 - **The installer now pins pr-agent instead of tracking the latest release**, and exposes
@@ -20,6 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drift. (Note `uv tool install` on an existing install reports "already installed" and does not upgrade,
   so installations that predate this change were already effectively frozen - the pin closes the gap for
   fresh installs.)
+
+### Changed
+
+- **`AGENTS-review-snippet.md` now states only the invariants of using `preflight`** - the loop and the
+  gate's exits, the scopes and which the hook can enforce, the artifact fields, how to read `new=` and
+  `coverage=`, the hook recipe, and the `Code review` context recipe. The three process essays that had
+  grown in it (the stop condition, "fix the defect, not the narrative", and how to verify a claim) are
+  gone, along with the measurements and history they carried - a consuming repo was being handed this
+  bundle's own development discipline, and the reasoning already lives in `docs/DESIGN.md` and
+  `AGENTS.md`, where the people who need it read it. The bundle-location section now says to re-paste the
+  snippet from the **local installation** (`~/.config/preflight/AGENTS-review-snippet.md`) rather than
+  from the repository, because the installed copy is the one that matches the helper actually on the
+  machine - a newer snippet over an older bundle would document commands that are not there - and it shows
+  how to compare the installed version with the repository's before deciding to upgrade. `install.sh`'s
+  closing pointer names the surviving "Make it enforced" heading.
 
 ### Fixed
 
@@ -544,6 +563,7 @@ Initial release: a deployable, machine-local PR-Agent review setup for the Cline
   initial commits plus the `v0.1.0` tag are **GPG-signed** (the signed history replaces earlier unsigned
   commits). Commits here are signed by `commit.gpgsign=true` and carry no `Co-authored-by` trailer.
 
-[Unreleased]: https://github.com/413x5/preflight/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/413x5/preflight/releases/tag/v0.3.0
 [0.2.0]: https://github.com/413x5/preflight/releases/tag/v0.2.0
 [0.1.0]: https://github.com/413x5/preflight/releases/tag/v0.1.0

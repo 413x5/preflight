@@ -162,4 +162,4 @@ say "To make a repo REFUSE a commit that was not reviewed, commit the hooks and 
 say "  mkdir -p .githooks && install -m 0755 $cfg/githooks/* .githooks/ && git add .githooks"
 say "  git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit   # git IGNORES a non-executable hook"
 say "  git config core.hooksPath .githooks      # relative, so it also works in every worktree"
-say "See the 'enforce it' section of AGENTS-review-snippet.md."
+say "See 'Make it enforced' in AGENTS-review-snippet.md."

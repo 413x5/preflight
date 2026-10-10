@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+## [0.3.0] - 2026-10-11
+
 ### Added
 
 - **The installer now pins pr-agent instead of tracking the latest release**, and exposes
@@ -559,6 +563,7 @@ Initial release: a deployable, machine-local PR-Agent review setup for the Cline
   initial commits plus the `v0.1.0` tag are **GPG-signed** (the signed history replaces earlier unsigned
   commits). Commits here are signed by `commit.gpgsign=true` and carry no `Co-authored-by` trailer.
 
-[Unreleased]: https://github.com/413x5/preflight/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/413x5/preflight/releases/tag/v0.3.0
 [0.2.0]: https://github.com/413x5/preflight/releases/tag/v0.2.0
 [0.1.0]: https://github.com/413x5/preflight/releases/tag/v0.1.0

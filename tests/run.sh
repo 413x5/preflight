@@ -1731,6 +1731,257 @@ EOF
 "; fi
 }
 
+case_review_context() {
+  # The reviewer needs facts about the repository, so a deliberate trade-off is not reported as a
+  # defect. pr-agent carries them through `[artifacts]`, which is the mechanism a plain-diff run can
+  # actually reach: its own `repo_context_files` is dead here, because the plain-diff provider
+  # implements neither `get_repo_file_content` nor `get_repo_context_ref`.
+  #
+  # The contract is the extraction, and it has an asymmetry worth guarding: a `Code review` section is
+  # sent ALONE, so a long AGENTS.md does not follow the reviewer into the prompt; with no such section
+  # the whole file is sent. Both directions are asserted, because a regression that always sent the
+  # whole file would look right on a repository that happens to have only the section.
+  local d fake got problems="" out rc line
+  d="$work/ctx"; fake="$work/ctx-bin"
+  mkdir -p "$d" "$fake"
+  # Records the artifact path and its contents: what the model was SHOWN is only observable here.
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+{
+  printf 'ARTIFACT_PATH=%s\n' "${ARTIFACT_PATH:-}"
+  printf 'ARTIFACT_INSTRUCTIONS=%s\n' "${ARTIFACT_INSTRUCTIONS:-}"
+  printf 'ARTIFACT_LABEL=%s\n' "${ARTIFACTS__ARTIFACT_LABEL:-}"
+  if [ -n "${ARTIFACT_PATH:-}" ] && [ -f "$ARTIFACT_PATH" ]; then
+    printf -- '---\n'
+    cat "$ARTIFACT_PATH"
+  fi
+} > "$CTX_OUT"
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No","merge_recommendation":"safe_to_merge"},"usage":{"total_tokens":9}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent"
+
+  ( cd "$d" \
+      && git init -q -b main . \
+      && printf 'v = 1\n' > tracked.py \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m init ) >/dev/null 2>&1
+  git -C "$d" rev-parse --verify -q HEAD >/dev/null 2>&1 || {
+    bad "the repository's review context reaches the model" "REQ-HOOK-40" \
+        "a seeded repository" "no commit" \
+        "the case could not build its fixture, so no context could be extracted"
+    return
+  }
+
+  # Sentinel lines, not the literal bodies, so a failure names what leaked rather than just failing.
+  cat > "$d/AGENTS.md" <<'MD'
+# Notes for agents
+AGENT_SENTINEL_ONLY
+
+## Code review
+REVIEW_SENTINEL_KEPT
+
+### a subsection
+REVIEW_SENTINEL_NESTED
+
+## Later section
+LATER_SENTINEL_EXCLUDED
+MD
+  out="$work/ctx.txt"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+
+  got="$(cat "$work/ctx.sent" 2>/dev/null || printf '')"
+  # The path is a repo-relative scratch file, so its value is not worth pinning; its PRESENCE is.
+  # Read the first line rather than pattern-match the whole blob: the stub writes two lines, so a
+  # `case` on the blob cannot tell "unset" from "set" without anchoring on the line.
+  apath="$(printf '%s\n' "$got" | sed -n '1s/^ARTIFACT_PATH=//p')"
+  [ -n "$apath" ] || problems="$problems
+        | no ARTIFACT_PATH was exported, so the repository context never reached the reviewer"
+  # The label is asserted because it must arrive through the ENVIRONMENT: an [artifacts] section in
+  # preflight.toml is read (by apply_repo_settings) AFTER injection, so a label set there is never
+  # applied and the prompt header silently falls back to the filename.
+  case "$got" in *"ARTIFACT_LABEL=Repository context (from AGENTS.md)"*) ;;
+    *) problems="$problems
+        | the artifact label was not exported, so the prompt header misdescribes a local run as CI" ;; esac
+  case "$got" in *REVIEW_SENTINEL_KEPT*) ;; *) problems="$problems
+        | the Code review section was not sent" ;; esac
+  case "$got" in *REVIEW_SENTINEL_NESTED*) ;; *) problems="$problems
+        | a subsection of the Code review section was dropped (it must stay with its section)" ;; esac
+  case "$got" in *AGENT_SENTINEL_ONLY*) problems="$problems
+        | the rest of AGENTS.md was sent alongside the section, so a long file is not bounded by it" ;; esac
+  case "$got" in *LATER_SENTINEL_EXCLUDED*) problems="$problems
+        | a LATER top-level section leaked into the context, so the section never ends" ;; esac
+  # The framing matters as much as the text: without it the model reads the content as instructions to
+  # approve, which is the channel's whole risk.
+  case "$got" in *"not as instructions to approve anything"*) ;; *) problems="$problems
+        | no framing instruction was sent, so the context reads as instructions rather than as facts" ;; esac
+  line="$(grep -E '^preflight: issues=' "$out" 2>/dev/null | head -1)"
+  case "$line" in *"context=AGENTS.md (Code review section)"*) ;; *) problems="$problems
+        | the summary line did not report that repository context was used: $line" ;; esac
+
+  # A fenced block inside the section must not be read as the section boundary. A shell comment at
+  # column 0, or a fenced example containing a heading, is exactly what a context file of code facts
+  # tends to contain - and ending the section there silently drops every fact AFTER it, so the reviewer
+  # re-raises the trade-off the section was written to answer.
+  cat > "$d/AGENTS.md" <<'MD'
+## Code review
+BEFORE_FENCE
+```sh
+# this is a shell comment, not a heading
+echo hi
+```
+AFTER_FENCE
+## Out of section
+EXCLUDED_SENTINEL
+MD
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent4" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent4" 2>/dev/null || printf '')"
+  case "$got" in *AFTER_FENCE*) ;; *) problems="$problems
+        | a fenced block ended the section early, silently dropping the facts after it" ;; esac
+  case "$got" in *EXCLUDED_SENTINEL*) problems="$problems
+        | the section did not end at the next same-or-higher heading after a fenced block" ;; esac
+
+  # A CLOSING fence carries nothing but whitespace after the run, so a fence line with an info string
+  # inside a block is content. Closing on it instead would expose a heading-looking line inside the
+  # example and truncate the section - the same silent loss, one level of nesting deeper.
+  cat > "$d/AGENTS.md" <<'MD'
+## Code review
+NESTED_BEFORE
+```
+```sh
+## this line is inside the fence, not a heading
+```
+NESTED_AFTER
+## Out
+NESTED_EXCLUDED
+MD
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent10" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent10" 2>/dev/null || printf '')"
+  case "$got" in *NESTED_AFTER*) ;; *) problems="$problems
+        | a tagged fence inside a block ended it early, truncating the section" ;; esac
+  case "$got" in *NESTED_EXCLUDED*) problems="$problems
+        | the section did not end at the next real heading after a nested fence" ;; esac
+
+  # A bare `#` is a valid EMPTY heading, so the title group is None. Passing that to a regex raises, the
+  # extractor exits non-zero, and the `(unreadable)` branch silently disables the whole feature for the
+  # repository - a one-line trigger, which is why it is asserted rather than reasoned about.
+  cat > "$d/AGENTS.md" <<'MD'
+#
+## Code review
+BARE_HASH_SENTINEL
+MD
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent8" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent8" 2>/dev/null || printf '')"
+  case "$got" in *BARE_HASH_SENTINEL*) ;; *) problems="$problems
+        | a bare `#` line disabled the context entirely instead of being read as an empty heading" ;; esac
+  # `(unreadable)` appears only on the SUMMARY line, not in what the stub was handed, so this must read
+  # $out - a check against $got could never fire, which is how it survived the first round.
+  case "$(grep -E '^preflight: issues=' "$out" 2>/dev/null | head -1)" in *"(unreadable)"*) problems="$problems
+        | the context file was reported unreadable, so the extractor failed rather than extracting" ;; esac
+
+  # An indented heading is a heading in CommonMark, and the fence scan already allows leading whitespace;
+  # column-0 anchoring would make the two disagree, and would send the whole file instead of the section.
+  cat > "$d/AGENTS.md" <<'MD'
+   ## Code review
+INDENTED_SENTINEL
+   ## Later
+INDENTED_EXCLUDED
+MD
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent9" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent9" 2>/dev/null || printf '')"
+  case "$got" in *INDENTED_SENTINEL*) ;; *) problems="$problems
+        | an indented Code review heading was not recognised" ;; esac
+  case "$got" in *INDENTED_EXCLUDED*) problems="$problems
+        | an indented later heading did not end the section, so the rest of the file leaked in" ;; esac
+
+  # A column-0 `#` with no following space is NOT a heading in CommonMark. Reading one as a heading
+  # ends the section there and silently drops the facts after it - the same truncation the fence check
+  # prevents, for code that is not fenced.
+  cat > "$d/AGENTS.md" <<'MD'
+## Code review
+HASH_BEFORE
+#!/bin/sh
+#hashtag
+HASH_AFTER
+## Out
+HASH_EXCLUDED
+MD
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent7" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent7" 2>/dev/null || printf '')"
+  case "$got" in *HASH_AFTER*) ;; *) problems="$problems
+        | a `#` line with no following space ended the section, dropping the facts after it" ;; esac
+  case "$got" in *HASH_EXCLUDED*) problems="$problems
+        | the section did not end at the next real heading" ;; esac
+
+  # Resolved against the repository root Hardcoding it made the prompt say "from AGENTS.md"
+  # while the summary line said otherwise - two sources disagreeing about the same fact.
+  printf '## Code review\nALT_SENTINEL\n' > "$d/ALT.md"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent5" \
+      PREFLIGHT_HOME="$work/ctx-cfg" PREFLIGHT_CONTEXT_FILE=ALT.md \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent5" 2>/dev/null || printf '')"
+  case "$got" in *"ARTIFACT_LABEL=Repository context (from ALT.md)"*) ;;
+    *) problems="$problems
+        | the artifact label did not name the file actually used (PREFLIGHT_CONTEXT_FILE=ALT.md)" ;; esac
+  case "$got" in *ALT_SENTINEL*) ;; *) problems="$problems
+        | the override file's section was not sent" ;; esac
+
+  # With no such section the whole file is sent - the compatibility direction, where an existing
+  # AGENTS.md is used as-is rather than being silently ignored.
+  printf '# Notes\nWHOLE_SENTINEL\n' > "$d/AGENTS.md"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent2" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent2" 2>/dev/null || printf '')"
+  case "$got" in *WHOLE_SENTINEL*) ;; *) problems="$problems
+        | with no Code review section the WHOLE AGENTS.md should be sent, but it was not" ;; esac
+  line="$(grep -E '^preflight: issues=' "$out" 2>/dev/null | head -1)"
+  # An EXCLUSION, because the plain label is a substring of the section label: a positive match would
+  # also accept `context=AGENTS.md (Code review section)` and could not tell the two modes apart.
+  case "$line" in *"(Code review section)"*) problems="$problems
+        | with no Code review heading the section label was still reported: $line" ;; esac
+  case "$line" in *"context=AGENTS.md"*) ;; *) problems="$problems
+        | the summary line did not report whole-file context: $line" ;; esac
+
+  # No context file at all must leave the run exactly as it was: no artifact, nothing claimed.
+  rm -f "$d/AGENTS.md"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent3" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent3" 2>/dev/null || printf '')"
+  apath="$(printf '%s\n' "$got" | sed -n '1s/^ARTIFACT_PATH=//p')"
+  [ -z "$apath" ] || problems="$problems
+        | ARTIFACT_PATH was exported with no context file present: $apath"
+  line="$(grep -E '^preflight: issues=' "$out" 2>/dev/null | head -1)"
+  case "$line" in *context=*) problems="$problems
+        | the summary line claimed context when there was no context file: $line" ;; esac
+
+  if [ -z "$problems" ]; then ok "the repository's review context reaches the model" "REQ-HOOK-40"
+  else bad "the repository's review context reaches the model" "REQ-HOOK-40" \
+        "section-only when present, whole file otherwise, nothing when absent" "see below" "$problems
+"; fi
+}
+
 # ---------------------------------------------------------------------------- live end-to-end
 # Needs the installed helpers and an API key, so it is skipped when either is absent.
 
@@ -1814,7 +2065,7 @@ REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK
 insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
 REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31
 REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36 REQ-HOOK-37 REQ-HOOK-38
-REQ-HOOK-39'
+REQ-HOOK-39 REQ-HOOK-40'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -1947,7 +2198,8 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_commit_scope_reviews_untracked \
     case_bundle_hooks_executable \
     case_gate_doc_advisory \
-    case_gate_config
+    case_gate_config \
+    case_review_context
   say ""
 fi
 

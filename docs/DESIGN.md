@@ -333,6 +333,59 @@ bespoke assertion.
 `preflight review` runs the same check to record `gate.verdict` in `review.meta.json`, so the commit hook
 and the gate can never disagree about what counts as a pass.
 
+## Reviewer context: the `Code review` section of AGENTS.md
+
+A reviewer cannot tell a deliberate, documented trade-off from an oversight, so it reports the
+trade-off - the `.preflight-gate.toml` directory trust boundary has been raised as a finding three
+times, and each time the answer was the same. The fix is to hand the reviewer the repository's own
+facts, and AGENTS.md is where they go: it is the convention every other tool reads (Copilot, Cursor,
+Cline, CodeRabbit, and pr-agent's own default `repo_context_files` entry), so no team maintains a
+second file.
+
+A heading whose text starts with `Code review` - any level - is extracted and sent **alone**, so a long
+AGENTS.md does not follow the reviewer into the prompt. `#`-style (ATX) headings only, which is what
+the convention uses, matched as CommonMark defines them: up to three leading spaces, then the hashes,
+which must be followed by a space or end the line - otherwise a `#!/bin/sh` or `#hashtag` line would read
+as a heading and end the section. Fences are CommonMark-correct too, so a closing fence carries only
+whitespace after the run and a tagged fence inside a block stays content. A Setext heading (text
+underlined with `===`) is not matched at all; in every unmatched case the whole file is sent, which is
+the safe direction - but it does defeat the bound, so the limitation is stated rather than implied. The extraction skips fenced code blocks: a
+shell comment at column 0, or a fenced example containing a heading, would otherwise be read as the
+section boundary and silently drop every fact after it - the failure this channel exists to prevent. With no such heading the **whole file** is
+sent: how much context to hand over is the repository's choice, not the harness's. `PREFLIGHT_CONTEXT_FILE`
+names a different file. The summary line reports `context=AGENTS.md (Code review section)` or the plain
+filename, because a review that was given the repository's facts is not the same review as one that was
+not, and nothing else in the output distinguishes them.
+
+**The mechanism, and why it is not pr-agent's own.** `repo_context_files` looks like the right feature
+and is architecturally dead here: the plain-diff provider implements neither `get_repo_file_content` nor
+`get_repo_context_ref`, so `build_repo_context` returns empty for a `--stdin` run. The `[artifacts]`
+channel does reach `pr_reviewer`, so it carries the file. It composes into the same prompt slot
+`extra_instructions` occupies - which is why `[pr_reviewer]` still does not set that key (see
+ROADMAP.md).
+
+**Everything for it must come through the environment, not `preflight.toml`.** pr-agent calls
+`inject_artifact_context()` from `cli.py` *before* `apply_repo_settings()` loads `--extra_config_url`,
+so an `[artifacts]` section there is read too late: `enable`, `target_tools` and `artifact_label`
+resolve from the environment and defaults first. The first version of this shipped such a section and
+the label never took effect - the prompt still read `CI Artifact: context.md`. The helper therefore
+sets `ARTIFACT_PATH`, `ARTIFACT_INSTRUCTIONS` (both first-class env keys) and `ARTIFACTS__ARTIFACT_LABEL`
+(dynaconf's `SECTION__KEY` form), and CI asserts that `[artifacts]` stays OUT of `preflight.toml` so a
+future edit cannot reintroduce a setting that looks configured and does nothing.
+
+**Two rules.** The file carries *facts* - architecture, accepted trade-offs, known limitations - never
+verdicts: never "do not report X". Suppression is what the tier and the gate's opt-outs are for, and a
+context channel that can silence findings is a trust boundary in disguise. And it is read from the
+**working tree**, not the base branch, which is the opposite of what pr-agent and Codacy do with their
+config files; they read from the default branch so a change cannot edit its own reviewer instructions.
+That is deliberate here: this is a local pre-commit harness, the file is committed and therefore part of
+the diff under review, and it is repo-controlled in exactly the way `.preflight-gate.toml` is - not a
+boundary against an untrusted repository.
+
+**What it does not fix.** Missing facts are only one cause of a wrong finding. A model that misreads
+context it already has - the shell-quoting false positive, where `cat <<'EOF'` was in the diff - is a
+different failure, and no amount of added context addresses it.
+
 ## Making one review report everything (why the loop converges)
 
 The loop is `review → fix all findings → re-review`. It is only as good as the claim that *one* review

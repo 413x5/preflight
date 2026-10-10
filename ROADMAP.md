@@ -20,6 +20,16 @@ Small and ready - no design needed, no experiment to settle first.
 
 Shipped on `main`; kept for the reasoning behind each change, not as work to pick up.
 
+- [x] **Give the reviewer the repository's own facts** (`REQ-HOOK-40`). A review that lacks them
+      reports a deliberate trade-off as a defect - the `.preflight-gate.toml` trust boundary was
+      raised as a finding three times. pr-agent's `repo_context_files` looks like the feature for
+      this and is dead in plain-diff mode (its provider implements neither
+      `get_repo_file_content` nor `get_repo_context_ref`); the `[artifacts]` channel reaches
+      `pr_reviewer` and carries the file instead. The file is AGENTS.md - the converged
+      cross-tool convention, and pr-agent's own default - with a `Code review` heading whose
+      section, when present, is what is sent, so a long AGENTS.md does not follow the reviewer
+      into the prompt. Mechanism and limits in `docs/DESIGN.md`.
+
 - [x] **Give findings a severity tier, so a doc typo does not block a commit.** Implemented in
       `preflight-gate`: the tier is derived from each finding's **file type**, because pr-agent's schema
       has no severity field to read. Documentation (`.md`, `.markdown`, `.rst`, `.adoc`) is

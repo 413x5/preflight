@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The reviewer now receives the repository's own review context, from AGENTS.md.** A reviewer
+  cannot tell a deliberate, documented trade-off from an oversight, so it reports the trade-off as
+  a defect - the `.preflight-gate.toml` trust boundary came back as a finding three times. A
+  heading in AGENTS.md whose text starts with `Code review` is extracted and sent **alone**, so a
+  long AGENTS.md does not follow the reviewer into the prompt; with no such heading the whole
+  file is sent, because how much context to hand over is the repository's choice. The summary
+  line reports `context=<file>` so a review given the repo's facts is distinguishable from one
+  that was not. It reaches the model through pr-agent's `[artifacts]` channel: `repo_context_files`
+  cannot, because the plain-diff provider implements neither `get_repo_file_content` nor
+  `get_repo_context_ref`, leaving `build_repo_context` empty for a `--stdin` run. The file carries
+  facts, never verdicts - suppression is what the tier and the gate's opt-outs are for - and it is
+  read from the working tree, unlike pr-agent's and Codacy's config files, because this is a local
+  pre-commit harness where the file is committed and therefore part of the diff under review.
+  Guarded by `REQ-HOOK-40` (14 mutations confirmed). Every artifact setting comes from the
+  environment, not `preflight.toml`: pr-agent injects the artifact *before* it loads
+  `--extra_config_url`, so an `[artifacts]` section there is read too late - the first version set
+  `artifact_label` in config and the prompt still said `CI Artifact: context.md`. CI now asserts the
+  section stays out of that file. The section extraction skips fenced code blocks, so a shell comment
+  or a fenced example cannot end the section and silently drop the facts after it, and the prompt's
+  artifact label names the file actually used, so it cannot disagree with `PREFLIGHT_CONTEXT_FILE`.
+
 - **`preflight-gate`'s policy is configurable, with machine, repo and environment layers.** The gate's
   tunables - which file types count as documentation (`doc_suffixes`), whether a documentation finding
   blocks (`doc_blocks`), whether key issues are ignored (`allow_issues`), and the effort ceiling

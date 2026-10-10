@@ -144,6 +144,15 @@ jobs:
               "additional_reasoning_effort_models is set again: see the open decision in ROADMAP.md"
           assert "pr_code_suggestions" not in d, \
               "pr_code_suggestions is configured again: its chunk size only made the padding nudge louder"
+          # The review-context mechanism is deliberately NOT configured here. pr-agent calls
+          # `inject_artifact_context()` (cli.py) BEFORE `apply_repo_settings()` loads
+          # `--extra_config_url` (pr_agent.py), so an `[artifacts]` section in this file is read too late
+          # to matter: `enable`, `target_tools` and `artifact_label` all come from the env/defaults
+          # first. The helper sets them through the environment, and REQ-HOOK-40 pins that. A section
+          # here would look configured while doing nothing - which is how the first version of this
+          # shipped a label the reviewer never saw.
+          assert "artifacts" not in d, \
+              "an [artifacts] section is back: it is applied AFTER injection, so it cannot take effect (see REQ-HOOK-40)"
           print("config parses:", cfg["model"], "->", cfg["fallback_models"])
           PY
           # The gate's policy template. It must PARSE, and it must be INERT: every key is commented out,

@@ -188,6 +188,17 @@ Ruby's built-in Psych if you need to inspect config.
   reports silent non-enforcement, so a malformed sidecar or a missing `python3` must warn. An *absent*
   sidecar stays quiet (no review has run, and `pre-commit` refuses first).
 
+## A trap in this repo's own shell
+
+macOS ships **bash 3.2**, and its parser mis-handles a heredoc that sits **inside `$( )`** when the body
+contains an **apostrophe**: it treats the quote as opening a string and reports `unexpected EOF while
+looking for matching '`, pointing at a line far from the cause. The helper has five such sites
+(`files/preflight`, `files/preflight-hook`, `files/githooks/post-commit`, plus two in `tests/run.sh`).
+
+So: an apostrophe is fine in a normal heredoc, and fine in a comment *outside* one - but not in the body
+of a `<<'PY'` that is inside a command substitution. Write `the hashes` rather than `the #'s`. The syntax
+check catches it (`sh -n` / `bash -n` per file), which is also how CI would.
+
 ## This machine has the bundle installed
 
 `preflight` is on `PATH` and a key is configured, so the live `e2e` case runs and you can exercise the real
@@ -311,6 +322,28 @@ So:
 
 Test before submitting: would a reviewer find more *claims* to check in this diff than *code*? If yes, cut
 until it does not.
+
+<!-- Only the section below is sent with a review (REQ-HOOK-40); the rest of this file is not. Keep it
+     to FACTS - state a decision and point at where its reasoning lives. Not "do not report X", which is
+     what the gate's tier and opt-outs are for. This comment is not part of the sent text because it sits
+     above the heading. -->
+
+## Code review
+
+- **The bundle is shell, git hooks and docs.** There is no build step and no package manager, by design.
+- **`files/preflight-gate`'s documentation tier is advisory by default**, covering `.md`, `.markdown`,
+  `.rst` and `.adoc`. Which paths that implies, and the reasoning behind it, are in `docs/DESIGN.md`.
+- **`.preflight-gate.toml` and the gate's opt-outs can relax enforcement.** The hook is a local
+  pre-commit check on the committer's own work and `git commit --no-verify` bypasses it regardless; the
+  trust-boundary reasoning is in `docs/DESIGN.md`.
+- **`AGENTS.md` and `AGENTS-review-snippet.md` have different audiences:** the first is for agents
+  changing this repo, the second is the block pasted into a consuming repo.
+- **One fact lives in one file, chosen by audience** - the table under "Each fact lives in exactly one
+  file" names which file each kind of fact belongs to.
+- **`ROADMAP.md` items marked `[x]` are shipped, not proposals.** Several carry a `**Still open**`
+  paragraph deliberately; the shipping paragraph is context for it.
+- **Reviews here are non-deterministic on identical content.** 0, 2 and 1 findings have each been
+  observed on the same bytes, so `new=0` is a judgement signal, not a clean bill of health.
 
 ## Commits
 

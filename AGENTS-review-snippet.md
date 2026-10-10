@@ -232,7 +232,7 @@ Read it (do not guess) when you need to know how the review loop is *meant* to w
 `preflight` has changed:
 
 - `README.md` - install, use, and the "using another provider" recipe.
-- `ROADMAP.md` - what is planned and what changed recently.
+- `ROADMAP.md` - what is still planned or undecided. Finished work is not listed here; it is in `CHANGELOG.md`.
 - `docs/DESIGN.md` - how the working-tree snapshot, the commit hook, the gate, and the provider config work.
 - `docs/TROUBLESHOOTING.md` - symptoms and fixes (auth, model ids, token budgets, blocked commits).
 - `CHANGELOG.md` - version-by-version changes, including any **breaking** rename or env-var change.

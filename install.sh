@@ -10,6 +10,7 @@
 # The endpoint is not tied to ClinePass. Any OpenAI-compatible endpoint works; these are applied
 # only when set, and override the defaults written into the config:
 #
+#   PREFLIGHT_PR_AGENT_VERSION          the pr-agent version to install (default: the pin below)
 #   PREFLIGHT_MODEL                     the primary model id
 #   PREFLIGHT_FALLBACK_MODELS           comma-separated fallback ids ("" or "none" -> [])
 #   PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS   context window for a model LiteLLM doesn't know (0 = look it up)
@@ -24,6 +25,11 @@ files="$here/files"
 cfg="${PREFLIGHT_HOME:-$HOME/.config/preflight}"
 bindir="${PREFLIGHT_BIN_DIR:-$HOME/.local/bin}"
 py="${PREFLIGHT_PY:-3.13}"
+# Pinned, because `preflight` reads pr-agent's own output structure: the coverage marker matches the
+# exact wording of pr-agent's "files were not included" footer, so an unpinned upgrade can stop
+# coverage=PARTIAL from printing - a silently partial review, the failure this bundle exists to prevent.
+# Override to test a new release; CI asserts this pin (see .github/workflows/ci.yml).
+pr_agent_version="${PREFLIGHT_PR_AGENT_VERSION:-0.47.0}"
 api_base="${PREFLIGHT_API_BASE:-https://api.cline.bot/api/v1}"
 key="${PREFLIGHT_KEY:-}"
 
@@ -42,8 +48,8 @@ command -v git >/dev/null 2>&1 || { say "install: 'git' is required"; exit 1; }
 
 if [ "${PREFLIGHT_SKIP_TOOL_INSTALL:-0}" != "1" ]; then
   command -v uv >/dev/null 2>&1 || { say "install: 'uv' not found - install it first:"; say "  curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
-  say "==> uv tool install --python $py pr-agent"
-  uv tool install --python "$py" pr-agent >/dev/null
+  say "==> uv tool install --python $py pr-agent==$pr_agent_version"
+  uv tool install --python "$py" "pr-agent==$pr_agent_version" >/dev/null
 else
   say "==> skipping pr-agent install (PREFLIGHT_SKIP_TOOL_INSTALL=1)"
 fi

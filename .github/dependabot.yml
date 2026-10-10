@@ -5,8 +5,9 @@
 # drift rather than relying on someone noticing.
 #
 # Scope is deliberately narrow. The bundle is shell plus git hooks, so there is nothing else to track:
-# no lockfiles and no pip/npm manifests. (install.sh does not pin pr-agent, which is a separate roadmap
-# item, not a Dependabot concern.)
+# no lockfiles and no pip/npm manifests. (The pr-agent pin in install.sh is a version string, not a
+# manifest Dependabot can bump; a bump means re-verifying the coverage footer fixture in tests/run.sh,
+# which CI asserts.)
 #
 # Schema: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 version: 2

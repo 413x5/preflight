@@ -87,6 +87,15 @@ jobs:
           PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" \
           PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 ./install.sh >/dev/null
           grep -q sentinel "$tmp/cfg/.secrets.toml" || { echo "installer clobbered .secrets.toml"; rc=1; }
+          # The pr-agent pin is load-bearing: `preflight` matches the exact wording of pr-agent's own
+          # coverage footer, so an unpinned install can silently stop reporting coverage=PARTIAL. Anchor
+          # on the `uv tool install` COMMAND at line start - the pin string also appears in the `say`
+          # echo above it, so matching the bare string would pass with the install unpinned. No `$` in
+          # the pattern, which keeps shellcheck's SC2016 happy under actionlint.
+          grep -qE '^[[:space:]]*uv tool install .*pr-agent==' install.sh \
+            || { echo "install.sh no longer pins pr-agent in the uv command"; rc=1; }
+          grep -q 'PREFLIGHT_PR_AGENT_VERSION:-0\.47\.0' install.sh \
+            || { echo "install.sh pr-agent pin changed; re-verify the coverage footer fixture in tests/run.sh"; rc=1; }
           rm -rf "$tmp"
           [ "$rc" = 0 ] && echo "installer OK"
           exit "$rc"

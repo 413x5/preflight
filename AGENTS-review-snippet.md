@@ -198,6 +198,30 @@ preflight review && preflight-gate
 git add -A && git commit -m "feat: ..."     # the hook verifies the reviewed content
 ```
 
+### Tell the reviewer what is true about this repo: the `Code review` section
+
+A reviewer cannot tell a deliberate, documented trade-off from an oversight, so it reports the trade-off
+as a finding. Give it the facts and that stops. Put them in a heading whose text starts with
+`Code review` in this file:
+
+```markdown
+## Code review
+
+- `src/legacy/` is vendored; do not suggest refactors there.
+- The `+1` offset in `parser.py` is required by the wire format, not an off-by-one.
+- Writes to `.cache/` are intentionally not atomic; a crash there is recoverable by design.
+```
+
+That section - and only that section - is sent with the review, so a long AGENTS.md stays out of the
+prompt. Use a `#`-style heading: an underlined (Setext) heading is not recognised, and the whole file
+is sent instead. With no such heading, the whole file is sent, so an existing AGENTS.md is used as-is. The
+summary line reports `context=AGENTS.md (Code review section)` when it was used.
+
+Two rules. **Facts, not verdicts**: record what is *true* about the repository, never "do not report X" -
+if a category of finding should not block, that is what the gate's tier and opt-outs are for. And **keep
+it current**: a stale entry actively misleads, which is worse than saying nothing. The file is read from
+the working tree, so a change to it is part of the next review.
+
 ### Where the preflight bundle lives, and how to get current guidance
 
 The helpers, the config template, and the full docs live in **this bundle's own repository**:

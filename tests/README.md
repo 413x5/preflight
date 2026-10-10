@@ -79,6 +79,10 @@ the selfcheck itself is `REQ-SELF-nn`, listed in its own table below.
 | REQ-HOOK-36 | The shipped `files/githooks/*` are executable on disk **and** committed as `100755` | git **ignores a non-executable hook** - it prints a hint and runs nothing - so a repo whose copied hook lost its bit enforces nothing while looking fully installed. Verified directly: a fresh clone of a repo with the hooks at `100644` accepts an unreviewed commit (exit 0). The documented recipe said `cp`, which preserves the source mode and so usually works, but the *committed* mode is what a clone obeys and a source file is one editor or patch tool away from losing its bit; `git add` also records `100644` under `core.fileMode=false`, which is why the recipe now forces the index mode with `update-index --chmod=+x`. The index half of this case **skips with a reason** when `$repo_root` is not a git working tree (a source tarball or "Download ZIP"), since `ls-files` there reports nothing and would otherwise be read as "not tracked" - a false defect instead of an unevaluated check |
 | REQ-HOOK-37 | The `commit` scope hands the model every path a commit would contain, **including untracked files** | an untracked file is added to `reviewed_tree` by the snapshot's `git add -A`, so the hook compares against it - but a bare `git diff HEAD` never lists it, making a new file simultaneously unreviewed and accepted as reviewed. The diff handed to pr-agent is the only place this is observable, so the case records what the stub `pr-agent` received rather than what the sidecar says |
 
+| REQ-HOOK-39 | The gate's policy is layered - `$PREFLIGHT_HOME/gate.toml`, then a repo-local `./.preflight-gate.toml`, then the `PREFLIGHT_GATE_*` env vars - and its ONE invalid-value rule holds for every key, driven from a table rather than per-key assertions: a value that is present but invalid is reported and the value already in force is KEPT (a malformed file and an unreadable file warn and fall back the same way), while an absent file leaves the built-in defaults | a policy that silently failed to load, leaving a repo believing its rules were in force while the built-in default decided its verdicts. This recurred once per key while each had its own setter - `doc_blocks = "ture"` falling back to the permissive default, `max_effort = true` coerced by `int(True)` into a ceiling of 1, an empty `doc_suffixes` entry making every path advisory, a bad value in the repo-local file masking the home file's - so the rows below are organised by the contract, and a new key needs a table row, not another bespoke assertion. A malformed config must also not crash: a non-zero exit is what the commit hook reads as "the review did not pass" |
+| REQ-HOOK-38 | The gate derives a tier from each finding's file type: a documentation finding (`.md`, `.markdown`, `.rst`, `.adoc`) is tagged `[advisory]`, reported in the `advisory=` count, and does **not** fail the gate; a finding on code, or with no file, still blocks - **including code under `docs/` and a `requirements.txt`**; `PREFLIGHT_GATE_DOC_BLOCKS=1` makes documentation block again **and relabels it `[blocking]`** | a documentation typo blocking a commit as hard as a bug - the model's finding schema has no severity field, so before this every finding was fatal; a tier keyed on the directory rather than the file type, which a `conf.py` or build script under `docs/` would slip through; a `.txt` treated as prose, which would make a vulnerable dependency pin in `requirements.txt` advisory, or an `.mdx` treated as prose, which would make a component bug advisory (the reviewer raised each on this change); and, in strict mode, a promoted finding that still printed `[advisory]` while the gate exited 1, a label contradicting its own verdict. The case drives the **real gate** over fixtures with a real trailing newline in `relevant_file` (the shape real payloads carry), because a naive `endswith('.md')` classifies every doc finding as code and the advisory tier then never fires |
+| REQ-HOOK-40 | The repository's review context reaches the model: a `Code review` heading in AGENTS.md is extracted and sent **alone**, a subsection stays with its section, a later top-level section is excluded, a heading or `#` inside a fenced block does not end it, the rest of the file is not sent alongside it; with no such heading the **whole file** is sent; with no file at all nothing is exported or claimed; the summary line reports which happened; and the prompt's artifact label names the file actually used, so it cannot disagree with `PREFLIGHT_CONTEXT_FILE` | a reviewer that never receives the repository's facts, so a deliberate, documented trade-off is reported as a defect (the `.preflight-gate.toml` trust boundary was raised three times); OR a section rule that leaks the whole AGENTS.md into every prompt, defeating the point of the section; OR context claimed on the summary line when none was sent. The case drives a stub `pr-agent` that records what it was handed, because what the model was SHOWN is only observable there |
+
 The selfcheck is its own requirement, since it checks the suite rather than the hook:
 
 | Requirement | What it asserts | Guards against |
@@ -123,6 +127,48 @@ reverted in turn and the expected case was confirmed to fail:
 | `security_concerns` coerced with a raw `.strip()` again, so a boolean payload kills the summary line | REQ-HOOK-35 |
 | `key_issues_to_review` left un-coerced, so a non-list reports a wrong count or loses the line | REQ-HOOK-35 |
 | a non-object `review` or `usage` left unguarded, so the summary line is lost before any field is read | REQ-HOOK-35 |
+| the documentation tier removed (every path blocking), or applied to every path | REQ-HOOK-38 |
+| the doc suffix list emptied, so no file is documentation | REQ-HOOK-38 |
+| `.txt` added back to the doc suffixes, so a `requirements.txt` finding becomes advisory | REQ-HOOK-38 |
+| `.mdx` added back to the doc suffixes, so a component bug on an executable-Markdown file becomes advisory | REQ-HOOK-38 |
+| the repo-local `.preflight-gate.toml` not read | REQ-HOOK-39 |
+| the environment no longer overriding the config files | REQ-HOOK-39 |
+| a policy value from the config file ignored | REQ-HOOK-39 |
+| **the invalid-value contract inverted** - an invalid value dropping the key to the hardcoded default instead of keeping the value in force (8 rows), the invalid value applied as-is (4 rows), or an empty `doc_suffixes` entry honoured (1 row) | REQ-HOOK-39 |
+| a malformed config file raising instead of warning and falling back | REQ-HOOK-39 |
+| an unreadable config file (a directory in its place) ignored silently instead of warning | REQ-HOOK-39 |
+| a `tomllib`-less interpreter ignoring a present config file silently | REQ-HOOK-39 (verified by injecting a failing import; the row is not exercised by the suite, which cannot remove tomllib from its own interpreter) |
+| a non-numeric `PREFLIGHT_GATE_MAX_EFFORT` silently discarding the ceiling the config file set, **or** the env override applied regardless of validity, **or** the env override ignored entirely | REQ-HOOK-39 |
+| a config assertion that cannot discriminate - a stale review fixture making the gate exit non-zero for an unrelated reason, so "kept the value" and "dropped it" give the same exit code | REQ-HOOK-39 |
+| no `ARTIFACT_PATH` exported, so the context never reaches the reviewer | REQ-HOOK-40 |
+| the `Code review` pattern never matching, so the whole file is always sent | REQ-HOOK-40 |
+| the section never ending (the next same-or-higher heading not honoured) | REQ-HOOK-40 |
+| the framing instruction emptied, so the context reads as instructions to approve | REQ-HOOK-40 |
+| fence-awareness removed, so a `#` inside a fenced block ends the section early and silently drops the facts after it (found by reviewing this change with the tool) | REQ-HOOK-40 |
+| the artifact label not exported, so the prompt header falls back to the filename (found by reviewing this change with the tool - the label had been set in `preflight.toml`, where it is applied too late to matter) | REQ-HOOK-40 |
+| the section label always reported, so whole-file and section modes are indistinguishable | REQ-HOOK-40 |
+| the artifact label naming a fixed file, so it disagrees with `PREFLIGHT_CONTEXT_FILE` and with the summary line (found by reviewing this change with the tool) | REQ-HOOK-40 |
+| the heading match allowing zero spaces after the `#`, so a column-0 `#!/bin/sh` or `#hashtag` line ends the section and silently drops the facts after it (found by reviewing this change with the tool) | REQ-HOOK-40 |
+| a bare `#` line's `None` title passed to a regex, so the extractor raises and the `(unreadable)` branch silently disables the whole feature (found by reviewing this change with the tool) | REQ-HOOK-40 |
+| headings anchored at column 0 while the fence scan allows leading whitespace, so an indented section is not found and an indented later heading does not end it (found by reviewing this change with the tool) | REQ-HOOK-40 |
+| a fence line with an info string treated as a CLOSING fence (CommonMark allows only whitespace after it), so a nested example ends the block and a heading-looking line inside it truncates the section (found by reviewing this change with the tool) | REQ-HOOK-40 |
+| the extractor failing, so the context is reported unreadable and the feature is silently disabled instead of extracting (checked on the summary line, where the marker actually appears) | REQ-HOOK-40 |
+| the summary line always reporting no context | REQ-HOOK-40 |
+| `doc_blocks = 1` (a TOML integer) falling through to the permissive default | REQ-HOOK-39 |
+| a boolean key accepting any non-zero number, so `allow_issues = 2` silently disables the check (the integer mirror is restricted to 0/1) | REQ-HOOK-39 |
+| a dotless suffix (`["txt"]`) matched raw by `endswith`, so `notes.baktxt` becomes advisory | REQ-HOOK-39 |
+| a path fragment (`["docs/"]`) accepted as a suffix, matching anything under a directory of that name | REQ-HOOK-39 |
+| the suffix whitelist weakened to "any non-empty string", so a path fragment, `.`, or a non-string entry is accepted | REQ-HOOK-39 |
+| a non-string suffix entry coerced by `str()` into a plausible-looking extension (`1` -> `.1`) | REQ-HOOK-39 |
+| a boolean key returning to "any non-zero int is true", so `allow_issues = 2` disables the check | REQ-HOOK-39 |
+| an empty `doc_suffixes` entry dropped while valid ones are applied (partial application of a wrong list) | REQ-HOOK-39 |
+| a waived key issue still labelled `[blocking]`, so a PASS contradicts the label (the same rule the `doc_blocks` override follows) | REQ-HOOK-39 |
+| an unknown config key ignored silently (a typo'd key looks configured but is not) | REQ-HOOK-39 |
+| the shipped `gate.toml` template uncommented, freezing today's defaults into every install and silently overriding a later change to the built-in default | CI (the gate-policy step asserts the installed file parses to `{}`) |
+| `case_gate_doc_advisory` exporting a scratch `PREFLIGHT_HOME` into the top-level shell, leaking it into later cases | REQ-HOOK-23 (the live case skips when it points at the scratch home) |
+| `case_gate_doc_advisory` reading the developer's real `$HOME/.config/preflight/gate.toml` instead of a scratch home | REQ-HOOK-38 |
+| the finding path left unnormalised at both sites, so the trailing newline in `relevant_file` makes a doc finding block | REQ-HOOK-38 |
+| the strict-mode override adjusts the counts but not the per-finding label, so a blocking doc finding still prints `[advisory]` | REQ-HOOK-38 |
 
 This table is per-fix: it records which case guards which repair. It is **not** the same property as the
 selfcheck below, which asks about the whole hook at once.

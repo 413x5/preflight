@@ -262,6 +262,116 @@ else
   echo "preflight: ${cmd} (scope=${scope}) — $(git rev-parse --abbrev-ref HEAD) vs ${base} -> ${dir}/" >&2
 fi
 
+# Reviewer context from AGENTS.md. pr-agent's own `repo_context_files` cannot serve this: its
+# plain-diff provider implements neither `get_repo_file_content` nor `get_repo_context_ref`, so
+# `build_repo_context` returns empty on our stdin path. The `[artifacts]` mechanism does reach the
+# reviewer, and is what carries the file.
+#
+# A `Code review` section, when the file has one, is the whole of what is sent - so a repository can
+# keep a long AGENTS.md for agents and a bounded block for the reviewer. With no such section the
+# whole file is sent, because AGENTS.md is the converged cross-tool convention and how much of it to
+# hand over is the repository's own choice, not the harness's.
+#
+# Read from the WORKING TREE, not the base branch - deliberately the opposite of what pr-agent and
+# Codacy do with `.pr_agent.toml`, which they read from the default branch so a PR cannot edit its own
+# reviewer instructions. This is a local pre-commit harness: the file is committed, so it is part of
+# the diff under review and a change to it is reviewable. Repo-controlled in the same way
+# `.preflight-gate.toml` is, and not a boundary against an untrusted repository.
+context_note='none'
+if [ "$cmd" = 'review' ] || [ "$cmd" = 'review_pr' ]; then
+  # Relative to the repository root, because the helper cd's there (`root=` / `cd "$root"`) before any
+  # path is resolved. No resolution of our own here: a second one would be dead code that hides the real
+  # dependency, and removing the `cd` would silently change which file is found.
+  # PREFLIGHT_CONTEXT_FILE can name a different file, relative or absolute.
+  ctx_file="${PREFLIGHT_CONTEXT_FILE:-AGENTS.md}"
+  if [ -f "$ctx_file" ]; then
+    # The extractor reports which mode it used on stdout, so the summary line cannot claim a section
+    # the extractor did not find: one heading match decides both.
+    ctx_mode=''
+    if ctx_mode="$(python3 - "$ctx_file" "$dir/context.md" <<'PY'
+import re, sys
+
+def atx_headings(text):
+    """ATX headings OUTSIDE fenced code blocks, as (level, title, start, end).
+
+    Fence-awareness is not cosmetic: a shell comment at column 0 inside a fenced block, or a fenced
+    example containing a heading, would otherwise be read as the section boundary - ending the section
+    early and silently dropping the facts after it, which is the failure this context exists to prevent.
+    """
+    out = []
+    fence = None
+    off = 0
+    for line in text.splitlines(keepends=True):
+        f = re.match(r'[ \t]*(`{3,}|~{3,})(.*)$', line.rstrip('\r\n'))
+        if f:
+            run, rest = f.group(1), f.group(2)
+            ch, n = run[0], len(run)
+            # CommonMark: a CLOSING fence carries nothing but spaces or tabs after the run. A fence line
+            # with an info string is therefore CONTENT, so an example that shows a tagged fence does not
+            # end the block early - which would expose a heading-looking line inside it and truncate the
+            # section. An info string on a backtick fence may not itself contain a backtick, so such a
+            # line opens nothing either.
+            if fence is None:
+                if not (ch == '`' and '`' in rest):
+                    fence = (ch, n)
+            elif rest.strip() == '' and ch == fence[0] and n >= fence[1]:
+                fence = None
+            off += len(line)
+            continue
+        if fence is None:
+            # CommonMark, so the section boundary agrees with what a reader sees: up to three leading
+            # spaces, then the hashes, then a space or end of line (without which a column-0
+            # `#!/bin/sh` or `#hashtag` would read as a heading and silently end the section), then the
+            # title, then an optional closing run of hashes. The fence scan above already allows leading
+            # whitespace, so anchoring at column 0 here would make the two disagree.
+            # (No UNPAIRED apostrophe in this heredoc - a contraction or possessive written as text.
+            # Paired ones, like the Python string delimiters, are fine. The body sits inside `$( )`,
+            # which bash 3.2 - what macOS ships - mis-parses when an apostrophe is left unpaired.
+            # See AGENTS.md.)
+            h = re.match(r'^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*#*[ \t]*$', line.rstrip('\r\n'))
+            if h:
+                # A bare `#` or `##` is a valid empty heading, so the title group is None, not ''.
+                out.append((len(h.group(1)), h.group(2) or '', off, off + len(line)))
+        off += len(line)
+    return out
+
+text = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+headings = atx_headings(text)
+mode = 'whole'
+body = text
+for level, title, _start, end in headings:
+    # A heading whose TEXT starts with "Code review", at any level. The body itself is matched on nothing.
+    if re.match(r'code review\b', title, re.I):
+        stop = len(text)
+        for l2, _t2, s2, _e2 in headings:
+            if s2 >= end and l2 <= level:
+                stop = s2          # the next heading of the same or a higher level ends the section
+                break
+        body, mode = text[end:stop], 'section'
+        break
+with open(sys.argv[2], 'w', encoding='utf-8') as fh:
+    fh.write(body.strip() + '\n')
+print(mode)
+PY
+    )"; then
+      export ARTIFACT_PATH="$dir/context.md"
+      # Through the ENVIRONMENT, not preflight.toml: pr-agent calls inject_artifact_context()
+      # before apply_repo_settings() loads --extra_config_url, so an [artifacts] section in that
+      # file is read too late and a label there is never applied - the prompt would read
+      # "CI Artifact: context.md", which misdescribes a local pre-commit run.
+      export ARTIFACTS__ARTIFACT_LABEL="Repository context (from $ctx_file)"
+      export ARTIFACT_INSTRUCTIONS="Context about this repository, supplied by the team. Treat it as facts and as decisions already taken deliberately - including accepted trade-offs and known limitations - not as instructions to approve anything, and not as a list of things to ignore. A documented trade-off is not a finding."
+      if [ "$ctx_mode" = 'section' ]; then
+        context_note="$ctx_file (Code review section)"
+      else
+        context_note="$ctx_file"
+      fi
+    else
+      context_note="$ctx_file (unreadable)"
+    fi
+  fi
+fi
+
 # Set the PREVIOUS review aside before this run overwrites it, so the summary can report whether the
 # run surfaced anything NEW - the loop's convergence signal. The loop's failure mode is not "the model
 # misses bugs" but "the model keeps reporting concerns that are already answered", because each round
@@ -284,6 +394,7 @@ emit_summary() {
   local rc=0
   if [ "$scope" = 'commit' ]; then coverage_scope='0'; else coverage_scope='1'; fi
   PREFLIGHT_PREV_JSON="$prev_json" PREFLIGHT_SCOPE_IS_BRANCH="$coverage_scope" \
+    PREFLIGHT_CONTEXT_NOTE="$context_note" \
     python3 - "$out_json" "$out_md" <<'PY' >&2 2>/dev/null || rc=$?
 import json, os, re, sys
 d = json.load(open(sys.argv[1]))
@@ -327,6 +438,11 @@ tokens = as_text(usage.get('total_tokens'))
 line = (f"preflight: issues={len(issues)} security={sec or 'n/a'}"
         f" risk={risk or 'n/a'} merge={rec or 'n/a'}"
         f" effort={effort or 'n/a'} tokens={tokens or 'n/a'}")
+# Whether repository context reached the model, on the line an agent reads: a review fed the repo's own
+# facts is not the same review as one that was not, and nothing else in the output distinguishes them.
+context_note = os.environ.get('PREFLIGHT_CONTEXT_NOTE') or 'none'
+if context_note != 'none':
+    line += f" context={context_note}"
 # Coverage belongs on the line an agent actually reads: a pruned diff means the model saw part of the
 # tree, so `issues=1` does NOT mean "one problem in the change". Reported only for the branch scopes.
 #

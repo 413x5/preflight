@@ -1437,6 +1437,551 @@ case_bundle_hooks_executable() {
   fi
 }
 
+case_gate_doc_advisory() {
+  # pr-agent's finding schema has no severity field, so before this the gate failed on any finding.
+  # A finding on documentation therefore blocked a commit as hard as a bug in the hook. The gate now
+  # derives a tier from the finding's FILE TYPE (its extension, wherever the file lives) and treats a
+  # prose format as advisory: reported, but not fatal, unless `PREFLIGHT_GATE_DOC_BLOCKS=1` asks for
+  # the strict behaviour.
+  #
+  # The trap this case is built around is the path itself. `relevant_file` arrives with a trailing
+  # newline (`'README.md\n'`), so a naive `endswith('.md')` reports every documentation finding as code
+  # and the advisory tier never fires. A doc path and a code path are each therefore driven through a
+  # real gate run, and the doc run additionally pins the blocking/advisory SPLIT rather than only the
+  # verdict, so a regression that classified everything the same way cannot pass.
+  local d doc code problems="" out rc boundary
+  d="$work/gate-tier"; mkdir -p "$d/.preflight"
+  # A scratch PREFLIGHT_HOME, because the gate reads $PREFLIGHT_HOME/gate.toml when it exists and
+  # install.sh now creates that file. Without this the case would depend on the developer's machine
+  # state - a home policy that narrowed or widened doc_suffixes would flip the expected exit codes.
+  #
+  # Scoped to the `bash` invocations below rather than exported: a case function runs in the top-level
+  # shell, so an exported PREFLIGHT_HOME would leak into every later case - including the live one,
+  # which resolves the installed helpers through ${PREFLIGHT_HOME:-$HOME/.config/preflight}.
+  local tier_home="$work/gate-tier-home"
+  mkdir -p "$tier_home"
+  doc='{"review":{"key_issues_to_review":[{"relevant_file":"README.md\n","issue_header":"typo","issue_content":"c"}],"security_concerns":"No"}}'
+  code='{"review":{"key_issues_to_review":[{"relevant_file":"files/preflight\n","issue_header":"bug","issue_content":"c"}],"security_concerns":"No"}}'
+
+  gate_run() { ( cd "$d" && PREFLIGHT_HOME="$tier_home" PREFLIGHT_DIR=.preflight bash "$repo_root/files/preflight-gate" ); }
+
+  printf '%s' "$doc" > "$d/.preflight/review.json"
+  rc=0; out="$(gate_run 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | a finding on README.md failed the gate (exit $rc): $out"
+  case "$out" in *"advisory=1"*) ;; *) problems="$problems
+        | the doc finding was not counted as advisory (the trailing-newline path trap): $out" ;; esac
+  # `blocking=0` and the `[advisory]` tag together pin the SPLIT and the label. Asserting a bare
+  # `blocking=1` would be dead: a doc-only review prints `blocking=0 advisory=1`, and a misclassified
+  # finding prints no count at all, so neither ever contains the string `blocking=1`.
+  case "$out" in *"blocking=0"*) ;; *) problems="$problems
+        | the doc finding was not counted in a blocking/advisory split: $out" ;; esac
+  case "$out" in *"[advisory]"*) ;; *) problems="$problems
+        | the doc finding was not tagged [advisory]: $out" ;; esac
+
+  printf '%s' "$code" > "$d/.preflight/review.json"
+  rc=0; out="$(gate_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | a finding on code still failed with exit $rc, expected 1: $out"
+  case "$out" in *"[blocking]"*) ;; *) problems="$problems
+        | the code finding was not tagged blocking: $out" ;; esac
+  case "$out" in *"advisory="*) problems="$problems
+        | the code finding was counted as advisory, so real bugs no longer block: $out" ;; esac
+
+  printf '%s' "$doc" > "$d/.preflight/review.json"
+  rc=0
+  out="$( cd "$d" && PREFLIGHT_HOME="$tier_home" PREFLIGHT_DIR=.preflight PREFLIGHT_GATE_DOC_BLOCKS=1 bash "$repo_root/files/preflight-gate" 2>&1 )" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | PREFLIGHT_GATE_DOC_BLOCKS=1 still passed (exit $rc): $out"
+  case "$out" in *"[blocking]"*) ;; *) problems="$problems
+        | in strict mode a promoted doc finding was still labelled advisory, contradicting the exit code: $out" ;; esac
+
+  # The rule is a FILE-TYPE rule, so it holds wherever the file lives: a `.md` under `docs/` is
+  # advisory, but content that happens to sit in `docs/` but is not prose keeps blocking - a
+  # `conf.py`, a build script, an `.mdx` (Markdown plus executable JSX), or a `requirements.txt`.
+  # The tier therefore cannot be defeated by the directory a file sits in, nor by a prose-looking name.
+  boundary='{"review":{"key_issues_to_review":[{"relevant_file":"docs/README.md","issue_header":"x","issue_content":"c"},{"relevant_file":"docs/conf.py","issue_header":"y","issue_content":"c"},{"relevant_file":"requirements.txt","issue_header":"z","issue_content":"c"},{"relevant_file":"docs/component.mdx","issue_header":"w","issue_content":"c"}],"security_concerns":"No"}}'
+  printf '%s' "$boundary" > "$d/.preflight/review.json"
+  rc=0; out="$(gate_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | code under docs/, a requirements.txt or an .mdx should still block, but the gate passed (exit $rc): $out"
+  case "$out" in *"blocking=3 advisory=1"*) ;; *) problems="$problems
+        | the tier was not split by file type (.txt and .mdx must block alongside .py): $out" ;; esac
+
+  if [ -z "$problems" ]; then ok "documentation findings are advisory, code findings block" "REQ-HOOK-38"
+  else bad "documentation findings are advisory, code findings block" "REQ-HOOK-38" \
+        "doc=pass(split), code=exit 1, strict=exit 1" "see below" "$problems
+"; fi
+}
+
+case_gate_config() {
+  # The gate's tunables come from an optional TOML file - home, then a repo-local override - with the
+  # environment on top, so a repo whose docs differ can say so without a one-off variable, and a one-off
+  # can still win without editing a file. What this case pins is the PRECEDENCE and the degradation:
+  # the suffix list is what actually decides a verdict, so a config that silently failed to load would
+  # leave a repo believing its policy was in force.
+  #
+  # It also pins the two failure modes that matter: a malformed file must WARN and fall back rather than
+  # crash (a crash is a non-zero exit, which the commit hook reads as "the review did not pass"), and an
+  # unknown/absent key must keep the built-in default rather than disabling a check.
+  local d home problems="" out rc key home_line repo_line review want
+  local FINDING_FOO FINDING_PY FINDING_EFFORT_3 FINDING_EFFORT_5
+  d="$work/gate-config"; home="$work/gate-config-home"
+  mkdir -p "$d/.preflight" "$home"
+
+  # One finding per tier/field, so a table row can name the shape it needs.
+  FINDING_FOO='{"review":{"key_issues_to_review":[{"relevant_file":"notes.foo","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}'
+  FINDING_PY='{"review":{"key_issues_to_review":[{"relevant_file":"a.py","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}'
+  FINDING_EFFORT_3='{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":3}}'
+  FINDING_EFFORT_5='{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":5}}'
+
+  gate_cfg_run() { ( cd "$d" && PREFLIGHT_HOME="$home" PREFLIGHT_DIR=.preflight "$@" bash "$repo_root/files/preflight-gate" ); }
+
+  # Home config narrows documentation to `.foo`, so a `.md` finding blocks and a `.foo` one does not.
+  printf 'doc_suffixes = [".foo"]\nmax_effort = 4\n' > "$home/gate.toml"
+  printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"README.md","issue_header":"h","issue_content":"c"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3}}' > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | the home gate.toml did not take effect: a .md finding should have blocked (exit $rc): $out"
+
+  printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"notes.foo","issue_header":"h","issue_content":"c"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3}}' > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | a suffix from doc_suffixes was not treated as advisory (exit $rc): $out"
+
+  # max_effort from the file, with no env var set.
+  printf '%s' '{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":5}}' > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | max_effort in gate.toml did not fail an over-limit effort (exit $rc): $out"
+
+  # The repo-local file overrides the home file.
+  printf 'doc_suffixes = [".md"]\n' > "$d/.preflight-gate.toml"
+  printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"README.md","issue_header":"h","issue_content":"c"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3}}' > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | the repo-local .preflight-gate.toml did not override the home doc_suffixes (exit $rc): $out"
+
+  # The environment overrides both files.
+  rc=0; out="$(PREFLIGHT_GATE_DOC_BLOCKS=1 gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | PREFLIGHT_GATE_DOC_BLOCKS=1 did not override the config files (exit $rc): $out"
+
+  # A bare `1` is a natural mirror of the env var, and TOML parses it as an int. Falling back to the
+  # default (False, permissive) would leave the writer believing the gate was strict.
+  printf 'doc_suffixes = [".foo"]\ndoc_blocks = 1\n' > "$d/.preflight-gate.toml"
+  printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"notes.foo","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}' > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | doc_blocks = 1 (a TOML integer) did not make documentation block (exit $rc): $out"
+
+  # Malformed TOML: warn, fall back to the home file, never crash. A crash is a non-zero exit, which
+  # the commit hook reads as "the review did not pass".
+  printf 'not = = toml\n' > "$d/.preflight-gate.toml"
+  printf '%s' "$FINDING_FOO" > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | a malformed config file should fall back to the home policy (exit $rc): $out"
+  case "$out" in *"warning"*) ;; *) problems="$problems
+        | a malformed config file was ignored silently: $out" ;; esac
+  case "$out" in *Traceback*) problems="$problems
+        | a malformed config file crashed the gate: $out" ;; esac
+
+  # Present but unreadable. A directory in the file's place is the portable way to produce that: a
+  # permissions test would pass under root, which ignores the mode bits.
+  rm -rf "$d/.preflight-gate.toml"; mkdir -p "$d/.preflight-gate.toml"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  case "$out" in *"warning"*) ;; *) problems="$problems
+        | an unreadable config was ignored silently: $out" ;; esac
+  [ "$rc" = 0 ] || problems="$problems
+        | an unreadable config should fall back to the home policy (exit $rc): $out"
+  rmdir "$d/.preflight-gate.toml" 2>/dev/null || true
+
+  # A non-numeric env override is a typo, not a request to drop the ceiling the file set. The review is
+  # written explicitly rather than reused: with a stale fixture the gate can exit non-zero for an
+  # unrelated reason, and the assertion could not tell "kept the ceiling" from "dropped it".
+  printf 'max_effort = 4\n' > "$home/gate.toml"
+  printf '%s' "$FINDING_EFFORT_5" > "$d/.preflight/review.json"
+  rc=0; out="$(PREFLIGHT_GATE_MAX_EFFORT=abc gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | a non-numeric PREFLIGHT_GATE_MAX_EFFORT dropped the ceiling from the config (exit $rc): $out"
+  case "$out" in *"warning"*) ;; *) problems="$problems
+        | a non-numeric PREFLIGHT_GATE_MAX_EFFORT was not reported: $out" ;; esac
+
+  # The complementary direction, which the assertion above cannot see: a VALID env override REPLACES the
+  # ceiling, so a review the file's ceiling would pass now fails. The env value must differ from the
+  # file's for this to distinguish "applied" from "ignored".
+  printf '%s' "$FINDING_EFFORT_3" > "$d/.preflight/review.json"
+  rc=0; out="$(PREFLIGHT_GATE_MAX_EFFORT=2 gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | a valid PREFLIGHT_GATE_MAX_EFFORT did not replace the file's ceiling (exit $rc): $out"
+
+
+  # THE CLASS, as a table: for every key, an invalid value must be REPORTED and must leave the value
+  # already in force exactly as it was. Each row's home line is chosen so the two failure modes give a
+  # different exit code - "kept the home value" vs "dropped the key and fell back to the built-in
+  # default" - which is what makes a row a real assertion rather than a repeat of the default. A new
+  # key needs a row here, not another bespoke assertion; that per-key patchwork is what let this class
+  # recur once per key.
+  #
+  # Columns: key | home policy | repo-local policy | review | expected exit
+  while IFS='|' read -r key home_line repo_line review want; do
+    [ -n "$key" ] || continue
+    printf '%b\n' "$home_line" > "$home/gate.toml"
+    printf '%b\n' "$repo_line" > "$d/.preflight-gate.toml"
+    printf '%s' "$review" > "$d/.preflight/review.json"
+    rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+    case "$out" in
+      *"ignoring $key"*) ;;
+      *) problems="$problems
+        | an invalid $key was not reported as ignored [$repo_line]: $out" ;;
+    esac
+    [ "$rc" = "$want" ] || problems="$problems
+        | an invalid $key changed the outcome [$repo_line]: got exit $rc, expected $want (the value already in force was not kept): $out"
+    case "$out" in *Traceback*) problems="$problems
+        | an invalid $key crashed the gate [$repo_line]: $out" ;; esac
+  done <<EOF
+doc_suffixes|doc_suffixes = [".foo"]|doc_suffixes = [""]|$FINDING_PY|1
+doc_suffixes|doc_suffixes = [".foo"]|doc_suffixes = 5|$FINDING_FOO|0
+doc_suffixes|doc_suffixes = [".foo"]|doc_suffixes = [""]|$FINDING_FOO|0
+doc_suffixes|doc_suffixes = [".foo"]|doc_suffixes = [".md", 1]|$FINDING_PY|1
+doc_suffixes|doc_suffixes = [".foo"]|doc_suffixes = ["../x"]|$FINDING_PY|1
+doc_suffixes|doc_suffixes = [".foo"]|doc_suffixes = ["."]|$FINDING_PY|1
+doc_blocks|doc_suffixes = [".foo"]\ndoc_blocks = true|doc_blocks = "ture"|$FINDING_FOO|1
+allow_issues|doc_suffixes = [".foo"]\nallow_issues = true|allow_issues = "maybe"|$FINDING_PY|0
+allow_issues|doc_suffixes = [".foo"]\nallow_issues = true|allow_issues = 2|$FINDING_PY|0
+allow_issues|doc_suffixes = [".foo"]\nallow_issues = false|allow_issues = 2|$FINDING_PY|1
+allow_issues|doc_suffixes = [".foo"]\nallow_issues = false|allow_issues = -1|$FINDING_PY|1
+max_effort|max_effort = 4|max_effort = true|$FINDING_EFFORT_3|0
+max_effort|max_effort = 4|max_effort = true|$FINDING_EFFORT_5|1
+max_effort|max_effort = 4|max_effort = inf|$FINDING_EFFORT_5|1
+max_effort|max_effort = 4|max_effort = 3.5|$FINDING_EFFORT_5|1
+max_effort|max_effort = 4|max_effort = "3x"|$FINDING_EFFORT_5|1
+EOF
+
+  # A suffix without a leading dot is NORMALISED, not matched raw: `endswith("txt")` would also match
+  # `notes.baktxt`, which is broader than the extension the writer meant. `.txt` blocks here precisely
+  # because it is not a `.txt`.
+  printf 'doc_suffixes = [".md"]\n' > "$home/gate.toml"
+  printf 'doc_suffixes = ["txt"]\n' > "$d/.preflight-gate.toml"
+  printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"notes.baktxt","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}' > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | a dotless suffix was matched raw instead of normalised, so notes.baktxt became advisory (exit $rc): $out"
+  case "$out" in *"leading dot"*) ;; *) problems="$problems
+        | normalising a suffix was not reported: $out" ;; esac
+
+  # A path fragment is not an extension: `endswith('docs/')` would match anything under a directory of
+  # that name, which is not "this file type". Rejected, so the home value stands.
+  printf 'doc_suffixes = [".foo"]\n' > "$home/gate.toml"
+  printf 'doc_suffixes = ["docs/"]\n' > "$d/.preflight-gate.toml"
+  printf '%s' "$FINDING_FOO" > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | a path fragment in doc_suffixes was accepted instead of rejected (exit $rc): $out"
+  case "$out" in *"is not a file extension"*) ;; *) problems="$problems
+        | a path fragment in doc_suffixes was not reported: $out" ;; esac
+
+  # An empty entry invalidates the WHOLE list rather than being dropped with the rest applied: a list
+  # the writer got wrong is one value, and partially honouring it is the silent difference this rule
+  # exists to avoid. The home value must therefore survive a list that also contains a valid entry.
+  printf 'doc_suffixes = [".foo"]\n' > "$home/gate.toml"
+  printf 'doc_suffixes = [".md", ""]\n' > "$d/.preflight-gate.toml"
+  printf '%s' "$FINDING_FOO" > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | a partly-invalid doc_suffixes list was applied instead of keeping the home value (exit $rc): $out"
+  case "$out" in *"empty entry"*) ;; *) problems="$problems
+        | an empty suffix entry alongside valid ones was not reported: $out" ;; esac
+
+  # Waiving key issues must not leave the finding labelled as if it still blocked: the label and the
+  # exit code have to agree, which is the same rule the doc_blocks override follows.
+  rm -f "$home/gate.toml"
+  printf 'doc_suffixes = [".md"]\nallow_issues = true\n' > "$d/.preflight-gate.toml"
+  printf '%s' "$FINDING_PY" > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | allow_issues = true did not waive a key issue (exit $rc): $out"
+  case "$out" in *"[waived]"*) ;; *) problems="$problems
+        | a waived finding was still labelled as blocking, contradicting the exit code: $out" ;; esac
+  case "$out" in *"waived (allow_issues)"*) ;; *) problems="$problems
+        | a waiver was not reported, so PASS gave no sign a finding was discarded: $out" ;; esac
+
+  # An unknown key is reported too: a typo'd key name is how a policy looks configured while doing
+  # nothing, and it has no validator to inherit the rule from.
+  printf 'doc_block = true\n' > "$d/.preflight-gate.toml"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  case "$out" in *"unknown key"*) ;; *) problems="$problems
+        | an unknown config key was not reported: $out" ;; esac
+
+  # With no config files at all, the built-in defaults make a .md advisory and a code finding block.
+  rm -f "$home/gate.toml" "$d/.preflight-gate.toml"
+  printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"README.md","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}' > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | with no config file, .md should still be advisory (exit $rc): $out"
+  printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"a.py","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}' > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | with no config file, a code finding should still block (exit $rc): $out"
+
+  if [ -z "$problems" ]; then ok "gate policy is configurable, layered home -> repo -> env" "REQ-HOOK-39"
+  else bad "gate policy is configurable, layered home -> repo -> env" "REQ-HOOK-39" \
+        "home=blocks .md, repo overrides, env overrides, malformed warns, defaults hold" "see below" "$problems
+"; fi
+}
+
+case_review_context() {
+  # The reviewer needs facts about the repository, so a deliberate trade-off is not reported as a
+  # defect. pr-agent carries them through `[artifacts]`, which is the mechanism a plain-diff run can
+  # actually reach: its own `repo_context_files` is dead here, because the plain-diff provider
+  # implements neither `get_repo_file_content` nor `get_repo_context_ref`.
+  #
+  # The contract is the extraction, and it has an asymmetry worth guarding: a `Code review` section is
+  # sent ALONE, so a long AGENTS.md does not follow the reviewer into the prompt; with no such section
+  # the whole file is sent. Both directions are asserted, because a regression that always sent the
+  # whole file would look right on a repository that happens to have only the section.
+  local d fake got problems="" out rc line
+  d="$work/ctx"; fake="$work/ctx-bin"
+  mkdir -p "$d" "$fake"
+  # Records the artifact path and its contents: what the model was SHOWN is only observable here.
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+{
+  printf 'ARTIFACT_PATH=%s\n' "${ARTIFACT_PATH:-}"
+  printf 'ARTIFACT_INSTRUCTIONS=%s\n' "${ARTIFACT_INSTRUCTIONS:-}"
+  printf 'ARTIFACT_LABEL=%s\n' "${ARTIFACTS__ARTIFACT_LABEL:-}"
+  if [ -n "${ARTIFACT_PATH:-}" ] && [ -f "$ARTIFACT_PATH" ]; then
+    printf -- '---\n'
+    cat "$ARTIFACT_PATH"
+  fi
+} > "$CTX_OUT"
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No","merge_recommendation":"safe_to_merge"},"usage":{"total_tokens":9}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent"
+
+  ( cd "$d" \
+      && git init -q -b main . \
+      && printf 'v = 1\n' > tracked.py \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m init ) >/dev/null 2>&1
+  git -C "$d" rev-parse --verify -q HEAD >/dev/null 2>&1 || {
+    bad "the repository's review context reaches the model" "REQ-HOOK-40" \
+        "a seeded repository" "no commit" \
+        "the case could not build its fixture, so no context could be extracted"
+    return
+  }
+
+  # Sentinel lines, not the literal bodies, so a failure names what leaked rather than just failing.
+  cat > "$d/AGENTS.md" <<'MD'
+# Notes for agents
+AGENT_SENTINEL_ONLY
+
+## Code review
+REVIEW_SENTINEL_KEPT
+
+### a subsection
+REVIEW_SENTINEL_NESTED
+
+## Later section
+LATER_SENTINEL_EXCLUDED
+MD
+  out="$work/ctx.txt"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+
+  got="$(cat "$work/ctx.sent" 2>/dev/null || printf '')"
+  # The path is a repo-relative scratch file, so its value is not worth pinning; its PRESENCE is.
+  # Read the first line rather than pattern-match the whole blob: the stub writes two lines, so a
+  # `case` on the blob cannot tell "unset" from "set" without anchoring on the line.
+  apath="$(printf '%s\n' "$got" | sed -n '1s/^ARTIFACT_PATH=//p')"
+  [ -n "$apath" ] || problems="$problems
+        | no ARTIFACT_PATH was exported, so the repository context never reached the reviewer"
+  # The label is asserted because it must arrive through the ENVIRONMENT: an [artifacts] section in
+  # preflight.toml is read (by apply_repo_settings) AFTER injection, so a label set there is never
+  # applied and the prompt header silently falls back to the filename.
+  case "$got" in *"ARTIFACT_LABEL=Repository context (from AGENTS.md)"*) ;;
+    *) problems="$problems
+        | the artifact label was not exported, so the prompt header misdescribes a local run as CI" ;; esac
+  case "$got" in *REVIEW_SENTINEL_KEPT*) ;; *) problems="$problems
+        | the Code review section was not sent" ;; esac
+  case "$got" in *REVIEW_SENTINEL_NESTED*) ;; *) problems="$problems
+        | a subsection of the Code review section was dropped (it must stay with its section)" ;; esac
+  case "$got" in *AGENT_SENTINEL_ONLY*) problems="$problems
+        | the rest of AGENTS.md was sent alongside the section, so a long file is not bounded by it" ;; esac
+  case "$got" in *LATER_SENTINEL_EXCLUDED*) problems="$problems
+        | a LATER top-level section leaked into the context, so the section never ends" ;; esac
+  # The framing matters as much as the text: without it the model reads the content as instructions to
+  # approve, which is the channel's whole risk.
+  case "$got" in *"not as instructions to approve anything"*) ;; *) problems="$problems
+        | no framing instruction was sent, so the context reads as instructions rather than as facts" ;; esac
+  line="$(grep -E '^preflight: issues=' "$out" 2>/dev/null | head -1)"
+  case "$line" in *"context=AGENTS.md (Code review section)"*) ;; *) problems="$problems
+        | the summary line did not report that repository context was used: $line" ;; esac
+
+  # A fenced block inside the section must not be read as the section boundary. A shell comment at
+  # column 0, or a fenced example containing a heading, is exactly what a context file of code facts
+  # tends to contain - and ending the section there silently drops every fact AFTER it, so the reviewer
+  # re-raises the trade-off the section was written to answer.
+  cat > "$d/AGENTS.md" <<'MD'
+## Code review
+BEFORE_FENCE
+```sh
+# this is a shell comment, not a heading
+echo hi
+```
+AFTER_FENCE
+## Out of section
+EXCLUDED_SENTINEL
+MD
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent4" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent4" 2>/dev/null || printf '')"
+  case "$got" in *AFTER_FENCE*) ;; *) problems="$problems
+        | a fenced block ended the section early, silently dropping the facts after it" ;; esac
+  case "$got" in *EXCLUDED_SENTINEL*) problems="$problems
+        | the section did not end at the next same-or-higher heading after a fenced block" ;; esac
+
+  # A CLOSING fence carries nothing but whitespace after the run, so a fence line with an info string
+  # inside a block is content. Closing on it instead would expose a heading-looking line inside the
+  # example and truncate the section - the same silent loss, one level of nesting deeper.
+  cat > "$d/AGENTS.md" <<'MD'
+## Code review
+NESTED_BEFORE
+```
+```sh
+## this line is inside the fence, not a heading
+```
+NESTED_AFTER
+## Out
+NESTED_EXCLUDED
+MD
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent10" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent10" 2>/dev/null || printf '')"
+  case "$got" in *NESTED_AFTER*) ;; *) problems="$problems
+        | a tagged fence inside a block ended it early, truncating the section" ;; esac
+  case "$got" in *NESTED_EXCLUDED*) problems="$problems
+        | the section did not end at the next real heading after a nested fence" ;; esac
+
+  # A bare `#` is a valid EMPTY heading, so the title group is None. Passing that to a regex raises, the
+  # extractor exits non-zero, and the `(unreadable)` branch silently disables the whole feature for the
+  # repository - a one-line trigger, which is why it is asserted rather than reasoned about.
+  cat > "$d/AGENTS.md" <<'MD'
+#
+## Code review
+BARE_HASH_SENTINEL
+MD
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent8" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent8" 2>/dev/null || printf '')"
+  case "$got" in *BARE_HASH_SENTINEL*) ;; *) problems="$problems
+        | a bare `#` line disabled the context entirely instead of being read as an empty heading" ;; esac
+  # `(unreadable)` appears only on the SUMMARY line, not in what the stub was handed, so this must read
+  # $out - a check against $got could never fire, which is how it survived the first round.
+  case "$(grep -E '^preflight: issues=' "$out" 2>/dev/null | head -1)" in *"(unreadable)"*) problems="$problems
+        | the context file was reported unreadable, so the extractor failed rather than extracting" ;; esac
+
+  # An indented heading is a heading in CommonMark, and the fence scan already allows leading whitespace;
+  # column-0 anchoring would make the two disagree, and would send the whole file instead of the section.
+  cat > "$d/AGENTS.md" <<'MD'
+   ## Code review
+INDENTED_SENTINEL
+   ## Later
+INDENTED_EXCLUDED
+MD
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent9" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent9" 2>/dev/null || printf '')"
+  case "$got" in *INDENTED_SENTINEL*) ;; *) problems="$problems
+        | an indented Code review heading was not recognised" ;; esac
+  case "$got" in *INDENTED_EXCLUDED*) problems="$problems
+        | an indented later heading did not end the section, so the rest of the file leaked in" ;; esac
+
+  # A column-0 `#` with no following space is NOT a heading in CommonMark. Reading one as a heading
+  # ends the section there and silently drops the facts after it - the same truncation the fence check
+  # prevents, for code that is not fenced.
+  cat > "$d/AGENTS.md" <<'MD'
+## Code review
+HASH_BEFORE
+#!/bin/sh
+#hashtag
+HASH_AFTER
+## Out
+HASH_EXCLUDED
+MD
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent7" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent7" 2>/dev/null || printf '')"
+  case "$got" in *HASH_AFTER*) ;; *) problems="$problems
+        | a `#` line with no following space ended the section, dropping the facts after it" ;; esac
+  case "$got" in *HASH_EXCLUDED*) problems="$problems
+        | the section did not end at the next real heading" ;; esac
+
+  # Resolved against the repository root Hardcoding it made the prompt say "from AGENTS.md"
+  # while the summary line said otherwise - two sources disagreeing about the same fact.
+  printf '## Code review\nALT_SENTINEL\n' > "$d/ALT.md"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent5" \
+      PREFLIGHT_HOME="$work/ctx-cfg" PREFLIGHT_CONTEXT_FILE=ALT.md \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent5" 2>/dev/null || printf '')"
+  case "$got" in *"ARTIFACT_LABEL=Repository context (from ALT.md)"*) ;;
+    *) problems="$problems
+        | the artifact label did not name the file actually used (PREFLIGHT_CONTEXT_FILE=ALT.md)" ;; esac
+  case "$got" in *ALT_SENTINEL*) ;; *) problems="$problems
+        | the override file's section was not sent" ;; esac
+
+  # With no such section the whole file is sent - the compatibility direction, where an existing
+  # AGENTS.md is used as-is rather than being silently ignored.
+  printf '# Notes\nWHOLE_SENTINEL\n' > "$d/AGENTS.md"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent2" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent2" 2>/dev/null || printf '')"
+  case "$got" in *WHOLE_SENTINEL*) ;; *) problems="$problems
+        | with no Code review section the WHOLE AGENTS.md should be sent, but it was not" ;; esac
+  line="$(grep -E '^preflight: issues=' "$out" 2>/dev/null | head -1)"
+  # An EXCLUSION, because the plain label is a substring of the section label: a positive match would
+  # also accept `context=AGENTS.md (Code review section)` and could not tell the two modes apart.
+  case "$line" in *"(Code review section)"*) problems="$problems
+        | with no Code review heading the section label was still reported: $line" ;; esac
+  case "$line" in *"context=AGENTS.md"*) ;; *) problems="$problems
+        | the summary line did not report whole-file context: $line" ;; esac
+
+  # No context file at all must leave the run exactly as it was: no artifact, nothing claimed.
+  rm -f "$d/AGENTS.md"
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent3" \
+      PREFLIGHT_HOME="$work/ctx-cfg" \
+      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+  got="$(cat "$work/ctx.sent3" 2>/dev/null || printf '')"
+  apath="$(printf '%s\n' "$got" | sed -n '1s/^ARTIFACT_PATH=//p')"
+  [ -z "$apath" ] || problems="$problems
+        | ARTIFACT_PATH was exported with no context file present: $apath"
+  line="$(grep -E '^preflight: issues=' "$out" 2>/dev/null | head -1)"
+  case "$line" in *context=*) problems="$problems
+        | the summary line claimed context when there was no context file: $line" ;; esac
+
+  if [ -z "$problems" ]; then ok "the repository's review context reaches the model" "REQ-HOOK-40"
+  else bad "the repository's review context reaches the model" "REQ-HOOK-40" \
+        "section-only when present, whole file otherwise, nothing when absent" "see below" "$problems
+"; fi
+}
+
 # ---------------------------------------------------------------------------- live end-to-end
 # Needs the installed helpers and an API key, so it is skipped when either is absent.
 
@@ -1519,7 +2064,8 @@ REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK
 #   orthogonal            do not test blocking at all, or test a different file.
 insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
 REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31
-REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36 REQ-HOOK-37'
+REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36 REQ-HOOK-37 REQ-HOOK-38
+REQ-HOOK-39 REQ-HOOK-40'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -1650,7 +2196,10 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_bounded_shutdown \
     case_scope_defaults \
     case_commit_scope_reviews_untracked \
-    case_bundle_hooks_executable
+    case_bundle_hooks_executable \
+    case_gate_doc_advisory \
+    case_gate_config \
+    case_review_context
   say ""
 fi
 

@@ -7,8 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+## [0.2.0] - 2026-10-10
+
 ### Added
 
+- **The reviewer now receives the repository's own review context, from AGENTS.md.** A reviewer
+  cannot tell a deliberate, documented trade-off from an oversight, so it reports the trade-off as
+  a defect - the `.preflight-gate.toml` trust boundary came back as a finding three times. A
+  heading in AGENTS.md whose text starts with `Code review` is extracted and sent **alone**, so a
+  long AGENTS.md does not follow the reviewer into the prompt; with no such heading the whole
+  file is sent, because how much context to hand over is the repository's choice. The summary
+  line reports `context=<file>` so a review given the repo's facts is distinguishable from one
+  that was not. It reaches the model through pr-agent's `[artifacts]` channel: `repo_context_files`
+  cannot, because the plain-diff provider implements neither `get_repo_file_content` nor
+  `get_repo_context_ref`, leaving `build_repo_context` empty for a `--stdin` run. The file carries
+  facts, never verdicts - suppression is what the tier and the gate's opt-outs are for - and it is
+  read from the working tree, unlike pr-agent's and Codacy's config files, because this is a local
+  pre-commit harness where the file is committed and therefore part of the diff under review.
+  Guarded by `REQ-HOOK-40` (14 mutations confirmed). Every artifact setting comes from the
+  environment, not `preflight.toml`: pr-agent injects the artifact *before* it loads
+  `--extra_config_url`, so an `[artifacts]` section there is read too late - the first version set
+  `artifact_label` in config and the prompt still said `CI Artifact: context.md`. CI now asserts the
+  section stays out of that file. The section extraction skips fenced code blocks, so a shell comment
+  or a fenced example cannot end the section and silently drop the facts after it, and the prompt's
+  artifact label names the file actually used, so it cannot disagree with `PREFLIGHT_CONTEXT_FILE`.
+
+- **`preflight-gate`'s policy is configurable, with machine, repo and environment layers.** The gate's
+  tunables - which file types count as documentation (`doc_suffixes`), whether a documentation finding
+  blocks (`doc_blocks`), whether key issues are ignored (`allow_issues`), and the effort ceiling
+  (`max_effort`) - now come from two optional TOML files: `$PREFLIGHT_HOME/gate.toml` (created from
+  `files/gate.toml.example` on install, only if absent) and a repo-local `./.preflight-gate.toml` that
+  overrides it. The `PREFLIGHT_GATE_*` environment variables still override both, so nothing that worked
+  before changes. Every key has a built-in default. A malformed file warns and falls back rather than
+  crashing (a crash is a non-zero exit, which the commit hook reads as "the review did not pass"), and on
+  a Python older than 3.11 - where stdlib `tomllib` is unavailable - no file is read and a present file
+  warns, because an unrunnable gate would fail closed and block every commit. Every key in the shipped
+  template is commented out, so an untouched install and no file behave identically and the built-in
+  defaults stay the single source of truth; a live key would freeze today's default into every machine
+  and silently override a later change to it.
+
+  One rule covers every key: a value that is *present but invalid* is reported and the value already
+  in force is kept - never silently dropped, and never coerced permissively - so a repo cannot come to
+  believe its policy is loaded when it is not. The keys name only how to validate their own value;
+  the warning, the fallback and the precedence are shared, so a new key cannot invent its own failure
+  behaviour. Each value's accepted domain is a WHITELIST rather than a list of rejected cases: a
+  suffix must match one extension shape (a dotless `"txt"` is normalised to `.txt` and reported; a
+  path fragment, `.`, an empty string or a non-string entry is invalid), and a boolean accepts
+  `true`/`false` and the `1`/`0` mirror only - "any non-zero number is true" would let
+  `allow_issues = 2` disable the key-issue check. A blacklist is unbounded, and each of those was a
+  bug found in turn. A finding's tier is kept consistent with the verdict - a waived key issue prints
+  `[waived]` and is counted rather than still reading `[blocking]` - and an empty `doc_suffixes`
+  entry invalidates the whole list instead of being dropped with the rest applied. Guarded by
+  `REQ-HOOK-39`, whose invalid-value cases are driven from a table rather than per-key assertions.
+- **Findings on documentation no longer block a commit.** pr-agent's finding schema has no severity
+  field, so `preflight-gate` failed on every finding alike - a typo in a README counted the same as a
+  bug in the hook. The gate now derives a tier from each finding's **file type**: documentation
+  (`.md`, `.markdown`, `.rst`, `.adoc`) is **advisory** - still printed, tagged
+  `[advisory]`, and counted separately - while everything else, including code under `docs/` and a
+  `requirements.txt`, blocks as before. "Advisory" means the finding does not fail the gate on its own:
+  `merge_recommendation = changes_required` and `security_concerns` still fail regardless of tier. Because the tier is applied inside the gate, it reaches the commit hook for
+  free: `preflight` records the gate's exit as the sidecar verdict, and the hook reads that. Advisory by
+  default, so the old strict behaviour is `PREFLIGHT_GATE_DOC_BLOCKS=1`. The path is normalised before
+  matching, since real payloads carry a trailing newline in `relevant_file` (`'README.md\n'`), which a
+  naive `endswith('.md')` classified as code. Guarded by `REQ-HOOK-38`, whose mutations were each
+  confirmed to fail the case.
 - **`preflight`'s summary line now carries `risk=` and `merge=`.** `merge_recommendation` is one of the
   four fields `preflight-gate` fails on, and it previously appeared only in the gate's own output - so
   `preflight review` could report a change that the gate would then refuse, discoverable only by running a
@@ -320,6 +384,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ROADMAP.md` referenced a `github-action.example.yml` staged for Layer 3 that has never existed in any
   commit.
 
+- `config.fallback_models` no longer points at a model the ClinePass endpoint cannot route. The
+  upstream default (`["gpt-5.6-terra"]`) is a bare id, which the endpoint rejects (ids must be
+  `provider/model`), so a failed primary model retried against a dead one; it is now
+  `["openai/cline-pass/glm-5.3-flash"]`.
+
 ### Changed
 
 - **`files/preflight.toml` no longer sets `pr_reviewer.extra_instructions` or `[config] reasoning_effort`.**
@@ -389,13 +458,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `custom_model_max_tokens = 0` / `max_model_tokens = 0` are now documented as meaningful: `0` means
   "let LiteLLM resolve the window" and "no clamp" respectively, rather than being unexplained.
 
-### Fixed
-
-- `config.fallback_models` no longer points at a model the ClinePass endpoint cannot route. The
-  upstream default (`["gpt-5.6-terra"]`) is a bare id, which the endpoint rejects (ids must be
-  `provider/model`), so a failed primary model retried against a dead one; it is now
-  `["openai/cline-pass/glm-5.3-flash"]`.
-
 ### Known issue
 
 - **`preflight review` can complete and then never exit.** Both artifacts are written, and then
@@ -447,5 +509,6 @@ Initial release: a deployable, machine-local PR-Agent review setup for the Cline
   `GIT_INDEX_FILE` plus `git commit-tree` with `commit.gpgsign=false`, so a global `gpgsign = true`
   cannot break it.
 
-[Unreleased]: https://github.com/413x5/preflight/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/413x5/preflight/releases/tag/v0.2.0
 [0.1.0]: https://github.com/413x5/preflight/releases/tag/v0.1.0

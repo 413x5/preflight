@@ -1,0 +1,40 @@
+# Optional policy for preflight-gate. Every key has a built-in default, and every key below is COMMENTED
+# OUT: this file is a reference for what can be set, not a copy of the defaults. Uncommenting a line and
+# editing it is what changes the policy.
+#
+# That is deliberate. A present key is authoritative, so shipping these values live would freeze today's
+# defaults into every machine that installed the bundle: a later release that changed a default would be
+# silently ignored here, and this file would become a second source of truth that disagrees with the
+# code. Left commented, an untouched file and no file behave identically, at every version.
+#
+# Two files are read - this machine-wide one at ${PREFLIGHT_HOME:-~/.config/preflight}/gate.toml, then
+# ./.preflight-gate.toml in the repository being reviewed - and the later file overrides the earlier.
+# The PREFLIGHT_GATE_* environment variables override both, so a one-off run needs no edit here.
+#
+# `preflight-gate --help` lists the keys; the invalid-value behaviour is in docs/DESIGN.md.
+
+# File types whose findings are ADVISORY (reported and counted, but not fatal). Matched on the
+# extension, so the rule holds wherever the file lives and cannot be defeated by a directory name.
+# `.txt` is deliberately not in the default list - `requirements.txt` is a dependency manifest, and a
+# finding there must keep blocking - and neither is `.mdx`, which is Markdown plus executable JSX.
+#
+# Default: [".md", ".markdown", ".rst", ".adoc"]
+# doc_suffixes = [".md", ".markdown", ".rst", ".adoc"]
+
+# Count documentation findings as blocking (the strict behaviour). Equivalent to
+# PREFLIGHT_GATE_DOC_BLOCKS=1. Booleans are `true`/`false`; `1`/`0` are also accepted (a TOML integer is
+# a natural mirror of the environment variable), but any other number is rejected and reported.
+#
+# Default: false
+# doc_blocks = true
+
+# Ignore key issues. Security concerns and merge_recommendation=changes_required still fail.
+# Equivalent to PREFLIGHT_GATE_ALLOW_ISSUES=1.
+#
+# Default: false
+# allow_issues = true
+
+# Fail when estimated_effort_to_review exceeds this.
+#
+# Default: unset (no ceiling)
+# max_effort = 3

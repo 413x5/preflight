@@ -263,15 +263,128 @@ set. Reviews therefore sample freely - the stated limit of `new=N/M` - and `ROAD
 | Exit | Meaning |
 |---|---|
 | 0 | pass |
-| 1 | `merge_recommendation = changes_required`, or key issues present |
+| 1 | `merge_recommendation = changes_required`, or a key issue on non-documentation |
 | 2 | security concerns present |
 | 3 | no review found |
 
-Env knobs: `PREFLIGHT_GATE_ALLOW_ISSUES=1` (ignore key issues), `PREFLIGHT_GATE_MAX_EFFORT=N` (fail above the
-estimated effort).
+Findings carry no severity field from the model, so the gate derives a tier from each finding's
+`relevant_file`: a documentation **file type** (`.md`, `.markdown`, `.rst`, `.adoc` by default) is
+**advisory** - printed and tagged, and never fatal on its own, so a doc typo cannot block a commit
+by itself; `merge_recommendation = changes_required` and `security_concerns` still fail - and everything
+else, including a finding with no file, is **blocking**. The path is normalised before it is matched
+(real payloads carry a trailing newline in `relevant_file`, and a naive `endswith('.md')` would classify
+those as code).
+
+A finding's tier is always printed, and it is kept consistent with the verdict: with `doc_blocks` a
+promoted finding prints `[blocking]`, and with `allow_issues` a waived one prints `[waived]` and is
+counted, because a label that disagrees with the exit code is worse than no label. For the same
+reason an empty entry anywhere in `doc_suffixes` invalidates the whole list rather than being
+dropped with the rest applied - a list the writer got wrong is one value.
+
+The rule is keyed on the **file type, not the directory**: executable code under `docs/` (a Sphinx
+`conf.py`, a build script) keeps blocking, so the tier cannot be defeated by where a file sits. `.txt`
+is deliberately not in the list: `requirements.txt` and `constraints.txt` are dependency manifests, and
+a finding such as "this pin is vulnerable" must keep failing the gate. `.mdx` is out too, being
+Markdown plus executable JSX. The remaining cost is the safe direction - an unusual prose extension is
+treated as code and blocks.
+
+**The tier is a heuristic over model output, and this is its limit.** `relevant_file` is produced by the
+same model being gated, so a finding whose path is mislabeled as documentation is tagged `[advisory]` and
+does not block. The gate cannot detect that on its own: it reads `review.json`, not the diff, so it has
+no independent list of changed files to check the path against. The fail-safe direction bounds the blast
+radius - an absent or unrecognised path blocks - so the exposure is a model that names non-documentation
+as documentation, not an ordinary code finding.
+
+## The gate's policy file
+
+Every gate tunable has a built-in default, so the gate needs no config to run. It is read from two
+optional TOML files - `$PREFLIGHT_HOME/gate.toml` (machine-wide), then `./.preflight-gate.toml` (repo,
+overriding) - and the `PREFLIGHT_GATE_*` environment variables override both, so a one-off invocation
+needs no edit. Keys: `doc_suffixes` (list), `doc_blocks`, `allow_issues` (bools), `max_effort` (int).
+
+**One rule, one place.** A value that is present but invalid is *reported* and the value already in
+force is *kept*. Every key names only how to validate its own value; the warning, the fallback and the
+precedence are not per-key, so a new key cannot invent its own failure behaviour. That is deliberate,
+because the alternative - drop the key, or fall back to a hardcoded default - silently changes
+enforcement, and this class recurred once per key while each had its own setter. The environment is
+applied through the same validator, so a one-off override cannot behave differently from the file value
+it replaces, and validation happens per value and left to right, so a bad value in the repo-local file
+cannot mask a valid one from the home file.
+
+| Situation | What happens |
+|---|---|
+| A value that is present but invalid - `doc_blocks = "ture"`, `max_effort = inf`/`3.5`/`true`, a non-numeric env override, or a boolean given as a number other than the `0`/`1` mirror | warns, naming the key and the reason, and keeps the value already in force. The `0`/`1` restriction matters: "any non-zero number is true" would let `allow_issues = 2` disable the key-issue check, which is the unsafe direction |
+| A suffix entry | validated against one WHITELISTED shape - a leading dot and a few name characters - rather than a list of rejected cases. A dotless `"txt"` is normalised to `.txt` (matching it raw would also match `notes.baktxt`, and the normalisation is reported); a path fragment, `.`, an empty string, or a non-string entry is invalid, and the previous list stands. The whitelist is the point: a blacklist of rejected inputs is unbounded, and every one of these was a bug found in turn |
+| An unknown key | warns; a typo'd key name is how a policy looks configured while doing nothing |
+| A key that is absent | nothing to say: the built-in default, or the value already in force, stands |
+| A malformed (unparseable) config file | warns and falls back. A crash is a non-zero exit, which the commit hook reads as "the review did not pass" |
+| A config file that is present but unreadable | warns and falls back; only an *absent* file is silent |
+| A `tomllib`-less interpreter (Python < 3.11) | no file is read; a present file warns, because a hard dependency would leave the gate unable to run, and it fails closed |
+| The repo-local filename | `.preflight-gate.toml`, not `.preflight/gate.toml` - pr-agent owns `.preflight/` via `--output`/`--json-output` |
+| The trust boundary | a committed `.preflight-gate.toml` can relax enforcement (`allow_issues`, wider `doc_suffixes`) without the operator setting anything. That is accepted, not overlooked: the hook is a local pre-commit check on the committer's own work, and a committer who wants to skip it already has `git commit --no-verify` / `PREFLIGHT_SKIP=1`. It is not a boundary against a hostile repository, and it should not be relied on as one |
+
+Because the tier and the effort ceiling are what decide a verdict, the config file is not cosmetic: a
+policy that silently failed to load would leave a repo believing its rules were in force. `REQ-HOOK-39`
+pins the precedence in both directions and the rule above, driven from a table: one row per key, with
+the two wrong behaviours - dropping the key to a hardcoded default, or applying the invalid value -
+chosen so that each row's exit code differs from both. A new key needs a row there rather than another
+bespoke assertion.
 
 `preflight review` runs the same check to record `gate.verdict` in `review.meta.json`, so the commit hook
 and the gate can never disagree about what counts as a pass.
+
+## Reviewer context: the `Code review` section of AGENTS.md
+
+A reviewer cannot tell a deliberate, documented trade-off from an oversight, so it reports the
+trade-off - the `.preflight-gate.toml` directory trust boundary has been raised as a finding three
+times, and each time the answer was the same. The fix is to hand the reviewer the repository's own
+facts, and AGENTS.md is where they go: it is the convention every other tool reads (Copilot, Cursor,
+Cline, CodeRabbit, and pr-agent's own default `repo_context_files` entry), so no team maintains a
+second file.
+
+A heading whose text starts with `Code review` - any level - is extracted and sent **alone**, so a long
+AGENTS.md does not follow the reviewer into the prompt. `#`-style (ATX) headings only, which is what
+the convention uses, matched as CommonMark defines them: up to three leading spaces, then the hashes,
+which must be followed by a space or end the line - otherwise a `#!/bin/sh` or `#hashtag` line would read
+as a heading and end the section. Fences are CommonMark-correct too, so a closing fence carries only
+whitespace after the run and a tagged fence inside a block stays content. A Setext heading (text
+underlined with `===`) is not matched at all; in every unmatched case the whole file is sent, which is
+the safe direction - but it does defeat the bound, so the limitation is stated rather than implied. The extraction skips fenced code blocks: a
+shell comment at column 0, or a fenced example containing a heading, would otherwise be read as the
+section boundary and silently drop every fact after it - the failure this channel exists to prevent. With no such heading the **whole file** is
+sent: how much context to hand over is the repository's choice, not the harness's. `PREFLIGHT_CONTEXT_FILE`
+names a different file. The summary line reports `context=AGENTS.md (Code review section)` or the plain
+filename, because a review that was given the repository's facts is not the same review as one that was
+not, and nothing else in the output distinguishes them.
+
+**The mechanism, and why it is not pr-agent's own.** `repo_context_files` looks like the right feature
+and is architecturally dead here: the plain-diff provider implements neither `get_repo_file_content` nor
+`get_repo_context_ref`, so `build_repo_context` returns empty for a `--stdin` run. The `[artifacts]`
+channel does reach `pr_reviewer`, so it carries the file. It composes into the same prompt slot
+`extra_instructions` occupies - which is why `[pr_reviewer]` still does not set that key (see
+ROADMAP.md).
+
+**Everything for it must come through the environment, not `preflight.toml`.** pr-agent calls
+`inject_artifact_context()` from `cli.py` *before* `apply_repo_settings()` loads `--extra_config_url`,
+so an `[artifacts]` section there is read too late: `enable`, `target_tools` and `artifact_label`
+resolve from the environment and defaults first. The first version of this shipped such a section and
+the label never took effect - the prompt still read `CI Artifact: context.md`. The helper therefore
+sets `ARTIFACT_PATH`, `ARTIFACT_INSTRUCTIONS` (both first-class env keys) and `ARTIFACTS__ARTIFACT_LABEL`
+(dynaconf's `SECTION__KEY` form), and CI asserts that `[artifacts]` stays OUT of `preflight.toml` so a
+future edit cannot reintroduce a setting that looks configured and does nothing.
+
+**Two rules.** The file carries *facts* - architecture, accepted trade-offs, known limitations - never
+verdicts: never "do not report X". Suppression is what the tier and the gate's opt-outs are for, and a
+context channel that can silence findings is a trust boundary in disguise. And it is read from the
+**working tree**, not the base branch, which is the opposite of what pr-agent and Codacy do with their
+config files; they read from the default branch so a change cannot edit its own reviewer instructions.
+That is deliberate here: this is a local pre-commit harness, the file is committed and therefore part of
+the diff under review, and it is repo-controlled in exactly the way `.preflight-gate.toml` is - not a
+boundary against an untrusted repository.
+
+**What it does not fix.** Missing facts are only one cause of a wrong finding. A model that misreads
+context it already has - the shell-quoting false positive, where `cat <<'EOF'` was in the diff - is a
+different failure, and no amount of added context addresses it.
 
 ## Making one review report everything (why the loop converges)
 

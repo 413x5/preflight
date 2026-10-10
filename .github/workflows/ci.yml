@@ -144,7 +144,28 @@ jobs:
               "additional_reasoning_effort_models is set again: see the open decision in ROADMAP.md"
           assert "pr_code_suggestions" not in d, \
               "pr_code_suggestions is configured again: its chunk size only made the padding nudge louder"
+          # The review-context mechanism is deliberately NOT configured here. pr-agent calls
+          # `inject_artifact_context()` (cli.py) BEFORE `apply_repo_settings()` loads
+          # `--extra_config_url` (pr_agent.py), so an `[artifacts]` section in this file is read too late
+          # to matter: `enable`, `target_tools` and `artifact_label` all come from the env/defaults
+          # first. The helper sets them through the environment, and REQ-HOOK-40 pins that. A section
+          # here would look configured while doing nothing - which is how the first version of this
+          # shipped a label the reviewer never saw.
+          assert "artifacts" not in d, \
+              "an [artifacts] section is back: it is applied AFTER injection, so it cannot take effect (see REQ-HOOK-40)"
           print("config parses:", cfg["model"], "->", cfg["fallback_models"])
+          PY
+          # The gate's policy template. It must PARSE, and it must be INERT: every key is commented out,
+          # so an untouched install and no file behave identically and the built-in defaults stay the one
+          # source of truth. A live key here would freeze today's default into every machine, and a later
+          # release that changed that default would be silently ignored.
+          python3 - "$tmp/cfg/gate.toml" "$PWD/files/gate.toml.example" <<'PY'
+          import sys, tomllib
+          for label, path in (("installed", sys.argv[1]), ("template", sys.argv[2])):
+              with open(path, "rb") as fh:
+                  d = tomllib.load(fh)
+              assert d == {}, f"{label} gate.toml sets {sorted(d)}; every key must be commented out so the built-in defaults stay authoritative"
+          print("gate policy template parses and is inert (no keys set)")
           PY
           rm -rf "$tmp"
 
@@ -192,7 +213,10 @@ jobs:
           rc=0
           d="$(mktemp -d)"
           gate="$PWD/files/preflight-gate"
-          inside() { ( cd "$d" && PREFLIGHT_DIR=.preflight bash "$gate" ); }
+          # A scratch PREFLIGHT_HOME: the gate reads $PREFLIGHT_HOME/gate.toml when it exists, and
+          # install.sh creates that file on a developer machine, so an edited policy would otherwise
+          # change these assertions' expected exit codes.
+          inside() { ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight bash "$gate" ); }
           put() { mkdir -p "$d/.preflight"; printf '%s' "$1" > "$d/.preflight/review.json"; }
 
           # Booleans where a string was assumed: this is the shape that used to traceback.
@@ -250,6 +274,23 @@ jobs:
           put '{"review":{"estimated_effort_to_review_[1-5]":5,"key_issues_to_review":[]}}'
           if ( cd "$d" && PREFLIGHT_DIR=.preflight PREFLIGHT_GATE_MAX_EFFORT=3 bash "$gate" ) >/dev/null 2>&1; then
             echo "effort clamp did not fail at 5 > 3"; rc=1
+          fi
+
+          # The doc tier: a finding on documentation is advisory and must NOT fail the gate, while one
+          # on code must. `relevant_file` carries a trailing newline in real payloads, which is what a
+          # naive `endswith('.md')` gets wrong, so the doc fixture keeps it.
+          put '{"review":{"key_issues_to_review":[{"relevant_file":"README.md\n","issue_header":"typo","issue_content":"c"}],"security_concerns":"No"}}'
+          if ! ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight bash "$gate" ) >/dev/null 2>&1; then
+            echo "a documentation finding failed the gate (it is advisory by default)"; rc=1
+          fi
+          if ! ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight PREFLIGHT_GATE_DOC_BLOCKS=1 bash "$gate" ) >/dev/null 2>&1; then
+            :
+          else
+            echo "PREFLIGHT_GATE_DOC_BLOCKS=1 did not make a documentation finding block"; rc=1
+          fi
+          put '{"review":{"key_issues_to_review":[{"relevant_file":"files/preflight\n","issue_header":"bug","issue_content":"c"}],"security_concerns":"No"}}'
+          if ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight bash "$gate" ) >/dev/null 2>&1; then
+            echo "a code finding passed the gate (the doc tier must not cover code)"; rc=1
           fi
 
           rm -rf "$d"

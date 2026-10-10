@@ -102,6 +102,11 @@ install -m 0755 "$files/preflight"      "$bindir/preflight"
 install -m 0755 "$files/preflight-gate" "$bindir/preflight-gate"
 install -m 0644 "$files/VERSION"        "$cfg/VERSION"
 install -m 0644 "$files/ensure-link.sh" "$cfg/ensure-link.sh"
+# The gate's policy template. Installed only if absent, so an edited live file is never overwritten -
+# the gate has built-in defaults, so an untouched file and no file behave identically.
+if [ -f "$files/gate.toml.example" ] && [ ! -f "$cfg/gate.toml" ]; then
+  install -m 0644 "$files/gate.toml.example" "$cfg/gate.toml"
+fi
 # preflight-hook is what a repo's committed .githooks/pre-commit calls (via $PREFLIGHT_HOOK or
 # ~/.config/preflight/preflight-hook), so it lives with the config rather than on PATH.
 install -m 0755 "$files/preflight-hook" "$cfg/preflight-hook"

@@ -72,6 +72,7 @@ can never miss anything".
 | `files/VERSION` | The bundle version, single source of truth. `preflight --version` and `install.sh` read it; CI fails if it, the `CHANGELOG` heading, and `--version` disagree |
 | `files/preflight.toml` | The global config template (model, provider knobs, review caps) |
 | `files/ensure-link.sh`, `files/secrets.toml.example` | Secrets relink helper; template with an empty key |
+| `files/gate.toml.example` | Template for `preflight-gate`'s policy (`doc_suffixes`, `doc_blocks`, `allow_issues`, `max_effort`); installed only if `$PREFLIGHT_HOME/gate.toml` is absent |
 | `AGENTS-review-snippet.md` | The block pasted into a *consumer* repo's `AGENTS.md` |
 | `tests/run.sh`, `tests/sample/` | Integration tests for the hook; the fixture they build on |
 | `docs/DESIGN.md`, `docs/TROUBLESHOOTING.md` | How/why it works; symptoms and fixes |
@@ -150,6 +151,7 @@ fails.
 | Syntax (hooks/tests are POSIX `sh`) | `for f in files/preflight-hook files/githooks/pre-commit files/githooks/post-commit tests/run.sh; do sh -n "$f" || echo "FAIL $f"; done` |
 | Installer into a throwaway prefix | `PREFLIGHT_HOME=$(mktemp -d)/cfg PREFLIGHT_BIN_DIR=$(mktemp -d) PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 ./install.sh` |
 | Generated config is valid TOML | `python3 -c "import tomllib;print(tomllib.load(open('CFG/preflight.toml','rb'))['config'])"` |
+| Gate policy template is valid TOML | `python3 -c "import tomllib;print(tomllib.load(open('files/gate.toml.example','rb')))"` |
 | Commit-hook integration tests | `./tests/run.sh hook` |
 | Selfcheck (the suite against a neutered hook) | `./tests/run.sh selfcheck` |
 | Version is consistent | `v=$(head -n1 files/VERSION); grep -q "^## \[$v\]" CHANGELOG.md && ./files/preflight --version` |
@@ -185,6 +187,17 @@ Ruby's built-in Psych if you need to inspect config.
 - **Never make the `post-commit` advisory exit 0 on a sidecar it cannot read.** It is the only thing that
   reports silent non-enforcement, so a malformed sidecar or a missing `python3` must warn. An *absent*
   sidecar stays quiet (no review has run, and `pre-commit` refuses first).
+
+## A trap in this repo's own shell
+
+macOS ships **bash 3.2**, and its parser mis-handles a heredoc that sits **inside `$( )`** when the body
+contains an **apostrophe**: it treats the quote as opening a string and reports `unexpected EOF while
+looking for matching '`, pointing at a line far from the cause. The helper has five such sites
+(`files/preflight`, `files/preflight-hook`, `files/githooks/post-commit`, plus two in `tests/run.sh`).
+
+So: an apostrophe is fine in a normal heredoc, and fine in a comment *outside* one - but not in the body
+of a `<<'PY'` that is inside a command substitution. Write `the hashes` rather than `the #'s`. The syntax
+check catches it (`sh -n` / `bash -n` per file), which is also how CI would.
 
 ## This machine has the bundle installed
 
@@ -309,6 +322,28 @@ So:
 
 Test before submitting: would a reviewer find more *claims* to check in this diff than *code*? If yes, cut
 until it does not.
+
+<!-- Only the section below is sent with a review (REQ-HOOK-40); the rest of this file is not. Keep it
+     to FACTS - state a decision and point at where its reasoning lives. Not "do not report X", which is
+     what the gate's tier and opt-outs are for. This comment is not part of the sent text because it sits
+     above the heading. -->
+
+## Code review
+
+- **The bundle is shell, git hooks and docs.** There is no build step and no package manager, by design.
+- **`files/preflight-gate`'s documentation tier is advisory by default**, covering `.md`, `.markdown`,
+  `.rst` and `.adoc`. Which paths that implies, and the reasoning behind it, are in `docs/DESIGN.md`.
+- **`.preflight-gate.toml` and the gate's opt-outs can relax enforcement.** The hook is a local
+  pre-commit check on the committer's own work and `git commit --no-verify` bypasses it regardless; the
+  trust-boundary reasoning is in `docs/DESIGN.md`.
+- **`AGENTS.md` and `AGENTS-review-snippet.md` have different audiences:** the first is for agents
+  changing this repo, the second is the block pasted into a consuming repo.
+- **One fact lives in one file, chosen by audience** - the table under "Each fact lives in exactly one
+  file" names which file each kind of fact belongs to.
+- **`ROADMAP.md` items marked `[x]` are shipped, not proposals.** Several carry a `**Still open**`
+  paragraph deliberately; the shipping paragraph is context for it.
+- **Reviews here are non-deterministic on identical content.** 0, 2 and 1 findings have each been
+  observed on the same bytes, so `new=0` is a judgement signal, not a clean bill of health.
 
 ## Commits
 

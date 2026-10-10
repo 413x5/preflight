@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+## [0.2.0] - 2026-10-10
+
 ### Added
 
 - **The reviewer now receives the repository's own review context, from AGENTS.md.** A reviewer
@@ -380,6 +384,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ROADMAP.md` referenced a `github-action.example.yml` staged for Layer 3 that has never existed in any
   commit.
 
+- `config.fallback_models` no longer points at a model the ClinePass endpoint cannot route. The
+  upstream default (`["gpt-5.6-terra"]`) is a bare id, which the endpoint rejects (ids must be
+  `provider/model`), so a failed primary model retried against a dead one; it is now
+  `["openai/cline-pass/glm-5.3-flash"]`.
+
 ### Changed
 
 - **`files/preflight.toml` no longer sets `pr_reviewer.extra_instructions` or `[config] reasoning_effort`.**
@@ -449,13 +458,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `custom_model_max_tokens = 0` / `max_model_tokens = 0` are now documented as meaningful: `0` means
   "let LiteLLM resolve the window" and "no clamp" respectively, rather than being unexplained.
 
-### Fixed
-
-- `config.fallback_models` no longer points at a model the ClinePass endpoint cannot route. The
-  upstream default (`["gpt-5.6-terra"]`) is a bare id, which the endpoint rejects (ids must be
-  `provider/model`), so a failed primary model retried against a dead one; it is now
-  `["openai/cline-pass/glm-5.3-flash"]`.
-
 ### Known issue
 
 - **`preflight review` can complete and then never exit.** Both artifacts are written, and then
@@ -507,5 +509,6 @@ Initial release: a deployable, machine-local PR-Agent review setup for the Cline
   `GIT_INDEX_FILE` plus `git commit-tree` with `commit.gpgsign=false`, so a global `gpgsign = true`
   cannot break it.
 
-[Unreleased]: https://github.com/413x5/preflight/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/413x5/preflight/releases/tag/v0.2.0
 [0.1.0]: https://github.com/413x5/preflight/releases/tag/v0.1.0

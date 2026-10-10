@@ -11,7 +11,7 @@ is just the built-in default.
 
 | Command | What it does |
 |---|---|
-| `preflight review` | Reviews the current branch's **working tree** vs the remote default branch; writes `.preflight/review.md` + `.preflight/review.json` |
+| `preflight review` | Reviews the **pending commit** — `HEAD` → working tree, untracked files included; writes `.preflight/review.md` + `.preflight/review.json` |
 | `preflight-gate` | Machine check over `review.json` (exit 0 = pass) |
 | `preflight-pr …` | PR-Agent with the global config (hosted/PR mode, needs a token) |
 
@@ -76,6 +76,7 @@ PREFLIGHT_MAX_MODEL_TOKENS=0 \
 | `PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS` | Context window for a model LiteLLM doesn't know; **`0` = ask LiteLLM** |
 | `PREFLIGHT_MAX_MODEL_TOKENS` | Packing clamp; **`0` = no clamp** |
 | `PREFLIGHT_FORCE_STREAMING_HOST` | Host needing the ClinePass streaming workaround (see below) |
+| `PREFLIGHT_PR_AGENT_VERSION` | pr-agent version to install; the bundle pins one it has been verified against |
 
 Two of these matter more than they look:
 
@@ -97,9 +98,11 @@ preflight --help       # every command and environment variable
 preflight --version    # the installed bundle version
 ```
 
-The review diffs the working tree against the remote's default branch, resolved as `origin/HEAD`, then the
-remote's own `HEAD`, then `origin/main|master`, then `main|master`. Set `PREFLIGHT_BASE=<ref>` to target
-something else (a release branch, a fork's trunk); if nothing resolves, `preflight` says so and exits 4
+The default scope is `commit`: the review diffs `HEAD` against the working tree, untracked files included,
+and needs no remote, no base and no fetch. `PREFLIGHT_SCOPE=worktree` reviews the
+whole branch instead (default branch → working tree); only that scope resolves a base, trying `origin/HEAD`,
+then the remote's own `HEAD`, then `origin/main|master`, then `main|master`. Set `PREFLIGHT_BASE=<ref>` to
+target something else (a release branch, a fork's trunk); if nothing resolves, `preflight` says so and exits 4
 rather than guessing a ref that does not exist.
 
 One review is meant to report **everything** it was shown, so the loop converges instead of re-discovering

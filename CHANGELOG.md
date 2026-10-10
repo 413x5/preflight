@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Added
+
+- **The installer now pins pr-agent instead of tracking the latest release**, and exposes
+  `PREFLIGHT_PR_AGENT_VERSION` to override it (default `0.47.0`, the version this bundle is verified
+  against). `preflight` reads pr-agent's own output structure - the coverage marker matches the exact
+  wording of its "files were not included" footer - so an unpinned upgrade could stop `coverage=PARTIAL`
+  from printing. That failure is invisible in the direction that matters: a review that silently covered
+  a slice of the tree still reports real findings, so the missing coverage reads as a clean review. CI
+  asserts both that the `uv tool install` line carries the pin and that its value is the one the coverage
+  fixture in `tests/run.sh` was copied from, so a bump has to come with a re-check rather than a silent
+  drift. (Note `uv tool install` on an existing install reports "already installed" and does not upgrade,
+  so installations that predate this change were already effectively frozen - the pin closes the gap for
+  fresh installs.)
+
+### Fixed
+
+- **`README.md` described the pre-`commit`-scope review.** It still said `preflight review` diffs the
+  working tree against the remote default branch with base resolution through `origin/HEAD` and
+  `main|master`. The default scope became `commit` (`HEAD` -> working tree) in #5, which needs no remote,
+  no base and no fetch; `--help` and `docs/DESIGN.md` were updated then and the README was missed. The
+  base-resolution paragraph now says it applies to `PREFLIGHT_SCOPE=worktree` only, and the command table
+  names the pending commit. Found by reviewing this change with the tool: the first round reported the
+  contradiction between the new paragraph and the command table, and it was real - the scope builds its
+  tree with `git add -A`, so untracked files are included while a commit contains only staged content. The
+  force is a superset, not an equivalence, and that is load-bearing: reviewing *more* than a commit
+  contains is what keeps `git commit -a` and newly staged files safe. The same overclaim was in
+  `docs/DESIGN.md` and `--help` and is corrected in both.
 
 ## [0.2.0] - 2026-10-10
 
@@ -424,6 +450,12 @@ _(nothing yet)_
   changelog. `files/preflight.toml` was 73% comments (61 of 84 lines) after a single documentation pass and
   is now 48%, with the reasoning it lost recorded here. The rule is written into `AGENTS.md`, with the test
   "if deleting a comment would not change a reader's next action, it belongs in the changelog or nowhere".
+- **`files/preflight`'s own commentary was cut to what is load-bearing**: 210 comment lines of 564 (37%)
+  to **137 of 491 (28%)**. The densest blocks were the coverage-marker section, the summary function and
+  the review-job block; what survives is the non-obvious reasoning - why the coverage marker matches
+  emitted structure rather than the model's words, why both waits are bounded, why the hook's binding is
+  content- and not time-based, and each trap already hit here. Only comments and two `--help` strings
+  changed; no executable line was touched.
 - The `post-commit` companion hook is now covered by the suite (`REQ-HOOK-27`; classified insensitive,
   since a post-commit hook cannot block) - it previously had only a `sh -n` syntax check, which is why the
   silent-sidecar defect above survived.
@@ -508,6 +540,9 @@ Initial release: a deployable, machine-local PR-Agent review setup for the Cline
 - Snapshotting the working tree for review without touching the index or `HEAD`, using a temporary
   `GIT_INDEX_FILE` plus `git commit-tree` with `commit.gpgsign=false`, so a global `gpgsign = true`
   cannot break it.
+- The repository is public at <https://github.com/413x5/preflight>, default branch `main`, and the
+  initial commits plus the `v0.1.0` tag are **GPG-signed** (the signed history replaces earlier unsigned
+  commits). Commits here are signed by `commit.gpgsign=true` and carry no `Co-authored-by` trailer.
 
 [Unreleased]: https://github.com/413x5/preflight/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/413x5/preflight/releases/tag/v0.2.0

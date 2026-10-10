@@ -6,99 +6,7 @@ Work that is agreed but not yet done, plus ideas worth keeping. Nothing here is 
 
 Small and ready - no design needed, no experiment to settle first.
 
-- [x] **Trim the helper commentary.** `files/preflight` was 210 comment lines of 564
-      (37%), most densely the coverage-marker block, the summary function and the review-job block. Now
-      137 of 491 (28%). Only comments and two `--help` strings changed; the executable lines are untouched
-      and `./tests/run.sh hook` and `selfcheck` are green. What remains is the non-obvious reasoning:
-      why the coverage marker matches emitted structure, why the two waits are bounded, why the hook
-      binding is content- not time-based, and each trap already hit here.
-- [ ] **Pin the PR-Agent version** in `install.sh` (`pr-agent==0.47.0`) for reproducible installs.
-- [ ] **Mirror the snippet** into `.github/copilot-instructions.md` and/or `.clinerules` so agents
-      that do not read `AGENTS.md` still follow the loop.
-
-## Done
-
-Shipped on `main`; kept for the reasoning behind each change, not as work to pick up.
-
-- [x] **Give the reviewer the repository's own facts** (`REQ-HOOK-40`). A review that lacks them
-      reports a deliberate trade-off as a defect - the `.preflight-gate.toml` trust boundary was
-      raised as a finding three times. pr-agent's `repo_context_files` looks like the feature for
-      this and is dead in plain-diff mode (its provider implements neither
-      `get_repo_file_content` nor `get_repo_context_ref`); the `[artifacts]` channel reaches
-      `pr_reviewer` and carries the file instead. The file is AGENTS.md - the converged
-      cross-tool convention, and pr-agent's own default - with a `Code review` heading whose
-      section, when present, is what is sent, so a long AGENTS.md does not follow the reviewer
-      into the prompt. Mechanism and limits in `docs/DESIGN.md`.
-
-- [x] **Give findings a severity tier, so a doc typo does not block a commit.** Implemented in
-      `preflight-gate`: the tier is derived from each finding's **file type**, because pr-agent's schema
-      has no severity field to read. Documentation (`.md`, `.markdown`, `.rst`, `.adoc`) is
-      **advisory** - printed and tagged, but not fatal; everything else, including a finding with no
-      file, blocks as before. The rule is keyed on the file type rather than the directory, so code under
-      `docs/` still blocks and the tier cannot be defeated by where a file sits; `.txt` is excluded
-      because `requirements.txt` is a dependency manifest, not prose. The default is advisory, so the
-      strict behaviour the gate had before is one       variable away (`PREFLIGHT_GATE_DOC_BLOCKS=1`, or `doc_blocks` in the gate's config file).
-      The path is normalised first: values arrive with a trailing newline (`'README.md\n'`), and a naive
-      `endswith('.md')` classified every doc as code.
-
-      The tier decides the *verdict*, so it propagates to the commit hook for free: `preflight` records
-      `preflight-gate`'s exit as the sidecar verdict, and the hook reads that. Guarded by `REQ-HOOK-38`
-      (seven single-site mutations confirmed), plus a CI assertion in the gate-shape step.
-
-- [x] **Make the bundle's version answerable, and stop two silent failures** (found by reviewing a
-      consuming repo's session log). `preflight --version` / `--help` (and `preflight-gate --help`), with
-      the version single-sourced in `files/VERSION` and CI failing if it, the `CHANGELOG` heading and
-      `--version` disagree. Fixed base-ref resolution, which used to fall through to an unchecked bare
-      `main`: in a repo whose default branch was anything else the diff was fatal, pr-agent exited 2, and
-      the **empty** artifact dir then made the commit hook report "no review found" for every later commit
-      (now a verified candidate list, `PREFLIGHT_BASE` override, and a loud exit 4). Fixed the
-      `post-commit` advisory exiting 0 on a sidecar it could not read - silent in exactly the case it
-      exists to report, and already patched by hand in one consuming repo. `install.sh` no longer tells
-      you to paste a key you already have. The advisory now has a case (`REQ-HOOK-27`), which it did not
-      before, and CI runs a version-consistency check.
-
-- [x] **Enforce the review at commit time.** A repo can now refuse a commit whose content was never
-      reviewed: bundled `files/githooks/*` copied into its own `.githooks/` plus a **relative**
-      `git config core.hooksPath .githooks`. Content-based (not time-based) binding via tree comparison,
-      so an edit after the review or a newly staged unreviewed file blocks the commit; reviewed-but-
-      uncommitted content is ignored so `git commit -a` still works. Strictly read-only, fails closed, and
-      `git commit --no-verify` / `PREFLIGHT_SKIP=1` bypass deliberately. Opt-in per repo, per clone, and it
-      covers every worktree.
-- [x] **Test the commit hook.** `tests/run.sh` drives real repositories through the real hook files with
-      no framework and no network: one check per requirement (`REQ-HOOK-nn`, mapped in `tests/README.md`).
-      Every fix in the hook was reverted in turn to confirm the matching case fails, and the selfcheck
-      requires that neutering the hook turns exactly the enforcement-sensitive cases red. Guards the
-      bypasses found while building it (unreviewed deletions, renames, symlink typechanges,
-      `git rm --cached`, git's quoting of path names, gitlinks, and an unset `HOME`).
-- [x] **Add `AGENTS.md`.** Instructions for agents changing this repo, as opposed to
-      `AGENTS-review-snippet.md`, which is the block pasted into a consuming repo. Records the hook's
-      invariants, the checks to run, and the traps already hit here.
-- [x] **Add CI.** `.github/workflows/ci.yml` runs shell syntax checks, an installer dry-run, a TOML check
-      and the offline hook suite on Ubuntu and macOS for every PR and push to `main`, plus an `actionlint`
-      job. The live-endpoint case stays out of CI so it never depends on a paid key.
-- [x] **Rename the bundle to `preflight`.** The old name collided with the upstream `pr-agent`
-      project. Commands `pra`/`pral`/`pral-gate` → `preflight-pr`/`preflight`/`preflight-gate`,
-      config `~/.config/preflight/preflight.toml`, artifacts `.preflight/`, env `PREFLIGHT_*`.
-      The upstream tool keeps the name `pr-agent`, so it now means exactly one thing.
-      Repo: <https://github.com/413x5/preflight>.
-- [x] **Make the bundle provider-agnostic.** Any OpenAI-compatible endpoint works; ClinePass is the
-      built-in default. The force-streaming workaround is now keyed on the `api.cline.bot` literal so
-      it goes inert for other endpoints, and `install.sh` exposes overrides for the model, fallbacks,
-      both token budgets, and the streaming host.
-- [x] **Point the AGENTS snippet at this repo**, so an agent working in another repo can read current
-      guidance as the bundle evolves.
-- [x] **Publish the repo.** Private: <https://github.com/413x5/preflight>, default branch `main`.
-      `gh repo create --source=.` does not work from a worktree session (no `.git` directory), so
-      the remote was added by hand and the branch pushed as `main`.
-- [x] **Sign the initial commits.** All three (plus the `v0.1.0` tag) are signed and GitHub shows
-      `verified: true`. The signed history replaces the earlier unsigned commits.
-- [x] **Add CHANGELOG comparison links.** Added link refs at the foot of `CHANGELOG.md`; requires
-      the signed `v0.1.0` tag, which is now pushed.
-- [x] **Fix `config.fallback_models`.** The upstream default `["gpt-5.6-terra"]` is a bare OpenAI id
-      the endpoint rejects (`400 invalid model format` - ids must be `provider/model`; it serves this
-      model as `openai/gpt-5.6-terra`), so a failed primary retried against a dead model. Now
-      `["openai/cline-pass/glm-5.3-flash"]` in both `files/preflight.toml` and the live
-      `~/.config/preflight/preflight.toml`.
+_(nothing right now)_
 
 ## Next
 
@@ -122,18 +30,20 @@ Wanted; needs design, or an experiment to settle. Two groups:
       `seed` also *fails every review* unless `temperature` is 0 - `ValueError: Seed (42) is not supported
       with temperature (0.2) > 0` - on the primary and the fallback model, so it is a pair or nothing.
 
+      **Rejected on reading the source - do not run these:** two entries previously listed here as levers
+      are not levers for `review` at all, so running them would return "no effect" and prove nothing.
+      `model_reasoning` is reached only from `pr_code_suggestions.py` (the `improve` command, which
+      already self-reflects and drops by `suggestions_score_threshold`), while `pr_reviewer.py` always
+      calls with `ModelType.REGULAR`. `[config] duplicate_examples` is read by no code in v0.47.0 - it
+      appears only in `_help_docs/usage-guide/changing_a_model.md`, not in `configuration.toml` and not in
+      any `.py`.
+
       Untried, cheapest first:
       1. **A smaller diff per review.** The variance may scale with how many plausible concerns a diff
          admits. The `commit` scope is roughly a tenth the size of a branch diff and reviews in seconds,
          so this is testable immediately: review one commit three times and compare the finding SETS,
          not the counts.
-      2. **`model_reasoning`** - a dedicated model for pr-agent's self-reflection (a follow-up call that
-         scores each finding 0-10 and drops the incorrect ones). Unused here. It attacks the *other* half
-         of the problem: not making generation stable, but filtering the noise it produces.
-      3. **`[config] duplicate_examples`** - documented as duplicating the prompt examples "to help the
-         model generate structured output" for weaker models. **Verify it still exists first:** it appears
-         only in one doc example, not in `configuration.toml` and not in any `.py`, so it may be gone.
-      4. **A stronger model.** pr-agent's own recommendation (see below) is that structured output at this
+      2. **A stronger model.** pr-agent's own recommendation (see below) is that structured output at this
          input size is what separates commercial models from the rest, which is exactly the failure.
 
       What would settle it: for each lever, review the same content three times and compare the finding
@@ -233,10 +143,14 @@ Wanted; needs design, or an experiment to settle. Two groups:
       print it; the verdict comes from effort/security/`merge_recommendation`/issues. Measured over four
       consecutive reviews of this repo it was `low, low, medium, low` on similar finding counts, while
       `merge_recommendation` never moved off `merge_with_caution` - so it is unstable and does not track
-      findings (`risk=low` with two key issues was observed). Making it a gate input (e.g. "block only
-      above low risk") would tie enforcement to the flakiest field; the safer shape is an explicit,
-      deterministic policy such as `block_on = security,changes_required,issues`, or the existing
-      `PREFLIGHT_GATE_ALLOW_ISSUES=1` opt-out. Not yet decided.
+      findings (`risk=low` with two key issues was observed). **Two further reviews (the pin/README
+      change) reported `risk=n/a` outright**, so on this model the field is not merely unstable but
+      sometimes absent - which the `n/a` fallback on the summary line correctly surfaces rather than
+      printing an empty value. That makes gating on it worse than the original concern suggests: enforcement
+      would rest on a field the model may omit. Making it a gate input (e.g. "block only above low risk")
+      would tie enforcement to the flakiest field; the safer shape is an explicit, deterministic policy such
+      as `block_on = security,changes_required,issues`, or the existing `PREFLIGHT_GATE_ALLOW_ISSUES=1`
+      opt-out. Not yet decided.
 - [ ] **`preflight --since <ref>`** for a pseudo-incremental review - plain-diff mode has no true
       incremental, so this would re-review only what changed since the last pass.
 - [ ] **Remember the last reviewed commit** so a second `preflight review` can skip unchanged work.
@@ -268,10 +182,10 @@ items bear directly on the convergence problem, and one contradicts a choice thi
   (o1/o3/o4-mini, `gpt-5.x-codex`, adaptive-thinking Claude).
 - **`model_reasoning`** - a "dedicated reasoning model for self-reflection", commented out in
   `configuration.toml`: the model generates findings, then a follow-up call scores each 0-10 and drops the
-  incorrect ones. Unused here; it filters noise rather than stabilising generation.
+  incorrect ones. Reachable only from `improve` (`pr_code_suggestions.py`), never from `review`.
 - **`duplicate_examples`** - documented for weak/local models as duplicating prompt examples "to help the
-  model to generate structured output". Verify it still exists before relying on it: it appears in exactly
-  one doc example and in no `.py` or in `configuration.toml`.
+  model to generate structured output". **Dead in v0.47.0**: present only in
+  `_help_docs/usage-guide/changing_a_model.md`, read by no code and not in `configuration.toml`.
 - **`improve`'s `suggestions_score_threshold`** - a documented quality filter; the same
   self-reflection/score mechanism as `model_reasoning`.
 

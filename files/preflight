@@ -9,8 +9,9 @@
 #             .githooks/pre-commit calls; it is read-only and never runs a review. See docs/DESIGN.md.
 #
 # Scope (PREFLIGHT_SCOPE):
-#   commit (default)   — exactly what a commit would contain: HEAD -> working tree, untracked files
-#                        included. No remote, no base, no fetch, and it is what the hook enforces.
+#   commit (default)   — the pending change: HEAD -> working tree, untracked files included (a commit
+#                        contains only staged content; this is a superset of it). No remote, no base,
+#                        no fetch, and it is what the hook enforces.
 #   worktree           — the whole BRANCH: default branch -> working tree. Needs a resolvable base
 #                        (PREFLIGHT_BASE overrides it) and a fetch.
 #   head               — committed changes only (base...HEAD). Not enforceable by a pre-commit hook,

@@ -241,6 +241,13 @@ recorded that it is inert on this endpoint would waste another hour.
 Do not assume a clean tree means a clean slate, and do not assume the last commit describes the current
 state. `git status` is the first thing to check in this repo.
 
+**The roadmap holds to-dos only.** There is no "Done" section: a finished item is deleted from
+`ROADMAP.md` and its reasoning recorded in `CHANGELOG.md`, which is the file that answers "what changed
+and why". The one exception is a `[x]` item under **Open questions on shipped work**, where the tick marks
+the *shipping* as settled and the paragraph beneath it as still open - that entry stays until the question
+is answered. Committing work is not a roadmap item; it is a routine step, and the roadmap records decisions
+and unresolved questions, not a task list for a single session.
+
 ## Working on docs
 
 The docs are part of the product, and they drift. Before claiming something works, run it. If you change
@@ -340,8 +347,9 @@ until it does not.
   changing this repo, the second is the block pasted into a consuming repo.
 - **One fact lives in one file, chosen by audience** - the table under "Each fact lives in exactly one
   file" names which file each kind of fact belongs to.
-- **`ROADMAP.md` items marked `[x]` are shipped, not proposals.** Several carry a `**Still open**`
-  paragraph deliberately; the shipping paragraph is context for it.
+- **`ROADMAP.md` holds to-dos only**, and finished items are deleted from it into `CHANGELOG.md`. A `[x]`
+  item appears only under "Open questions on shipped work", where the tick marks the shipping as settled
+  and the paragraph beneath it as the work; the shipping paragraph is context for it.
 - **Reviews here are non-deterministic on identical content.** 0, 2 and 1 findings have each been
   observed on the same bytes, so `new=0` is a judgement signal, not a clean bill of health.
 

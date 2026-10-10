@@ -28,7 +28,7 @@ The real index, `HEAD`, and history are never touched - the scratch index is del
 
 | Scope | Diffs | Needs a base? |
 |---|---|---|
-| `commit` (**default**) | `HEAD` -> the snapshot, i.e. exactly what a commit would contain | no |
+| `commit` (**default**) | `HEAD` -> the snapshot (working tree + untracked; not `git diff HEAD`, which would miss untracked files) | no |
 | `worktree` | the default branch -> the snapshot (the whole branch, plus uncommitted work) | yes |
 | `head` | `base...HEAD`, committed content only (no snapshot: it builds no scratch tree) | yes |
 

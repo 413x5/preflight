@@ -93,11 +93,13 @@ grep -q "^## \[$version\]" CHANGELOG.md && die "CHANGELOG.md already has a [$ver
 grep -q "^\[Unreleased\]: " CHANGELOG.md || die "CHANGELOG.md has no [Unreleased] compare link"
 grep -q "^\[$current\]: " CHANGELOG.md || die "CHANGELOG.md has no [$current] link to rewrite"
 
-# The Unreleased section must actually say something: an empty release is a version bump with nothing
-# behind it, and `_(nothing yet)_` shipping as a release is worse than not releasing.
-if sed -n '/^## \[Unreleased\]/,/^## \[/p' CHANGELOG.md | grep -q '_(nothing yet)_'; then
-  die "'[Unreleased]' is still the placeholder - write the entry before releasing"
-fi
+# The Unreleased section must carry at least one real entry. Requiring a bullet, rather than searching
+# for the placeholder text, is deliberate: prose that MENTIONS the placeholder is not an empty release,
+# and a section with nothing under it must not ship as one - but a search for the string refuses the
+# correct entry that happens to describe the rule.
+unreleased="$(sed -n '/^## \[Unreleased\]/,/^## \[/p' CHANGELOG.md | sed '$d')"
+printf '%s\n' "$unreleased" | grep -q '^- ' \
+  || die "'[Unreleased]' has no entries - write the entry before releasing"
 
 date_utc="$(date -u +%Y-%m-%d)"
 say "release: $current -> $version ($date_utc), trunk '$trunk'"

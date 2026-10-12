@@ -205,7 +205,7 @@ Fixed in this version: an unresolvable base now fails with exit 4 before pr-agen
 
 ## `preflight --version` says "unknown"
 
-The helper could not find `files/VERSION` next to itself or in the config dir (`PREFLIGHT_HOME`, default
+The helper could not find `src/VERSION` next to itself or in the config dir (`PREFLIGHT_HOME`, default
 `~/.config/preflight`). Re-run the bundle's `install.sh`. The version is used to answer "is this machine's
 bundle current?", so if it matters, re-install rather than guessing from file mtimes.
 
@@ -253,7 +253,7 @@ itself the reason the fix above is a bound rather than a diagnosis.
 **The levers, in order of usefulness:**
 
 1. **Bring the reasoning output down.** The hang correlates with completion volume. `[config]
-   reasoning_effort` is the lever, but note it is currently inert: `files/preflight.toml` leaves it unset
+   reasoning_effort` is the lever, but note it is currently inert: `config/preflight.toml.example` leaves it unset
    AND unregistered, so no effort reaches the endpoint at all (the section below explains both).
 2. **`PREFLIGHT_SHUTDOWN_WAIT`** (env, default 120) bounds only the tail *after* the artifact exists. It
    is a safety net, not a fix, and it deliberately never bounds the review itself: a timeout that cut off
@@ -286,12 +286,12 @@ budget, and the same content can take ten times longer from one run to the next.
 
 **No `reasoning_effort` value reaches this endpoint**, which is why setting one changes nothing: the
 forwarding rule, the probe that confirmed it, and the current choice are in
-[`docs/DESIGN.md`](DESIGN.md) under "Where a review's time goes". Set it only alongside
+[`docs/architecture.md`](../architecture.md) under "Where a review's time goes". Set it only alongside
 `[config] additional_reasoning_effort_models`, or it is read and silently dropped.
 
 If you do set it, measure on a real diff, interleaved, against `new=N/M` as well as wall clock. A pin of
 `low` was tried on one synthetic 525-line diff and did not survive real content - a cheaper round that
-reports fewer findings just moves the cost into a later round. `ROADMAP.md` carries the numbers and the
+reports fewer findings just moves the cost into a later round. `docs/roadmap.md` carries the numbers and the
 re-test.
 
 **Related, and also invisible by default:** pr-agent pins `config.temperature` (upstream default `0.2`)

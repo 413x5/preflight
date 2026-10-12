@@ -44,11 +44,11 @@ that resolves to a commit: `PREFLIGHT_BASE` (the explicit override), `origin/HEA
 remote never create the local `origin/HEAD` symref), then `origin/main`, `origin/master`, `main`,
 `master`. If none resolves it fails with exit 4 and names the candidates rather than guessing.
 
-That ordering is not decoration. The earlier version fell through to a bare `main` unchecked, so in a
-repository whose default branch was anything else `git diff main...HEAD` was fatal, pr-agent exited 2
-with "No diff content received", and the artifact dir was left **empty** - which the commit hook reads
-as "no review found" and turns into a block on every later commit. A base-resolution failure has to be
-loud, because its silent form is indistinguishable from an unreviewed tree.
+The verification order is the point, not the list. A base-resolution failure must be loud, because its
+silent form is indistinguishable from an unreviewed tree: an unchecked fallback produces a fatal `git
+diff` and an empty artifact dir, which the hook reports as "no review found" - a block on every later
+commit, with nothing pointing at the base. Hence exit 4 naming the candidates rather than a guess.
+[`history.md`](history.md) records the failure this replaced.
 
 Finally it appends `.preflight/` to the repo's `.git/info/exclude` (per-clone metadata, shared by every
 worktree, never committed).
@@ -70,7 +70,7 @@ force_streaming_api_base_substrings = ["api.cline.bot"]
 
 The substring is matched against the request's `api_base`, so pointing at any other endpoint simply
 never matches and the block is inert — nothing to remove. If you reach ClinePass through a proxy,
-`PREFLIGHT_FORCE_STREAMING_HOST` (or the value in `preflight.toml`) sets the host to match.
+`PREFLIGHT_FORCE_STREAMING_HOST` (or the value in `config/preflight.toml.example`) sets the host to match.
 
 Token budgets are needed here for a related reason: `cline-pass/*` is not in LiteLLM's model table, so
 nothing declares the context window and the packing clamp cuts the diff to 32k. Hence
@@ -91,7 +91,7 @@ The key is never placed in the shell environment.
 
 ## Enforcing the review: the commit hook
 
-The loop is only as good as remembering to run it, so the bundle ships a hook (in `files/githooks/`) that a
+The loop is only as good as remembering to run it, so the bundle ships a hook (in `src/githooks/`) that a
 repo commits into its own `.githooks/` and enables with `git config core.hooksPath .githooks`.
 
 ### It verifies; it does not review
@@ -237,24 +237,24 @@ A commit can only be verified once it exists, so enforcement is inherently about
 
 A review is one model call, and most of it can be **hidden reasoning** - tokens the model deliberates with
 and discards. The artifacts do not split that from the text: `review.json` carries `usage` totals and
-`review.md` repeats them in its run-details footer, but neither separates reasoning from findings. Watch
-the footer's "out" count: a ~500-line diff has reported 23,467 completion tokens in 111s with only ~2,500
-characters reaching `review.md`, and the same diff has also completed in 11s / 2,126 tokens. A slow review
-therefore looks like a slow provider when it may be reasoning volume.
+`review.md` repeats them in its run-details footer, but neither separates reasoning from findings. The
+footer's "out" count is therefore the only evidence, and it can be an order of magnitude larger than the
+text that reached `review.md` - so a slow review looks like a slow provider when it may be reasoning
+volume. [`measurements.md`](measurements.md) has the figures.
 
 The lever is `[config] reasoning_effort`, and pr-agent forwards it **only** to a model its bundled litellm
 metadata calls reasoning-capable. `cline-pass/*` is not in that table, so the value is read, logged, and
 never sent - the escape hatch is `[config] additional_reasoning_effort_models`, naming the id explicitly,
 and the two are only useful together.
 
-`files/preflight.toml` sets **neither**, so the practical effect is that **no** effort reaches this endpoint
+`config/preflight.toml.example` sets **neither**, so the practical effect is that **no** effort reaches this endpoint
 - not pr-agent's `medium` default either. A probe of the constructed request confirmed it: adding
-`reasoning_effort` produced a byte-identical payload. `ROADMAP.md` carries the open decision on this;
-`docs/TROUBLESHOOTING.md` carries the measurements and the symptom.
+`reasoning_effort` produced a byte-identical payload. `docs/roadmap.md` carries the open decision on this;
+`docs/runbooks/troubleshooting.md` carries the measurements and the symptom.
 
 There is deliberately **no sampling pin**, and it is inert anyway: `config.temperature` (upstream default
 0.2) and `config.seed` (default -1, i.e. unset) are left alone, and this endpoint ignores `seed` even when
-set. Reviews therefore sample freely - the stated limit of `new=N/M` - and `ROADMAP.md` records the probes.
+set. Reviews therefore sample freely - the stated limit of `new=N/M` - and `docs/roadmap.md` records the probes.
 
 ## The gate
 
@@ -362,15 +362,14 @@ and is architecturally dead here: the plain-diff provider implements neither `ge
 `get_repo_context_ref`, so `build_repo_context` returns empty for a `--stdin` run. The `[artifacts]`
 channel does reach `pr_reviewer`, so it carries the file. It composes into the same prompt slot
 `extra_instructions` occupies - which is why `[pr_reviewer]` still does not set that key (see
-ROADMAP.md).
+docs/roadmap.md).
 
-**Everything for it must come through the environment, not `preflight.toml`.** pr-agent calls
+**Everything for it must come through the environment, not `config/preflight.toml.example`.** pr-agent calls
 `inject_artifact_context()` from `cli.py` *before* `apply_repo_settings()` loads `--extra_config_url`,
 so an `[artifacts]` section there is read too late: `enable`, `target_tools` and `artifact_label`
-resolve from the environment and defaults first. The first version of this shipped such a section and
-the label never took effect - the prompt still read `CI Artifact: context.md`. The helper therefore
+resolve from the environment and defaults first. The helper therefore
 sets `ARTIFACT_PATH`, `ARTIFACT_INSTRUCTIONS` (both first-class env keys) and `ARTIFACTS__ARTIFACT_LABEL`
-(dynaconf's `SECTION__KEY` form), and CI asserts that `[artifacts]` stays OUT of `preflight.toml` so a
+(dynaconf's `SECTION__KEY` form), and CI asserts that `[artifacts]` stays OUT of the config file so a
 future edit cannot reintroduce a setting that looks configured and does nothing.
 
 **Two rules.** The file carries *facts* - architecture, accepted trade-offs, known limitations - never
@@ -394,9 +393,9 @@ agent fixes a finding, re-runs, and gets handed a fresh one - so the two are eas
 other, and fixing only one leaves the loop slow.
 
 **The model returns few findings.** `pr_reviewer.num_max_findings` caps how many are returned (upstream
-default 3). `preflight.toml` raises it. It does not set `pr_reviewer.extra_instructions`, so pr-agent's
+default 3). `config/preflight.toml.example` raises it. It does not set `pr_reviewer.extra_instructions`, so pr-agent's
 reviewer prompt is sent unmodified - including its own guidance to prefer not reporting over guessing, and
-its schema's "an empty list is acceptable". See `CHANGELOG.md` for why that text is gone and `ROADMAP.md`
+its schema's "an empty list is acceptable". See `CHANGELOG.md` for why that text is gone and `docs/roadmap.md`
 for the open experiment.
 
 That cap is a prompt instruction, not a hard truncation: pr-agent does not slice the merged list (checked
@@ -409,7 +408,7 @@ at a time.
 cap on *returned* findings does nothing if the diff itself was pruned before the call. When a diff exceeds
 the token budget, pr-agent's default is to prune files and review the first patch, so a "complete" review
 covers a slice of the tree - and a later run, against different content, surfaces findings that were there
-all along. `preflight.toml` therefore sets `enable_large_pr_chunking = true` (`max_number_of_calls = 3`),
+all along. `config/preflight.toml.example` therefore sets `enable_large_pr_chunking = true` (`max_number_of_calls = 3`),
 which splits an oversized diff, reviews up to `max_number_of_calls` chunks, and *unions* the per-chunk findings into one review
 (the merge rules live in pr-agent's `algo/review_merge.py`). It is inert unless the budget actually leaves
 files out, so an ordinary diff still costs exactly one AI call; only a genuinely oversized change pays for
@@ -448,7 +447,7 @@ pointer to the authoritative signal, which is the footer in `review.md` itself.
 
 pr-agent's structured `remaining_files_list` is not exposed in plain-diff JSON, so there is no exact
 signal to use instead. CI checks the marker against the footer literal from pr-agent's source and against
-the shapes that broke earlier versions, and `tests/run.sh` `REQ-HOOK-28` re-checks it against the
+the near-miss shapes that must not fire, and `tests/run.sh` `REQ-HOOK-28` re-checks it against the
 **installed** pr-agent's own footer source (skipping where the tool is absent), which is also where the
 table assumption is exercised against real output.
 
@@ -477,9 +476,8 @@ preflight: issues=2 security=No risk=low merge=review carefully effort=3 tokens=
 itself uses to dedupe - `(relevant_file, issue_header, issue_content)`, whitespace- and case-normalised -
 so a different issue in the same file is still new while the same sentence is not.
 
-There is **no sampling pin**, and earlier revisions of this file claimed one. `files/preflight.toml` does
-not set `config.temperature` or `config.seed`, so each review samples freely: an earlier draft said the
-config "pins `temperature`", which was simply false of the file it described. The prompt is fixed, which
+There is **no sampling pin**: `config/preflight.toml.example` sets neither `config.temperature` nor `config.seed`, so
+each review samples freely - the stated limit of `new=N/M`. The prompt is fixed, which
 is what makes a re-review tend to reproduce its wording, but a paraphrase is a normal outcome rather than
 a bug - and it is why a reworded repeat can still read as new. `[config] seed` (a positive integer, which
 also pins temperature to 0) is the lever if that instability ever needs removing; it is left unset
@@ -539,5 +537,5 @@ cannot be reproduced in CI (no key, no network), and "the artifact is fine, the 
 precisely the shape being guarded. It runs the helper under its own watchdog, because a regression here
 hangs rather than fails and a test that stalls the suite reports nothing.
 
-See `docs/TROUBLESHOOTING.md` for the measured symptoms, what is and is not known about the cause, and the
+See `docs/runbooks/troubleshooting.md` for the measured symptoms, what is and is not known about the cause, and the
 reasoning-budget lever that correlates with it.

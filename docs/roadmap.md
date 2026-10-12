@@ -2,6 +2,11 @@
 
 Work that is agreed but not yet done, plus ideas worth keeping. Nothing here is tied to a date.
 
+This file holds **to-dos only**. A finished item is deleted from here, and its reasoning is recorded in
+[`../CHANGELOG.md`](../CHANGELOG.md) (what changed) or in an [ADR](adr/) (why). The one exception is a
+`[x]` item under **Open questions on shipped work**, where the tick marks the *shipping* as settled and
+the paragraph beneath it as the work - that entry stays until the question is answered.
+
 ## Now
 
 Small and ready - no design needed, no experiment to settle first.
@@ -34,7 +39,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
       are not levers for `review` at all, so running them would return "no effect" and prove nothing.
       `model_reasoning` is reached only from `pr_code_suggestions.py` (the `improve` command, which
       already self-reflects and drops by `suggestions_score_threshold`), while `pr_reviewer.py` always
-      calls with `ModelType.REGULAR`. `[config] duplicate_examples` is read by no code in v0.47.0 - it
+      calls with `ModelType.REGULAR`. `[config] duplicate_examples` is read by no code in v0.47.0 - it <!-- doc-path-ok: names a key that does NOT exist, in order to warn against it -->
       appears only in `_help_docs/usage-guide/changing_a_model.md`, not in `configuration.toml` and not in
       any `.py`.
 
@@ -50,7 +55,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
       SETS. A lever that leaves the sets different has not fixed the thing we measured.
 
 - [ ] **Should `additional_reasoning_effort_models` come back, purely so the lever fails visibly?**
-      Mechanism and the probe: [`docs/DESIGN.md`](docs/DESIGN.md). Adding the key is what makes a configured
+      Mechanism and the probe: [`docs/architecture.md`](architecture.md). Adding the key is what makes a configured
       `reasoning_effort` reach the endpoint at all, and what turns an unsupported value into a
       provider-side error instead of a silent drop - it does not pin a budget, since pr-agent's default
       `medium` would then be sent. So the question is: **is a visible failure worth sending a reasoning
@@ -62,7 +67,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
       acceptable") by asserting "most real diffs have several". It was the only text in the prompt pushing
       toward generating findings. Unproven either way: compare the next reviews against `new=N/M` and
       finding volume. Reverting is one config block. Details in `CHANGELOG.md`; the capture method is in
-      `docs/TROUBLESHOOTING.md`.
+      `docs/runbooks/troubleshooting.md`.
 
       **What we now know sits against it:** pr-agent's FAQ recommends the **default configuration** for
       reducing noise, and names score thresholds and `extra_instructions` as the levers to *add* when
@@ -98,7 +103,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
          the callback drain.
 - [ ] **Re-measure the reasoning budget before pinning it again (REVERTED, read this).** The bundle used
       to set `[config] reasoning_effort = "low"` plus `additional_reasoning_effort_models`. Both keys are
-      now removed; what that means for forwarding is in [`docs/DESIGN.md`](docs/DESIGN.md). The reason the
+      now removed; what that means for forwarding is in [`docs/architecture.md`](architecture.md). The reason the
       pin was reverted: it rested on interleaved arms
       measured on **one synthetic 525-line diff** (mean ~18.6s / ~4,051 completion tokens unforwarded
       versus ~9.2s / ~1,689 with `low`), and it did not reproduce on real work - four consecutive reviews
@@ -114,7 +119,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
       instead of the whole branch since the default branch, which is what the tool exists for: reviewing a
       change before it is submitted. Landed as [#5](https://github.com/413x5/preflight/pull/5) - CI green on
       both platforms. The per-commit coverage argument, both branch scopes, and the three `REQ-HOOK-33`
-      mutations are documented in `README.md`, `docs/DESIGN.md` and `tests/README.md`.
+      mutations are documented in `README.md`, `docs/architecture.md` and `tests/README.md`.
 
       **Still open: it has never been reviewed by the tool itself.** It was committed and pushed without a
       review pass, at the maintainer's direction.
@@ -211,6 +216,6 @@ Needs a decision or an external dependency.
 - `preflight-gate --json` for machine consumers.
 - A provider-preset layer in `install.sh` (e.g. `PREFLIGHT_PROVIDER=openai|openrouter|clinepass`) so
   the common cases need one variable instead of five.
-- Watch ClinePass usage quota (5-hour / weekly / monthly) - reviews are token-heavy (~15-23k each).
+- Watch ClinePass usage quota (5-hour / weekly / monthly) - reviews are token-heavy
+  (see [`measurements.md`](measurements.md)).
 - Rotate the endpoint key periodically (it lives in a `chmod 600` file, never in the environment).
-- A `LICENSE` (decide: MIT vs proprietary) if this ever leaves the private context.

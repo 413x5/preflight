@@ -1,80 +1,21 @@
 # Contributing
 
-This repo is a **portable bundle**: `install.sh` plus the files under `files/` are the source of
-truth for the machine-local PR-Agent setup. Keep it portable, and keep it provider-agnostic — ClinePass
-is a default, not an assumption.
+This repo is a **portable bundle**: `install.sh` plus the files under `src/` are the source of truth for
+the machine-local PR-Agent setup. Keep it portable, and keep it provider-agnostic - ClinePass is a default,
+not an assumption.
 
-## Layout
-
-| Path | What it is |
-|---|---|
-| `install.sh` / `uninstall.sh` | Deploy / remove the setup on a machine |
-| `files/preflight.toml` | The global config (model, provider/streaming knobs, review caps) |
-| `files/preflight`, `files/preflight-pr`, `files/preflight-gate` | The helpers installed into `~/.local/bin` |
-| `files/preflight-hook` | The commit-time verifier; a repo's `.githooks/pre-commit` calls it |
-| `files/githooks/` | Example hooks a repo copies into its own `.githooks/` |
-| `files/VERSION` | The bundle version, the single source of truth for `preflight --version` and `install.sh` |
-| `files/ensure-link.sh` | Re-links the secrets file after `uv tool upgrade` |
-| `files/secrets.toml.example` | The secrets template - **never** a real key |
-| `AGENTS-review-snippet.md` | The block pasted into a repo's `AGENTS.md` |
-| `AGENTS.md` | Instructions for agents changing **this** repo (not the snippet) |
-| `tests/` | Integration tests for the commit hook, plus the sample fixture they build on |
-
-## Ground rules
-
-- **No secrets, ever.** Only `files/secrets.toml.example` (with an empty key) is committed.
-  `.gitignore` also blocks `.secrets.toml`.
-- **No machine-specific paths.** Everything derives from `$HOME` or the documented env vars.
-- **Provider-agnostic.** Do not hard-code a provider into the mechanism. Anything specific to one
-  endpoint (a model id, a streaming quirk, a token window) belongs in `files/preflight.toml` as an
-  overridable default, documented as provider-specific in both the file and `docs/DESIGN.md`.
-- **Idempotent installs.** `install.sh` must be safe to re-run and must never clobber an existing
-  `~/.config/preflight/.secrets.toml`.
-- **Keep `pr-agent` meaning one thing.** It is the upstream tool; this bundle is `preflight`. Do not
-  reintroduce `pra`/`pral`/`pral-gate` or a `pr-agent`-named config file.
-
-## Testing changes
-
-`.github/workflows/ci.yml` runs the whole check set on every pull request and on pushes to `main`, on
-both Ubuntu and macOS (the bundle claims both). It mirrors what you can run locally, so a green local
-run means a green CI run:
-
-| CI step | Run it locally |
-|---|---|
-| Shell syntax (`bash -n` / `sh -n`) | the loop below |
-| Installer deploys into a throwaway prefix | `PREFLIGHT_HOME=$(mktemp -d)/cfg ... ./install.sh` |
-| Generated config is valid TOML | `python3 -c 'import tomllib; tomllib.load(...)'` |
-| Commit-hook integration tests | `./tests/run.sh hook` |
-| Selfcheck: the suite re-run against a neutered hook | `./tests/run.sh selfcheck` |
-| Workflow lint (`actionlint`) | `actionlint .github/workflows/ci.yml` |
-
-The live-endpoint case (`./tests/run.sh e2e`) is **not** run in CI: it needs a paid key, and CI should
-not depend on one.
-
-The **selfcheck** exists because a green suite is not proof the hook enforces. Many of the offline cases
-take the hook neutered without complaint - they assert acceptance (`commit -a`, a reviewed deletion, a
-reviewed rename), exercise a deliberate bypass, or test a different file (the example hooks, the review
-helper), so they never ask the hook to refuse anything; some skip rather than pass where pr-agent is
-absent, as in CI. The selfcheck runs the whole suite against a neutered hook and requires exactly the
-enforcement-sensitive cases to fail, and
-it requires every case to be classified, so a newly added case cannot join the insensitive set by
-default. See [`tests/README.md`](tests/README.md) for the classification.
-
-Workflow actions are pinned to a **moving major tag** (`actions/checkout@v7`), and Dependabot
-(`.github/dependabot.yml`) proposes bumps weekly, grouped into one PR. If you add an action, pin the same
-way; Dependabot will pick it up. Its PRs run this CI, so a bump that breaks something fails the same
-checks a hand-written change would.
-
-`tests/run.sh` is the integration suite: real repositories, the real hook files, no framework and no
-network. Refer to [`tests/README.md`](tests/README.md) for the requirement-to-case mapping.
+## Setup
 
 ```sh
-./tests/run.sh hook      # offline, seconds
-./tests/run.sh selfcheck # the suite against a neutered hook - see below
-./tests/run.sh           # includes one live-endpoint case (needs a configured key)
+git clone https://github.com/413x5/preflight ~/preflight
+cd ~/preflight
+./install.sh
+$EDITOR ~/.config/preflight/.secrets.toml      # paste the API key between the quotes
 ```
 
-`install.sh` is also testable without touching your real setup - point it at throwaway dirs and skip the
+Non-interactive: `PREFLIGHT_KEY=... ./install.sh`. Requirements are in [`README.md`](README.md).
+
+`install.sh` is testable without touching your real setup - point it at throwaway directories and skip the
 parts that need `uv` or the network:
 
 ```sh
@@ -86,26 +27,49 @@ ls "$T/bin"        # preflight  preflight-pr  preflight-gate
 rm -rf "$T"
 ```
 
-Check the **default parity** invariant whenever you touch `files/preflight.toml` or the installer:
-with no overrides set, the generated config must still parse to the same values it did before.
+## Before you change anything
+
+Read [`AGENTS.md`](AGENTS.md). It is the operational rules file - the layout, the invariants that must
+survive a change, the commands, and the traps that have each cost someone an afternoon. It is written for
+whoever works on the code next, human or agent, and it is deliberately the only place those facts live.
+
+Rules worth repeating here because they are the ones most easily broken by accident:
+
+- **No secrets, ever.** Only `config/secrets.toml.example` (with an empty key) is committed.
+- **No machine-specific paths.** Everything derives from `$HOME` or the documented env vars.
+- **Provider-agnostic.** Anything specific to one endpoint belongs in `config/preflight.toml.example` as an
+  overridable default, documented as provider-specific in both the file and `docs/architecture.md`.
+- **Idempotent installs.** `install.sh` must be safe to re-run and must never clobber an existing
+  `~/.config/preflight/.secrets.toml`.
+- **`pr-agent` means only the upstream tool.** This bundle is `preflight`; do not reintroduce
+  `pra`/`pral`/`pral-gate` or a `pr-agent`-named config file.
+
+## How to propose a change
+
+Work on a short-lived branch (`type/slug`), open a pull request, and squash-merge. Commits follow
+[Conventional Commits](https://www.conventionalcommits.org/); the rules are in [`AGENTS.md`](AGENTS.md).
+Call out breaking changes (renamed commands, renamed env vars) in both the commit body and
+[`CHANGELOG.md`](CHANGELOG.md).
+
+Work not yet done is in [`docs/roadmap.md`](docs/roadmap.md); a decided question is an
+[ADR](docs/adr/), and the reasoning behind the current design is in
+[`docs/architecture.md`](docs/architecture.md).
+
+## Testing changes
+
+**The gate is one command: `./scripts/verify`.** It composes every check in cost order, cheapest first, and
+CI calls it rather than re-listing the steps - so a green local run means a green CI run.
 
 ```sh
-python3 -c "import tomllib;print(tomllib.load(open('$T/cfg/preflight.toml','rb'))['config'])"
+./scripts/verify            # the gate: everything
+./scripts/verify --list     # the stages, if you want to run one while working
 ```
 
-Sanity-check the shell (the hooks are POSIX `sh`, the helpers `bash`):
+The live-endpoint case (`./tests/run.sh e2e`) is **not** run in CI: it needs a paid key, and CI must not
+depend on one.
 
-```sh
-for f in install.sh uninstall.sh files/preflight files/preflight-pr files/preflight-gate files/ensure-link.sh; do
-  bash -n "$f" || echo "FAIL $f"
-done
-for f in files/preflight-hook files/githooks/pre-commit files/githooks/post-commit tests/run.sh; do
-  sh -n "$f" || echo "FAIL $f"
-done
-```
-
-Test the commit hook in a **throwaway** repo, never in a working checkout — `core.hooksPath` is
-clone-wide, so setting it here would apply to every worktree of this clone:
+Test the commit hook in a **throwaway** repo, never in a working checkout - `core.hooksPath` is clone-wide,
+so setting it here would apply to every worktree of this clone:
 
 ```sh
 R="$(mktemp -d)"; cd "$R"; git init -q -b main .
@@ -120,8 +84,11 @@ preflight review && preflight-gate                                  # must be a 
 git -c commit.gpgsign=false commit -m "feat: ok"                    # now accepted
 ```
 
-## Commits
+`tests/run.sh` is the integration suite: real repositories, the real hook files, no framework and no
+network. [`tests/README.md`](tests/README.md) maps each requirement to the case that guards it, and
+explains why a green suite is not on its own proof that the hook enforces anything.
 
-[Conventional Commits](https://www.conventionalcommits.org/) (`type(scope): subject`), one logical
-change per commit. Call out breaking changes (renamed commands, renamed env vars) explicitly in both
-the commit body and `CHANGELOG.md`.
+Workflow actions are pinned to a **moving major tag** (`actions/checkout@v7`), and Dependabot
+(`.github/dependabot.yml`) proposes bumps weekly, grouped into one PR. If you add an action, pin the same
+way; Dependabot will pick it up. Its PRs run this CI, so a bump that breaks something fails the same checks
+a hand-written change would.

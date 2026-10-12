@@ -11,7 +11,7 @@
 # ./.preflight-gate.toml in the repository being reviewed - and the later file overrides the earlier.
 # The PREFLIGHT_GATE_* environment variables override both, so a one-off run needs no edit here.
 #
-# `preflight-gate --help` lists the keys; the invalid-value behaviour is in docs/DESIGN.md.
+# `preflight-gate --help` lists the keys; the invalid-value behaviour is in docs/architecture.md.
 
 # File types whose findings are ADVISORY (reported and counted, but not fatal). Matched on the
 # extension, so the rule holds wherever the file lives and cannot be defeated by a directory name.

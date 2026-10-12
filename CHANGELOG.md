@@ -7,7 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Added
+
+- **`scripts/verify` - the gate, as one command.** It composes every check this repository has in cost
+  order, cheapest first (shell syntax -> installer into a throwaway prefix -> config and TOML -> version
+  consistency -> the gate's JSON shapes -> the coverage marker -> the commit-hook suite -> the selfcheck),
+  and reports `gate: PASS`/`FAIL` with the failing stages named. `.github/workflows/ci.yml` now **calls**
+  it instead of listing the steps, split into a fast job and the behavioural one. That is the point: a CI
+  job and a local instruction list maintained separately drift, and a change then passes one and fails the
+  other. `scripts/verify --list` names the stages, and a single stage can be run while working.
+  `PREFLIGHT_VERIFY_SKIP=<stage>` is the deliberate escape hatch - a check that cannot run exits non-zero
+  rather than reporting a success it never earned.
+- **`docs/` gained a tree, an index and decision records.** `docs/README.md` is the map, one line per
+  document. `docs/adr/` holds the decisions that were previously implicit in prose, one per file, each
+  with the options that lost, what it costs, and what enforces it: containment over equality, `commit` as
+  the default scope, the pr-agent pin, the reviewer-context channel, the licence, and this restructure.
+  `docs/history.md` carries the narrative arc, and `docs/measurements.md` the dated numbers with the
+  reason each moved. `docs/DESIGN.md` became `docs/architecture.md` (mechanics only - the history and the
+  numbers it had accumulated moved out), `docs/TROUBLESHOOTING.md` became
+  `docs/runbooks/troubleshooting.md`, and `ROADMAP.md` became `docs/roadmap.md`.
+- **`LICENSE` (MIT) and `SECURITY.md`.** The repository had no licence at all, which for a published
+  repository means all rights reserved - not "undecided". `SECURITY.md` states what is deliberately out of
+  scope (the hook is not a boundary against a hostile repository; the recorded verdict is not
+  tamper-evident) so it is not mistaken for a control it is not.
+
+### Changed
+
+- **The shipped bundle moved from `files/` to `src/`; the templates `install.sh` writes to `config/`;
+  the dev helpers to `scripts/`.** That is: `config/preflight.toml.example`, `config/gate.toml.example`,
+  `config/secrets.toml.example` (all three shipped templates in one place - the global config, the gate
+  policy and the secrets file) and `scripts/ensure-link.sh`. This is a **source-tree rename only**: it does
+  not affect an installed machine, because `install.sh` copies into `$PREFLIGHT_HOME`, and nothing on disk
+  records the repository path, so no installed helper, hook or config changes. What does change is every reference inside this repository - `install.sh`'s
+  directory variables, the CI paths, the tests, and the docs - and one inside the consumer-facing snippet,
+  which fetches the version from `contents/src/VERSION`. The reasoning, including why `src/` is a slightly
+  hopeful name for a tree with no build step, is in `docs/adr/0006-adopt-the-playbook-layout.md`.
+- **`AGENTS.md` now owns the layout, the invariants and the commands; `CONTRIBUTING.md` points at it.**
+  Both files carried the same layout table, ground rules and command list. `AGENTS.md` keeps them because
+  every coding agent reads it by convention, and a fact an agent has to discover is a fact it may not
+  find; `CONTRIBUTING.md` keeps the human on-ramp - setup, and how to propose a change.
+- **`.github/workflows/ci.yml` is two test jobs and a lint, not one long step list.** The fast job
+  (syntax, installer, config, version, gate shapes, coverage) answers in seconds; the behavioural job runs
+  the commit-hook suite and the selfcheck; `actionlint` stays its own job with a pinned binary, because it
+  is the one check that needs a tool the gate does not require.
+
+### Fixed
+
+- **The docs' config-path check silently stopped covering the file it exists for.** `REQ-HOOK-29` walks the
+  docs and fails on a documented `section.key` that pr-agent does not declare - a check written because the
+  docs once told an operator to set `config.callback_timeout_seconds`, which pr-agent reads from
+  `[litellm]`, so following the advice changed nothing and said nothing. Its glob was
+  `docs/*.md`, **not recursive**, so moving that file to `docs/runbooks/troubleshooting.md` took it out of
+  scope - a coverage loss with no failure to show for it, which is the exact shape this project's checks
+  exist to prevent. The scan is now recursive, and asserts it covered **every** tracked doc by comparing
+  against `git ls-files docs`, so a subdirectory can no longer drop a file quietly.
+- **Two false positives in that same check, both exposed by the deeper scan.** A dotted name that is really
+  a filename (`pr_code_suggestions.py`, cited throughout the docs) was parsed as `section=pr_code_suggestions,
+  key=py` and reported as a bad key; source and config file extensions are now excluded. And a passage that
+  names a key **in order to warn that it does not exist** was read as advice - such a line now says so
+  inline with `doc-path-ok: <why>`, the same self-justifying marker style the meta-tests use, so the
+  exception stays visible in review instead of living in an allow-list.
+
 
 ## [0.3.0] - 2026-10-11
 
@@ -561,7 +621,7 @@ Initial release: a deployable, machine-local PR-Agent review setup for the Cline
   cannot break it.
 - The repository is public at <https://github.com/413x5/preflight>, default branch `main`, and the
   initial commits plus the `v0.1.0` tag are **GPG-signed** (the signed history replaces earlier unsigned
-  commits). Commits here are signed by `commit.gpgsign=true` and carry no `Co-authored-by` trailer.
+  commits).
 
 [Unreleased]: https://github.com/413x5/preflight/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/413x5/preflight/releases/tag/v0.3.0

@@ -5,7 +5,7 @@
 # is to speak when enforcement silently did NOT apply. Since it cannot block, its failure mode is
 # silence, so this errs toward saying too much rather than too little.
 #
-# Enforced scopes, matching files/preflight-hook: `commit` (the default) and `worktree` both record a
+# Enforced scopes, matching `preflight-hook`: `commit` (the default) and `worktree` both record a
 # reviewed tree, so both are covered. `head` records none - it reviews already-committed content and
 # cannot vouch for a commit that did not exist when it ran - so it warns.
 #

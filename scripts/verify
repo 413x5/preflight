@@ -108,7 +108,7 @@ stage_syntax() {
   # invisible. The hooks and the tests are POSIX sh - they may run where only sh exists.
   local rc=0 f
   for f in install.sh uninstall.sh \
-           src/preflight src/preflight-pr src/preflight-gate scripts/ensure-link.sh scripts/verify
+           src/preflight src/preflight-pr src/preflight-gate scripts/ensure-link.sh scripts/verify scripts/release
   do
     bash -n "$f" || { echo "bash syntax: FAIL $f" >&2; rc=1; }
   done

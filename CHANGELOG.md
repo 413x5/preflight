@@ -30,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository means all rights reserved - not "undecided". `SECURITY.md` states what is deliberately out of
   scope (the hook is not a boundary against a hostile repository; the recorded verdict is not
   tamper-evident) so it is not mistaken for a control it is not.
+- **`scripts/release` - cut a version with one command.** It bumps `src/VERSION` (the single source of
+  truth), promotes the changelog's `[Unreleased]` section into a dated one, moves the link table, commits
+  the bump under `chore(release)` and creates a **signed annotated tag whose message is the entry**. You
+  write the entry first; the script refuses to release while the section still says `_(nothing yet)_`, so
+  an empty release cannot ship by accident. It never pushes - publishing stays a separate, deliberate act,
+  because a pushed tag is never moved here - and it refuses on a dirty tree, off the trunk, on a version
+  that does not advance, and on a tag that already exists. `--no-gpg-sign` exists for a machine with no
+  key and says so loudly, since every other commit here is signed.
 
 ### Changed
 

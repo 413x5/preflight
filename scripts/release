@@ -158,16 +158,28 @@ git commit -q -m "chore(release): $version" -m "Version $current -> $version. Th
 
 Run: scripts/verify -> gate: PASS." || die "commit failed"
 
-tag_args=""
+tag_args="-s"
 if [ "$sign" = 0 ]; then
-  tag_args="--no-sign"
+  tag_args="-a"
 fi
-# Annotated, never lightweight: the changelog entry is the tag message, so `git show vX.Y.Z` answers
-# "what is in this release" without the repository.
+# `-s` signs; `-a` alone produces an annotated tag with NO signature, silently - which is how this
+# script's first version shipped an unsigned tag while claiming otherwise. `-s` is the default here
+# because every commit in this repository is signed, so an unsigned tag is the anomaly someone would
+# otherwise have to discover with `git verify-tag`.
+#
+# Annotated either way, never lightweight: the changelog entry is the tag message, so `git show vX.Y.Z`
+# answers "what is in this release" without the repository.
 note="$(mktemp)"
 sed -n "/^## \[$version\]/,/^## \[/p" CHANGELOG.md | sed '$d' > "$note"
 git tag $tag_args -a "v$version" -F "$note" || { rm -f "$note"; die "tagging failed"; }
 rm -f "$note"
+
+# Assert the signature rather than assume it. The failure mode is a valid, well-formed tag that simply is
+# not signed - nothing downstream reports it, and once pushed it cannot be repaired.
+if [ "$sign" = 1 ]; then
+  git verify-tag "v$version" >/dev/null 2>&1 \
+    || die "tag v$version is not signed, though a signing key was expected - check gpg and tag.gpgSign"
+fi
 
 if [ "$sign" = 0 ]; then
   say "WARNING: tagged unsigned (--no-gpg-sign). Every other commit here is signed; say so if you publish it."

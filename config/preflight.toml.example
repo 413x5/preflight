@@ -4,7 +4,7 @@
 # for. install.sh overrides them all: PREFLIGHT_MODEL, PREFLIGHT_FALLBACK_MODELS,
 # PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS, PREFLIGHT_MAX_MODEL_TOKENS, PREFLIGHT_FORCE_STREAMING_HOST.
 #
-# Why each value is what it is: docs/DESIGN.md. History: CHANGELOG.md.
+# Why each value is what it is: docs/architecture.md. History: CHANGELOG.md.
 [config]
 model = "openai/cline-pass/deepseek-v4.1-flash"
 # An id your endpoint serves, in its own provider/model form ([] disables fallback).

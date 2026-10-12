@@ -11,7 +11,7 @@
 # Deliberate one-off bypasses: `git commit --no-verify`, or `PREFLIGHT_SKIP=1 git commit`.
 #
 # The helper is read-only: it verifies the content being committed against what `preflight review`
-# reviewed, and never runs a review, stages anything, or touches the index. See docs/DESIGN.md.
+# reviewed, and never runs a review, stages anything, or touches the index. See docs/architecture.md.
 set -u
 
 # ${HOME:-} rather than $HOME: with `set -u` an unset HOME (a hermetic build script, `env -u HOME git

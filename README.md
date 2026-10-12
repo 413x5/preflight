@@ -21,13 +21,12 @@ is just the built-in default.
 
 ## Docs
 
-- [`AGENTS.md`](AGENTS.md) — instructions for AI agents **changing this repo** (invariants, checks, traps).
-- [`CHANGELOG.md`](CHANGELOG.md) — what changed, per version.
-- [`ROADMAP.md`](ROADMAP.md) — planned work and open decisions.
-- [`docs/DESIGN.md`](docs/DESIGN.md) — how it works and why.
-- [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — symptoms and fixes.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — layout, ground rules, how to test changes.
-- [`tests/README.md`](tests/README.md) — the integration suite for the commit hook.
+- [`docs/README.md`](docs/README.md) — **the map**: one line per document.
+- [`docs/architecture.md`](docs/architecture.md) — how it works and why; [troubleshooting](docs/runbooks/troubleshooting.md) for a symptom and its fix.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, and how to propose a change.
+- [`AGENTS.md`](AGENTS.md) — the operational rules for whoever changes this repo.
+- [`CHANGELOG.md`](CHANGELOG.md) — what changed, per version; [`docs/roadmap.md`](docs/roadmap.md) — planned work.
+- [`SECURITY.md`](SECURITY.md) — the trust model, and how to report privately. [`LICENSE`](LICENSE) — MIT.
 
 ## Requirements
 
@@ -106,7 +105,7 @@ target something else (a release branch, a fork's trunk); if nothing resolves, `
 rather than guessing a ref that does not exist.
 
 One review is meant to report **everything** it was shown, so the loop converges instead of re-discovering
-one issue at a time. That takes settings in `files/preflight.toml`: `num_max_findings` governs what the
+one issue at a time. That takes settings in `config/preflight.toml.example`: `num_max_findings` governs what the
 model *reports*, and `enable_large_pr_chunking` governs whether it was shown the whole diff at all - without
 it an oversized diff is pruned to a slice of the tree, and each round "discovers" more. If
 anything still could not be covered, the summary line contains `coverage=PARTIAL` and `review.md` names the
@@ -117,7 +116,7 @@ documented trade-off from an oversight, and each round reviews the text the prev
 summary line therefore ends with a `new=N/M` count - how many findings were **not** in the previous
 review. `new=0` is the stopping signal: judge each finding rather than re-fixing it, since repeating is
 not the same as unresolved. Full detail in
-[`docs/DESIGN.md`](docs/DESIGN.md#why-the-loop-converges-new-findings-not-a-clean-review).
+[`docs/architecture.md`](docs/architecture.md#why-the-loop-converges-new-findings-not-a-clean-review).
 
 ## Teach your coding agents
 
@@ -164,7 +163,7 @@ so a repo whose hooks lost that bit enforces nothing while looking fully install
   for a repo that vendors its own copy instead of relying on the installed one.
 
 Use the **relative** hooks path - an absolute one breaks git worktrees. See
-[`docs/DESIGN.md`](docs/DESIGN.md) for how the check works and why.
+[`docs/architecture.md`](docs/architecture.md) for how the check works and why.
 
 ## What install.sh writes
 
@@ -177,21 +176,19 @@ Use the **relative** hooks path - an absolute one breaks git worktrees. See
 
 ## Development
 
-CI runs on every pull request and on pushes to `main`, on Ubuntu and macOS: shell syntax, an installer
-dry-run into a throwaway prefix, a TOML check on the generated config, the commit-hook integration suite,
-and a selfcheck that re-runs that suite against a neutered hook. Everything it runs is available locally:
+CI runs on every pull request and on pushes to `main`, on Ubuntu and macOS, and it runs the same command
+you do:
 
 ```sh
-./tests/run.sh hook        # the offline hook tests, in seconds
-./tests/run.sh selfcheck   # re-runs them against a neutered hook
-actionlint                 # workflow lint
+./scripts/verify          # the gate: every check, cheapest first
+./scripts/verify --list   # the stages, to run one while working
 ```
 
-The selfcheck catches a suite that passes for the wrong reason: stubbing the hook out entirely still
-satisfies the nine cases that assert *acceptance* rather than refusal, so "all green" alone would not
-prove the hook refuses anything.
+The gate includes a **selfcheck** - the test suite re-run against a neutered hook - because a green suite
+is not proof the hook enforces anything: stubbing the hook out entirely still satisfies the cases that
+assert *acceptance* rather than refusal, so "all green" alone would prove nothing.
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full list and
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) to get started and
 [`tests/README.md`](tests/README.md) for the requirement-to-case mapping.
 
 The CI badge in this README only renders for signed-in viewers, because the repository is private.

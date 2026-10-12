@@ -284,7 +284,7 @@ sec = as_text(r.get('security_concerns'))
 is_no = lambda v: v.lower() in ('', 'no', 'none', 'n/a', 'false')
 
 # A finding's severity is deterministic, derived from its FILE TYPE, because the model's schema has no
-# severity field to read (see docs/DESIGN.md). A documentation file is advisory wherever it lives, and
+# severity field to read (see docs/architecture.md). A documentation file is advisory wherever it lives, and
 # code under `docs/` (a Sphinx `conf.py`, a build script) keeps blocking - a location rule would make the
 # tier defeatable by the directory a file sits in.
 DOC_SUFFIXES = POLICY['doc_suffixes']

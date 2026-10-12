@@ -6,7 +6,7 @@
 #   tests/run.sh e2e          # only the live-endpoint cases
 #   tests/run.sh selfcheck    # only the selfcheck: the suite re-run against a neutered hook
 #
-# They exercise the REAL hook files from files/, against real git repositories, with no network and no
+# They exercise the REAL hook files from src/, against real git repositories, with no network and no
 # API key. That matters: everything here was written to catch a specific regression that a unit test
 # of the comparison logic would have missed, because the bugs lived in how git reports a staged change
 # (a rename is not "A" or "M", a gitlink is not a blob, a scratch file shows up as a deletion).
@@ -22,7 +22,7 @@ set -u
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/.." && pwd)"
-hook="${PREFLIGHT_TEST_HOOK:-$repo_root/files/preflight-hook}"
+hook="${PREFLIGHT_TEST_HOOK:-$repo_root/src/preflight-hook}"
 
 which_cases="${1:-all}"
 pass=0; fail=0; skipped=0
@@ -251,7 +251,7 @@ case_missing_helper_fails_closed_unset_home() {
   reset_case "$d"
   # AFTER reset_case: `git reset --hard` restores the committed .githooks/pre-commit, which would
   # otherwise overwrite the example hook this case needs to test.
-  install -m 0755 "$repo_root/files/githooks/pre-commit" "$d/.githooks/pre-commit"
+  install -m 0755 "$repo_root/src/githooks/pre-commit" "$d/.githooks/pre-commit"
   printf '\n# unreviewed\n' >> "$d/util.py"
   git -C "$d" add util.py
   local out got
@@ -495,7 +495,7 @@ case_missing_helper_fails_closed() {
 }
 
 case_post_commit_advisory() {
-  # The second bundled hook (files/githooks/post-commit). It cannot block anything - a post-commit
+  # The second bundled hook (src/githooks/post-commit). It cannot block anything - a post-commit
   # hook runs after the commit exists - so its only job is to SPEAK when enforcement silently did not
   # apply, and its own failure mode is silence. It decides by reading `scope` out of the sidecar, so a
   # sidecar it cannot read must warn rather than pass quietly: "could not read it" and "it was
@@ -507,7 +507,7 @@ case_post_commit_advisory() {
   # way to cover its own logic.
   local d; d="$(new_repo postcommit)"
   reset_case "$d"
-  install -m 0755 "$repo_root/files/githooks/post-commit" "$d/.githooks/post-commit"
+  install -m 0755 "$repo_root/src/githooks/post-commit" "$d/.githooks/post-commit"
   local post="$d/.githooks/post-commit" meta="$d/.preflight/review.meta.json"
 
   run_post() { ( cd "$d" && sh "$post" ) 2>&1; }
@@ -528,7 +528,7 @@ case_post_commit_advisory() {
   [ -z "$out" ] || problems="$problems
         | worktree scope should be silent, got: $out"
 
-  # `commit` is the DEFAULT scope and is enforced - files/preflight-hook accepts `commit|worktree`.
+  # `commit` is the DEFAULT scope and is enforced - src/preflight-hook accepts `commit|worktree`.
   # This assertion is the regression guard for an advisory that warned on every default-scope commit:
   # it only recognised `worktree`, which was correct before `commit` became the default and stale
   # after, and the message it printed ("run 'preflight review' with the default worktree scope") named
@@ -580,15 +580,15 @@ case_convergence_signal() {
   # pr-agent is absent (which is always, in CI), so the feature's own logic was never exercised by any
   # check - a regression in the dedupe key, the count or the hint would have passed everything.
   #
-  # Drives the SHIPPED summary block from files/preflight rather than restating it, so the test cannot
+  # Drives the SHIPPED summary block from src/preflight rather than restating it, so the test cannot
   # drift from the code it is testing.
-  if python3 - "$repo_root/files/preflight" <<'PY'
+  if python3 - "$repo_root/src/preflight" <<'PY'
 import json, os, re, subprocess, sys, tempfile
 
 src = open(sys.argv[1], encoding="utf-8").read()
 blocks = re.findall(r"python3 - \"\$out_json\" \"\$out_md\" <<'PY'[^\n]*\n(.*?)\nPY\n", src, re.S)
 if not blocks:
-    sys.exit("cannot find the summary-line block in files/preflight; update this case")
+    sys.exit("cannot find the summary-line block in src/preflight; update this case")
 d = tempfile.mkdtemp()
 json_path = os.path.join(d, "review.json")
 script = os.path.join(d, "summary.py")
@@ -689,15 +689,15 @@ case_coverage_marker_matches_real_footer() {
   fi
 
   # Drive the SHIPPED summary-line block over fixtures, so this tests behaviour rather than restating
-  # the logic: extract the heredoc body from files/preflight and run it.
-  if python3 - "$repo_root/files/preflight" "$sp/tools/pr_reviewer.py" <<'PY'
+  # the logic: extract the heredoc body from src/preflight and run it.
+  if python3 - "$repo_root/src/preflight" "$sp/tools/pr_reviewer.py" <<'PY'
 import re, subprocess, sys, tempfile, os
 
 helper, reviewer = sys.argv[1:3]
 src = open(helper, encoding="utf-8").read()
 blocks = re.findall(r"python3 - \"\$out_json\" \"\$out_md\" <<'PY'[^\n]*\n(.*?)\nPY\n", src, re.S)
 if not blocks:
-    sys.exit("cannot find the summary-line block in files/preflight; update this case")
+    sys.exit("cannot find the summary-line block in src/preflight; update this case")
 d = tempfile.mkdtemp()
 json_path = os.path.join(d, "review.json")
 open(json_path, "w").write('{"review":{"key_issues_to_review":[]}}')
@@ -783,10 +783,10 @@ PY
   fi
 
   # Part 2: the completeness keys must be in the table pr-agent actually reads them from.
-  if python3 - "$sp/settings/configuration.toml" "$repo_root/files/preflight.toml" <<'PY'
+  if python3 - "$sp/settings/configuration.toml" "$repo_root/config/preflight.toml.example" "$repo_root" <<'PY'
 import re, sys, tomllib
 
-defaults_path, ours_path = sys.argv[1:3]
+defaults_path, ours_path, repo_root = sys.argv[1:4]
 
 # Which sections pr-agent declares each key in, from its OWN defaults - the ground truth for where it
 # reads them. Collect EVERY section a key appears in rather than the first: several of these keys (e.g.
@@ -821,7 +821,7 @@ if wrong:
 ours = tomllib.load(open(ours_path, "rb"))
 missing = [k for k in sorted(wanted) if k not in ours.get(wanted[k], {})]
 if missing:
-    print("files/preflight.toml does not set these: "
+    print("config/preflight.toml.example does not set these: "
           + ", ".join(f"{k} under [{wanted[k]}]" for k in missing))
     sys.exit(3)
 
@@ -831,8 +831,13 @@ if missing:
 # changed nothing. Check every `section.key` / `[section] key` reference the docs make against
 # pr-agent's own defaults, so a documented path that does not exist is caught here rather than by
 # someone debugging a hang.
-import glob, os
+import glob, os, subprocess
 DOC_RE = re.compile(r"`(?:\[(\w+)\]\s+([a-z_][a-z0-9_]*)|(config|litellm|pr_reviewer|pr_code_suggestions)\.([a-z_][a-z0-9_]*))`")
+
+# A dotted name that is really a FILENAME is not a config path. `pr_code_suggestions.py` parses as
+# section `pr_code_suggestions` + key `py`, which is a source file - and docs cite source files
+# constantly, so without this the check reports them all as bad keys.
+FILE_SUFFIXES = {"py", "sh", "md", "rst", "adoc", "toml", "json", "yaml", "yml", "cfg", "ini", "txt"}
 
 # Which keys pr-agent declares, per section.
 known = {}
@@ -845,14 +850,39 @@ for line in open(defaults_path, encoding="utf-8", errors="replace"):
     if m and sec:
         known.setdefault(sec, set()).add(m.group(1))
 
+docs = glob.glob(os.path.join(os.path.dirname(os.path.abspath(ours_path)), "..", "docs", "**", "*.md"),
+                recursive=True) + \
+       [os.path.join(os.path.dirname(os.path.abspath(ours_path)), "..", "README.md")]
+
+# The glob must reach EVERY tracked doc. Without this the check can lose files silently simply by the
+# docs tree gaining a subdirectory - and the file this check exists for is `docs/runbooks/troubleshooting.md`,
+# where the wrong-key advice lived. A coverage loss with nothing to show for it is the failure mode here.
+try:
+    tracked = subprocess.run(["git", "-C", repo_root, "ls-files", "-z", "docs"],
+                             capture_output=True, text=True, check=True).stdout.split("\0")
+    scanned = {os.path.realpath(d) for d in docs}
+    missed = sorted(t for t in tracked
+                    if t.endswith(".md") and os.path.realpath(os.path.join(repo_root, t)) not in scanned)
+except (OSError, subprocess.CalledProcessError):
+    missed = []  # Not a git working tree (a source tarball): there is no tracked set to compare against.
+
 doc_errors = []
+if missed:
+    doc_errors.append("these tracked docs were never scanned: " + ", ".join(missed))
 checked = 0
-for doc in glob.glob(os.path.join(os.path.dirname(os.path.abspath(ours_path)), "..", "docs", "*.md")) + \
-           [os.path.join(os.path.dirname(os.path.abspath(ours_path)), "..", "README.md")]:
+for doc in docs:
     for line in open(doc, encoding="utf-8", errors="replace"):
+        # A line may name a path in order to say it does NOT exist, which is a warning rather than advice.
+        # The marker is inline and carries its reason, so the exception stays visible in review instead of
+        # living in an allow-list here - the list would be the next place a real mistake hid.
+        if "doc-path-ok:" in line:
+            continue
         for bracket_section, bracket_key, dotted_section, dotted_key in DOC_RE.findall(line):
             section = bracket_section or dotted_section
             key = bracket_key or dotted_key
+            # `findall` hands back '' for a group that did not participate, not None.
+            if not bracket_key and key in FILE_SUFFIXES:
+                continue
             checked += 1
             if key not in known.get(section, ()):
                 doc_errors.append("%s: %s.%s is not a key pr-agent declares in [%s]" % (
@@ -910,7 +940,7 @@ FAKE
   out="$work/scope-commit.diff"
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" SCOPE_DIFF_OUT="$out" \
       PREFLIGHT_HOME="$work/scope-cfg" PREFLIGHT_BASE=main \
-      bash "$repo_root/files/preflight" review ) >"$work/scope-commit.txt" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$work/scope-commit.txt" 2>&1
   if ! grep -q "scope=commit" "$work/scope-commit.txt"; then
     problems="$problems
         | the default scope is not commit: $(grep -o 'scope=[a-z]*' "$work/scope-commit.txt" | head -1)"
@@ -926,7 +956,7 @@ FAKE
   out="$work/scope-worktree.diff"
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" SCOPE_DIFF_OUT="$out" \
       PREFLIGHT_SCOPE=worktree PREFLIGHT_HOME="$work/scope-cfg" PREFLIGHT_BASE=main \
-      bash "$repo_root/files/preflight" review ) >"$work/scope-worktree.txt" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$work/scope-worktree.txt" 2>&1
   if ! grep -q "scope=worktree" "$work/scope-worktree.txt"; then
     problems="$problems
         | PREFLIGHT_SCOPE=worktree did not take effect"
@@ -937,7 +967,7 @@ FAKE
   # An unknown scope must be refused rather than silently treated as a known one.
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" SCOPE_DIFF_OUT="$work/scope-bad.diff" \
       PREFLIGHT_SCOPE=nonsense PREFLIGHT_HOME="$work/scope-cfg" PREFLIGHT_BASE=main \
-      bash "$repo_root/files/preflight" review ) >/dev/null 2>&1
+      bash "$repo_root/src/preflight" review ) >/dev/null 2>&1
   bad_rc=$?
   [ "$bad_rc" = 2 ] || problems="$problems
         | an unknown PREFLIGHT_SCOPE exited $bad_rc rather than 2"
@@ -992,7 +1022,7 @@ FAKE
   out="$work/untracked.diff"
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" DIFF_OUT="$out" \
       PREFLIGHT_HOME="$work/untracked-cfg" \
-      bash "$repo_root/files/preflight" review ) >"$work/untracked.txt" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$work/untracked.txt" 2>&1
 
   grep -q '^+++ b/untracked\.py' "$out" 2>/dev/null || problems="$problems
         | the new UNTRACKED file was not in the diff handed to the model, yet it is in reviewed_tree - so
@@ -1009,7 +1039,7 @@ FAKE
 # ---------------------------------------------------------------------------- summary wiring
 
 case_summary_wiring() {
-  # REQ-HOOK-31 proves the COUNTING is right by extracting the summary heredoc from files/preflight and
+  # REQ-HOOK-31 proves the COUNTING is right by extracting the summary heredoc from src/preflight and
   # running it standalone - so it never exercises the wiring around it: that `emit_summary` is actually
   # called, and that the previous review is actually exported to the comparison. A helper whose summary
   # block is correct but never invoked would pass that case and report no convergence signal at all,
@@ -1056,7 +1086,7 @@ FAKE
   # regardless of its verdict.
   run_once() {
     ( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$work/wiring-cfg" \
-        bash "$repo_root/files/preflight" review ) 2>&1
+        bash "$repo_root/src/preflight" review ) 2>&1
   }
 
   rc=0; out="$(run_once)" || rc=$?
@@ -1140,7 +1170,7 @@ FAKE
 
   rc=0
   out="$( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
-            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+            bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
   [ "$rc" = 0 ] || problems="$problems
         | the run failed (exit $rc): $out"
   case "$out" in *"risk=low"*) ;; *) problems="$problems
@@ -1150,7 +1180,7 @@ FAKE
 
   rc=0
   out="$( cd "$d" && rm -rf .preflight && PATH="$sparse:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
-            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+            bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
   [ "$rc" = 0 ] || problems="$problems
         | the run failed (exit $rc) on a review without the verdict fields: $out"
   case "$out" in *"risk=n/a"*) ;; *) problems="$problems
@@ -1186,7 +1216,7 @@ FAKE
   chmod +x "$badshape/pr-agent"
   rc=0
   out="$( cd "$d" && rm -rf .preflight && PATH="$badshape:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
-            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+            bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
   case "$out" in *"issues=0"*) ;; *) problems="$problems
         | (5) a non-object review/usage lost the summary line instead of degrading: $out" ;; esac
 
@@ -1217,7 +1247,7 @@ FAKE
   chmod +x "$typed/pr-agent"
   rc=0
   out="$( cd "$d" && rm -rf .preflight && PATH="$typed:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
-            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+            bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
   # The counts must survive a boolean field: if the line is missing entirely, the heredoc raised.
   case "$out" in *"issues=0"*) ;; *) problems="$problems
         | (3) a boolean security_concerns destroyed the summary line instead of degrading: $out" ;; esac
@@ -1245,7 +1275,7 @@ FAKE
   chmod +x "$badlist/pr-agent"
   rc=0
   out="$( cd "$d" && rm -rf .preflight && PATH="$badlist:$PATH" PREFLIGHT_HOME="$work/verdict-cfg" \
-            bash "$repo_root/files/preflight" review 2>&1 )" || rc=$?
+            bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
   case "$out" in *"issues=0"*) ;; *) problems="$problems
         | (4) a non-list key_issues_to_review did not degrade to issues=0
         |     (a string reports its character count, and an int or bool loses the line): $out" ;; esac
@@ -1278,7 +1308,7 @@ case_bounded_shutdown() {
   d="$work/shutdown"; fake="$work/shutdown-bin"; slow="$work/shutdown-slow"
   cfg="$work/shutdown-cfg"; fpid="$work/shutdown-fake.pid"
   mkdir -p "$d/.githooks" "$fake" "$slow" "$cfg"
-  cp "$repo_root/files/preflight.toml" "$cfg/preflight.toml"
+  cp "$repo_root/config/preflight.toml.example" "$cfg/preflight.toml"
 
   # Writes both artifacts, then hangs. `exec` makes this PID the sleeper, so stopping it stops the sleep.
   cat > "$fake/pr-agent" <<'FAKE'
@@ -1326,7 +1356,7 @@ SLOW
   rm -f "$fpid"
   ( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" PREFLIGHT_BASE=main \
       PREFLIGHT_SHUTDOWN_WAIT=3 PREFLIGHT_REVIEW_WAIT=30 FAKE_PID="$fpid" \
-      bash "$repo_root/files/preflight" review > "$out_file" 2>&1; echo $? > "$work/shutdown-rc.txt" ) &
+      bash "$repo_root/src/preflight" review > "$out_file" 2>&1; echo $? > "$work/shutdown-rc.txt" ) &
   local run_pid=$! held=0 timed_out=''
   while kill -0 "$run_pid" 2>/dev/null && [ "$held" -lt 25 ]; do sleep 1; held=$((held + 1)); done
   if kill -0 "$run_pid" 2>/dev/null; then
@@ -1361,7 +1391,7 @@ SLOW
   # (4) describe writes no artifact, so it must be allowed to finish: no cap, no kill.
   rm -rf "$d/.preflight"
   ( cd "$d" && PATH="$slow:$PATH" PREFLIGHT_HOME="$cfg" PREFLIGHT_BASE=main \
-      PREFLIGHT_SHUTDOWN_WAIT=2 bash "$repo_root/files/preflight" describe ) >"$work/shutdown-desc.txt" 2>&1
+      PREFLIGHT_SHUTDOWN_WAIT=2 bash "$repo_root/src/preflight" describe ) >"$work/shutdown-desc.txt" 2>&1
   grep -q 'did not exit' "$work/shutdown-desc.txt" && problems="$problems
         | (4) describe was bounded and killed: a command with no artifact must not be cut off"
   [ -f "$d/.preflight/description.md" ] || problems="$problems
@@ -1373,7 +1403,7 @@ SLOW
   dead_rc=0
   ( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" PREFLIGHT_BASE=main \
       PREFLIGHT_SHUTDOWN_WAIT=3 PREFLIGHT_REVIEW_WAIT=5 \
-      bash "$repo_root/files/preflight" review ) >/dev/null 2>&1 || dead_rc=$?
+      bash "$repo_root/src/preflight" review ) >/dev/null 2>&1 || dead_rc=$?
   [ "$dead_rc" != 0 ] || problems="$problems
         | (5) a hang that wrote no review exited 0, so a missing review reads as a pass"
 
@@ -1407,7 +1437,7 @@ case_bundle_hooks_executable() {
   if ! git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1; then
     index_note="not a git working tree, so the committed mode could not be checked"
   fi
-  for f in files/githooks/pre-commit files/githooks/post-commit; do
+  for f in src/githooks/pre-commit src/githooks/post-commit; do
     [ -f "$repo_root/$f" ] || { problems="$problems
         | $f is missing"; continue; }
     [ -x "$repo_root/$f" ] || problems="$problems
@@ -1427,7 +1457,7 @@ case_bundle_hooks_executable() {
   done
   if [ -n "$problems" ]; then
     bad "the shipped git hooks are executable, on disk and in the index" "REQ-HOOK-36" \
-        "files/githooks/* executable on disk and committed as 100755" "see below" "$problems
+        "src/githooks/* executable on disk and committed as 100755" "see below" "$problems
 "
   elif [ -n "$index_note" ]; then
     skip "the shipped git hooks are executable, on disk and in the index" "REQ-HOOK-36" \
@@ -1461,9 +1491,9 @@ case_gate_doc_advisory() {
   local tier_home="$work/gate-tier-home"
   mkdir -p "$tier_home"
   doc='{"review":{"key_issues_to_review":[{"relevant_file":"README.md\n","issue_header":"typo","issue_content":"c"}],"security_concerns":"No"}}'
-  code='{"review":{"key_issues_to_review":[{"relevant_file":"files/preflight\n","issue_header":"bug","issue_content":"c"}],"security_concerns":"No"}}'
+  code='{"review":{"key_issues_to_review":[{"relevant_file":"src/preflight\n","issue_header":"bug","issue_content":"c"}],"security_concerns":"No"}}'
 
-  gate_run() { ( cd "$d" && PREFLIGHT_HOME="$tier_home" PREFLIGHT_DIR=.preflight bash "$repo_root/files/preflight-gate" ); }
+  gate_run() { ( cd "$d" && PREFLIGHT_HOME="$tier_home" PREFLIGHT_DIR=.preflight bash "$repo_root/src/preflight-gate" ); }
 
   printf '%s' "$doc" > "$d/.preflight/review.json"
   rc=0; out="$(gate_run 2>&1)" || rc=$?
@@ -1490,7 +1520,7 @@ case_gate_doc_advisory() {
 
   printf '%s' "$doc" > "$d/.preflight/review.json"
   rc=0
-  out="$( cd "$d" && PREFLIGHT_HOME="$tier_home" PREFLIGHT_DIR=.preflight PREFLIGHT_GATE_DOC_BLOCKS=1 bash "$repo_root/files/preflight-gate" 2>&1 )" || rc=$?
+  out="$( cd "$d" && PREFLIGHT_HOME="$tier_home" PREFLIGHT_DIR=.preflight PREFLIGHT_GATE_DOC_BLOCKS=1 bash "$repo_root/src/preflight-gate" 2>&1 )" || rc=$?
   [ "$rc" = 1 ] || problems="$problems
         | PREFLIGHT_GATE_DOC_BLOCKS=1 still passed (exit $rc): $out"
   case "$out" in *"[blocking]"*) ;; *) problems="$problems
@@ -1535,7 +1565,7 @@ case_gate_config() {
   FINDING_EFFORT_3='{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":3}}'
   FINDING_EFFORT_5='{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":5}}'
 
-  gate_cfg_run() { ( cd "$d" && PREFLIGHT_HOME="$home" PREFLIGHT_DIR=.preflight "$@" bash "$repo_root/files/preflight-gate" ); }
+  gate_cfg_run() { ( cd "$d" && PREFLIGHT_HOME="$home" PREFLIGHT_DIR=.preflight "$@" bash "$repo_root/src/preflight-gate" ); }
 
   # Home config narrows documentation to `.foo`, so a `.md` finding blocks and a `.foo` one does not.
   printf 'doc_suffixes = [".foo"]\nmax_effort = 4\n' > "$home/gate.toml"
@@ -1798,7 +1828,7 @@ MD
   out="$work/ctx.txt"
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent" \
       PREFLIGHT_HOME="$work/ctx-cfg" \
-      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$out" 2>&1
 
   got="$(cat "$work/ctx.sent" 2>/dev/null || printf '')"
   # The path is a repo-relative scratch file, so its value is not worth pinning; its PRESENCE is.
@@ -1846,7 +1876,7 @@ EXCLUDED_SENTINEL
 MD
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent4" \
       PREFLIGHT_HOME="$work/ctx-cfg" \
-      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$out" 2>&1
   got="$(cat "$work/ctx.sent4" 2>/dev/null || printf '')"
   case "$got" in *AFTER_FENCE*) ;; *) problems="$problems
         | a fenced block ended the section early, silently dropping the facts after it" ;; esac
@@ -1869,7 +1899,7 @@ NESTED_EXCLUDED
 MD
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent10" \
       PREFLIGHT_HOME="$work/ctx-cfg" \
-      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$out" 2>&1
   got="$(cat "$work/ctx.sent10" 2>/dev/null || printf '')"
   case "$got" in *NESTED_AFTER*) ;; *) problems="$problems
         | a tagged fence inside a block ended it early, truncating the section" ;; esac
@@ -1886,7 +1916,7 @@ BARE_HASH_SENTINEL
 MD
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent8" \
       PREFLIGHT_HOME="$work/ctx-cfg" \
-      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$out" 2>&1
   got="$(cat "$work/ctx.sent8" 2>/dev/null || printf '')"
   case "$got" in *BARE_HASH_SENTINEL*) ;; *) problems="$problems
         | a bare `#` line disabled the context entirely instead of being read as an empty heading" ;; esac
@@ -1905,7 +1935,7 @@ INDENTED_EXCLUDED
 MD
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent9" \
       PREFLIGHT_HOME="$work/ctx-cfg" \
-      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$out" 2>&1
   got="$(cat "$work/ctx.sent9" 2>/dev/null || printf '')"
   case "$got" in *INDENTED_SENTINEL*) ;; *) problems="$problems
         | an indented Code review heading was not recognised" ;; esac
@@ -1926,7 +1956,7 @@ HASH_EXCLUDED
 MD
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent7" \
       PREFLIGHT_HOME="$work/ctx-cfg" \
-      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$out" 2>&1
   got="$(cat "$work/ctx.sent7" 2>/dev/null || printf '')"
   case "$got" in *HASH_AFTER*) ;; *) problems="$problems
         | a `#` line with no following space ended the section, dropping the facts after it" ;; esac
@@ -1938,7 +1968,7 @@ MD
   printf '## Code review\nALT_SENTINEL\n' > "$d/ALT.md"
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent5" \
       PREFLIGHT_HOME="$work/ctx-cfg" PREFLIGHT_CONTEXT_FILE=ALT.md \
-      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$out" 2>&1
   got="$(cat "$work/ctx.sent5" 2>/dev/null || printf '')"
   case "$got" in *"ARTIFACT_LABEL=Repository context (from ALT.md)"*) ;;
     *) problems="$problems
@@ -1951,7 +1981,7 @@ MD
   printf '# Notes\nWHOLE_SENTINEL\n' > "$d/AGENTS.md"
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent2" \
       PREFLIGHT_HOME="$work/ctx-cfg" \
-      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$out" 2>&1
   got="$(cat "$work/ctx.sent2" 2>/dev/null || printf '')"
   case "$got" in *WHOLE_SENTINEL*) ;; *) problems="$problems
         | with no Code review section the WHOLE AGENTS.md should be sent, but it was not" ;; esac
@@ -1967,7 +1997,7 @@ MD
   rm -f "$d/AGENTS.md"
   ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" CTX_OUT="$work/ctx.sent3" \
       PREFLIGHT_HOME="$work/ctx-cfg" \
-      bash "$repo_root/files/preflight" review ) >"$out" 2>&1
+      bash "$repo_root/src/preflight" review ) >"$out" 2>&1
   got="$(cat "$work/ctx.sent3" 2>/dev/null || printf '')"
   apath="$(printf '%s\n' "$got" | sed -n '1s/^ARTIFACT_PATH=//p')"
   [ -z "$apath" ] || problems="$problems
@@ -2031,7 +2061,7 @@ PY
   else
     bad "a real review renders the table the coverage marker relies on" "REQ-HOOK-30" \
         "a </table> in review.md" "absent" \
-        "the coverage marker's structural restriction is inert on real output; re-check files/preflight's COVERAGE_RE handling"
+        "the coverage marker's structural restriction is inert on real output; re-check src/preflight's COVERAGE_RE handling"
   fi
 }
 

@@ -48,7 +48,7 @@ Two fields on the summary line matter to the loop:
 - `coverage=PARTIAL (token budget left files out - see review.md)` - the token budget left files out of the
   review, so a low `issues=` count means "the rest was not looked at", not "the change is clean". Inform
   that `config.max_model_tokens` / `custom_model_max_tokens` can be raised (see
-  `docs/TROUBLESHOOTING.md`) rather than round-tripping until the omitted files happen to come into view.
+  `docs/runbooks/troubleshooting.md`) rather than round-tripping until the omitted files happen to come into view.
 
 `risk=` is reported but the gate never decides on it; the gate fails on security concerns,
 `merge_recommendation=changes_required`, key issues, or effort above `PREFLIGHT_GATE_MAX_EFFORT`.
@@ -142,8 +142,8 @@ The helpers, the config template and the full docs live in the bundle's own repo
 Read it (do not guess) when this snippet does not answer a question about `preflight`:
 
 - `README.md` - install, use, and the "using another provider" recipe.
-- `docs/DESIGN.md` - how the working-tree snapshot, the commit hook, the gate and the provider config work.
-- `docs/TROUBLESHOOTING.md` - symptoms and fixes.
+- `docs/architecture.md` - how the working-tree snapshot, the commit hook, the gate and the provider config work.
+- `docs/runbooks/troubleshooting.md` - symptoms and fixes.
 
 **Re-paste this snippet from your local installation**, not from the repository. The installed copy at
 `~/.config/preflight/AGENTS-review-snippet.md` is the one that matches the `preflight` actually on this
@@ -160,5 +160,5 @@ move together:
 
 ```sh
 preflight --version                                                            # installed
-gh api -H 'Accept: application/vnd.github.raw' repos/413x5/preflight/contents/files/VERSION
+gh api -H 'Accept: application/vnd.github.raw' repos/413x5/preflight/contents/src/VERSION
 ```

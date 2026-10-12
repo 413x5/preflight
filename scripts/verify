@@ -1,0 +1,479 @@
+#!/usr/bin/env bash
+# preflight's gate: every check this repository has, cheapest first, as ONE command.
+#
+#   scripts/verify            all of it
+#   scripts/verify <stage>    one stage, for the inner loop (stages listed by --help)
+#
+# Why one command: CI and a local run that list the steps separately drift, and a change then passes one
+# and fails the other. CI calls this script, so the two cannot disagree.
+#
+# Order is cost: a parse error fails in a second, while the hook suite takes minutes. A trivial failure
+# should fail fast, before the expensive stages have run.
+#
+# Fail closed. A stage whose own check cannot run - a missing `python3`, a missing test runner - exits
+# non-zero rather than reporting a success it never earned; `tools` is what turns the first of those into
+# one clear message. `PREFLIGHT_VERIFY_SKIP=<stage>` is the deliberate, visible escape hatch: it is for a
+# single commit, and whoever uses it says so in the commit message.
+set -uo pipefail
+
+here="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$here" || exit 1
+
+STAGES="tools syntax install config version gateshapes coverage hooktests selfcheck"
+rc=0
+failed=""
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/verify [stage ...]
+
+  (no arguments)   every stage, in cost order
+  --list           print the stage names, one per line
+  -h, --help       this text
+
+Stages, cheapest first:
+  tools        the commands every other stage needs are present
+  syntax       every script parses - bash -n for bash, sh -n for POSIX sh
+  install      install.sh deploys into a throwaway prefix and is idempotent
+  config       the generated config and the gate template parse, and the
+               completeness keys are still set (and the deliberate omissions still absent)
+  version      src/VERSION, the CHANGELOG heading and --version agree
+  gateshapes   preflight-gate survives the JSON shapes the model really produces
+  coverage     the coverage marker matches pr-agent's footer and ignores prose
+  hooktests    the commit-hook integration suite (offline cases)
+  selfcheck    that suite re-run against a neutered hook
+
+Environment:
+  PREFLIGHT_VERIFY_SKIP=<stage>[,<stage>...]   skip stages, by name. Deliberate and visible: say why in
+                                               the commit message.
+EOF
+}
+
+for a in "$@"; do
+  case "$a" in
+    -h|--help|help) usage; exit 0 ;;
+    --list) printf '%s\n' $STAGES; exit 0 ;;
+  esac
+done
+
+# ---- stage selection ---------------------------------------------------------------------------
+skip=",${PREFLIGHT_VERIFY_SKIP:-},"
+selected=""
+if [ "$#" -eq 0 ]; then
+  selected="$STAGES"
+else
+  for want in "$@"; do
+    case " $STAGES " in
+      *" $want "*) selected="$selected $want" ;;
+      *) echo "verify: unknown stage '$want' (see --list)" >&2; exit 2 ;;
+    esac
+  done
+fi
+
+wants() { case " $selected " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+is_skipped() { case "$skip" in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+
+run() {
+  local name="$1"; shift
+  # A stage the caller did not name is simply not this run's business, so it is passed over in silence -
+  # reporting it as SKIPPED would blur "I only asked for syntax" with "something was deliberately waived".
+  wants "$name" || return 0
+  if is_skipped "$name"; then
+    printf '\n== %s: SKIPPED (PREFLIGHT_VERIFY_SKIP)\n' "$name"
+    return 0
+  fi
+  printf '\n== %s\n' "$name"
+  if "$@"; then
+    printf '   ok  %s\n' "$name"
+  else
+    printf '   FAIL %s\n' "$name" >&2
+    rc=1
+    failed="$failed $name"
+  fi
+}
+
+# ---- stages ------------------------------------------------------------------------------------
+
+stage_tools() {
+  local missing="" t
+  for t in git python3 awk sed mktemp; do
+    command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+  done
+  [ -z "$missing" ] || { echo "missing required tool(s):$missing" >&2; return 1; }
+  echo "required tools present"
+}
+
+stage_syntax() {
+  # One file per invocation: `bash -n a.sh b.sh` parses only a.sh, silently making b.sh's errors
+  # invisible. The hooks and the tests are POSIX sh - they may run where only sh exists.
+  local rc=0 f
+  for f in install.sh uninstall.sh \
+           src/preflight src/preflight-pr src/preflight-gate scripts/ensure-link.sh scripts/verify
+  do
+    bash -n "$f" || { echo "bash syntax: FAIL $f" >&2; rc=1; }
+  done
+  for f in src/preflight-hook src/githooks/pre-commit src/githooks/post-commit tests/run.sh
+  do
+    sh -n "$f" || { echo "sh syntax: FAIL $f" >&2; rc=1; }
+  done
+  [ "$rc" = 0 ] && echo "all scripts parse"
+  return "$rc"
+}
+
+stage_install() {
+  local tmp rc=0
+  tmp="$(mktemp -d)" || return 1
+  # Exercises install.sh end to end without uv, the network or the real ~/.config. This is also the
+  # regression test for the installer itself, which otherwise has no coverage.
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" \
+  PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 \
+    ./install.sh || rc=1
+  local f
+  for f in preflight preflight-pr preflight-gate; do
+    [ -x "$tmp/bin/$f" ] || { echo "installer did not install $f" >&2; rc=1; }
+  done
+  for f in preflight.toml preflight-hook ensure-link.sh VERSION; do
+    [ -f "$tmp/cfg/$f" ] || { echo "installer did not write $f" >&2; rc=1; }
+  done
+  [ -x "$tmp/cfg/preflight-hook" ] || { echo "preflight-hook is not executable" >&2; rc=1; }
+  for f in pre-commit post-commit; do
+    [ -x "$tmp/cfg/githooks/$f" ] || { echo "githooks/$f missing" >&2; rc=1; }
+  done
+  # install.sh must never clobber an existing secrets file.
+  echo 'key      = "sentinel"' > "$tmp/cfg/.secrets.toml"
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" \
+  PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 ./install.sh >/dev/null || rc=1
+  grep -q sentinel "$tmp/cfg/.secrets.toml" || { echo "installer clobbered .secrets.toml" >&2; rc=1; }
+  # The pr-agent pin is load-bearing: `preflight` matches the exact wording of pr-agent's own coverage
+  # footer, so an unpinned install can silently stop reporting coverage=PARTIAL. Anchor on the
+  # `uv tool install` COMMAND at line start - the pin string also appears in the `say` echo above it, so
+  # matching the bare string would pass with the install unpinned.
+  grep -qE '^[[:space:]]*uv tool install .*pr-agent==' install.sh \
+    || { echo "install.sh no longer pins pr-agent in the uv command" >&2; rc=1; }
+  grep -q 'PREFLIGHT_PR_AGENT_VERSION:-0\.47\.0' install.sh \
+    || { echo "install.sh pr-agent pin changed; re-verify the coverage footer fixture in tests/run.sh" >&2; rc=1; }
+  rm -rf "$tmp"
+  [ "$rc" = 0 ] && echo "installer OK"
+  return "$rc"
+}
+
+stage_config() {
+  local tmp rc=0
+  tmp="$(mktemp -d)" || return 1
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" \
+  PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 ./install.sh >/dev/null || rc=1
+  python3 - "$tmp/cfg/preflight.toml" <<'PY' || rc=1
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+cfg = d["config"]
+assert cfg["model"], "no model configured"
+assert cfg["fallback_models"], "no fallback model configured"
+assert d["litellm"]["force_streaming_api_base_substrings"], "no streaming host configured"
+# The completeness knobs, asserted here so they cannot be dropped silently. Each answers a different
+# half of the review->fix->review cascade, and a regression in any one of them shows up as a loop that
+# will not converge rather than as a failing build:
+#   num_max_findings          - how many findings one review may RETURN
+#   enable_large_pr_chunking  - review the whole diff instead of a pruned slice of it
+#   max_number_of_calls       - the bound on those extra chunking calls
+rv = d["pr_reviewer"]
+assert rv["num_max_findings"] >= 10, "num_max_findings is back down to a cascade-sized cap"
+assert rv["enable_large_pr_chunking"] is True, "a token-budget-pruned diff would be reviewed as a slice"
+assert rv["max_number_of_calls"] >= 2, "chunking is on but capped at a single call, so it cannot cover the diff"
+# A separate concern from the three above - the gate's go/no-go signal - so it is named after what it
+# checks rather than counted among them.
+assert rv["require_merge_recommendation"], \
+    "no go/no-go signal: preflight-gate fails on merge_recommendation=changes_required"
+# The two keys this bundle DELIBERATELY does not set, asserted as absent so neither can be reintroduced
+# silently. The bundle used to inject extra_instructions; capturing the literal prompt showed it argued
+# against pr-agent's own text ("prefer not reporting over guessing", "an empty list is acceptable") by
+# telling the model "most real diffs have several", and it was the only sentence in an
+# ~8,000-character prompt pushing toward generating findings. The reasoning_effort pin dated from a
+# synthetic measurement that did not reproduce on real diffs. Re-adding either is a deliberate act that
+# needs a measurement, not a default.
+#
+# `require_risk_assessment` is in the same class: it asks the model for a field the gate only prints,
+# and which measured unstable (`low, low, medium, low` across four reviews while merge_recommendation
+# never moved). See docs/roadmap.md.
+assert not rv.get("extra_instructions", "").strip(), \
+    "extra_instructions is set again: it overrides pr-agent's own severity guidance (see docs/roadmap.md)"
+assert not rv.get("require_risk_assessment"), \
+    "require_risk_assessment is on again: the gate does not use risk_level (see docs/roadmap.md)"
+assert "reasoning_effort" not in cfg, \
+    "reasoning_effort is pinned again: pr-agent's own default applies (see docs/roadmap.md)"
+# `additional_reasoning_effort_models` is asserted absent too, though its message is the one place the
+# reasoning behind that is contested: removing it makes reasoning_effort inert here (nothing is sent at
+# all), while re-adding it would send a budget we have not chosen. That is an open decision in
+# docs/roadmap.md, not a settled one - so this assertion records the current choice rather than a principle.
+assert "additional_reasoning_effort_models" not in cfg, \
+    "additional_reasoning_effort_models is set again: see the open decision in docs/roadmap.md"
+assert "pr_code_suggestions" not in d, \
+    "pr_code_suggestions is configured again: its chunk size only made the padding nudge louder"
+# The review-context mechanism is deliberately NOT configured here. pr-agent calls
+# `inject_artifact_context()` (cli.py) BEFORE `apply_repo_settings()` loads `--extra_config_url`
+# (pr_agent.py), so an `[artifacts]` section in this file is read too late to matter: `enable`,
+# `target_tools` and `artifact_label` all come from the env/defaults first. The helper sets them through
+# the environment, and REQ-HOOK-40 pins that. A section here would look configured while doing nothing.
+assert "artifacts" not in d, \
+    "an [artifacts] section is back: it is applied AFTER injection, so it cannot take effect (see REQ-HOOK-40)"
+print("config parses:", cfg["model"], "->", cfg["fallback_models"])
+PY
+  # The gate's policy template. It must PARSE, and it must be INERT: every key is commented out, so an
+  # untouched install and no file behave identically and the built-in defaults stay the one source of
+  # truth. A live key here would freeze today's default into every machine, and a later release that
+  # changed that default would be silently ignored.
+  python3 - "$tmp/cfg/gate.toml" "$PWD/config/gate.toml.example" <<'PY' || rc=1
+import sys, tomllib
+for label, path in (("installed", sys.argv[1]), ("template", sys.argv[2])):
+    with open(path, "rb") as fh:
+        d = tomllib.load(fh)
+    assert d == {}, f"{label} gate.toml sets {sorted(d)}; every key must be commented out so the built-in defaults stay authoritative"
+print("gate policy template parses and is inert (no keys set)")
+PY
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+stage_version() {
+  # `preflight --version` and install.sh both read src/VERSION, so an installed copy can say what it is.
+  # Three things have to agree or the number is a lie: the file, the CHANGELOG's released heading for it,
+  # and the help text's promise that -V reports it.
+  #
+  # A version bump therefore lands with its CHANGELOG heading in the SAME commit, which is
+  # Keep-a-Changelog discipline anyway. `--version` reports the release the tree is based on (0.1.0 plus
+  # unreleased changes reads as 0.1.0, as a checkout-based version always does).
+  local rc=0 v
+  v="$(head -n1 src/VERSION)"
+  case "$v" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) echo "src/VERSION does not look like x.y.z: '$v'" >&2; rc=1 ;;
+  esac
+  grep -q "^## \[$v\]" CHANGELOG.md \
+    || { echo "CHANGELOG.md has no released '## [$v]' heading" >&2; rc=1; }
+  ./src/preflight --version | grep -q "$v" \
+    || { echo "'preflight --version' does not report $v" >&2; rc=1; }
+  [ "$rc" = 0 ] && echo "version $v is consistent"
+  return "$rc"
+}
+
+stage_gateshapes() {
+  # A crash in the gate turns a clean review into a blocked commit: it called .strip() on fields that
+  # arrive as JSON booleans, tracebacked, and the commit hook read the non-zero exit as "the review did
+  # not pass" - recording `fail` as the sidecar verdict.
+  #
+  # `if ! <cmd>`, never `cmd; [ "$?" = N ]`: a command that exits non-zero is the point of several checks
+  # here, so the status is captured immediately rather than after a test.
+  local rc=0 d gate st out shape falsy truthy
+  d="$(mktemp -d)"
+  gate="$PWD/src/preflight-gate"
+  # A scratch PREFLIGHT_HOME: the gate reads $PREFLIGHT_HOME/gate.toml when it exists, and install.sh
+  # creates that file on a developer machine, so an edited policy would otherwise change these
+  # assertions' expected exit codes.
+  inside() { ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight bash "$gate" ); }
+  put() { mkdir -p "$d/.preflight"; printf '%s' "$1" > "$d/.preflight/review.json"; }
+
+  # Booleans where a string was assumed: this is the shape that used to traceback.
+  put '{"review":{"estimated_effort_to_review_[1-5]":3,"risk_level":"low","merge_recommendation":"safe_to_merge","relevant_tests":true,"security_concerns":false,"key_issues_to_review":[]}}'
+  out="$(inside 2>&1)" || rc=1
+  case "$out" in *Traceback*) echo "gate tracebacked on boolean fields" >&2; rc=1 ;; esac
+  echo "$out" | grep -q 'PASS' || { echo "gate did not PASS a clean review: $out" >&2; rc=1; }
+
+  # A real security concern expressed as a boolean must still fail, with exit 2.
+  put '{"review":{"security_concerns":true,"key_issues_to_review":[]}}'
+  # Capture the status FIRST: inside the `elif` body `$?` would be the status of the preceding
+  # `[ ... ]` test (0), not the gate's, so the diagnostic would always read "exited 0".
+  st=0; inside >/dev/null 2>&1 || st=$?
+  if [ "$st" = 0 ]; then echo "bool security_concerns did not fail" >&2; rc=1
+  elif [ "$st" != 2 ]; then echo "bool security_concerns exited $st, expected 2" >&2; rc=1; fi
+
+  # Malformed JSON is "no usable review" (exit 3), not a traceback. Exit 3 is the expected outcome here,
+  # so it must not be treated as a failure of this check.
+  put '{ not json'
+  out="$(inside 2>&1)" || true
+  case "$out" in *Traceback*) echo "gate tracebacked on malformed json" >&2; rc=1 ;; esac
+  echo "$out" | grep -q 'cannot read' || { echo "malformed json was not reported: $out" >&2; rc=1; }
+
+  # Valid JSON with the wrong SHAPE: a top-level array, or a "review" that is not an object. Both used to
+  # AttributeError - the same non-zero-exit-becomes-a-failed-verdict trap.
+  for shape in '[]' '"x"' '{"review":"nope"}' '{"review":[1,2]}' '{"review":null}' \
+               '{"review":{"key_issues_to_review":true}}' \
+               '{"review":{"key_issues_to_review":3}}' \
+               '{"review":{"estimated_effort_to_review_[1-5]":1e999}}'; do
+    put "$shape"
+    out="$(inside 2>&1)" || true
+    case "$out" in *Traceback*) echo "gate tracebacked on shape $shape" >&2; rc=1 ;; esac
+    echo "$out" | grep -q 'preflight-gate: ' || { echo "shape $shape was not reported" >&2; rc=1; }
+  done
+
+  # Falsy values that are NOT booleans must still read as "no concern". `0`/`[]`/`{}` became their textual
+  # form ('0', '[]') and were read as a concern, failing a clean review with exit 2 - which the sidecar
+  # then recorded as a blocked verdict.
+  for falsy in '0' '[]' '{}' '""' 'null' '"No"' '"n/a"'; do
+    put "{\"review\":{\"security_concerns\":$falsy,\"key_issues_to_review\":[]}}"
+    out="$(inside 2>&1)" || true
+    case "$out" in *Traceback*) echo "gate tracebacked on security_concerns=$falsy" >&2; rc=1 ;; esac
+    echo "$out" | grep -q 'PASS' || { echo "security_concerns=$falsy was not treated as no concern: $out" >&2; rc=1; }
+  done
+
+  # ...while a real concern, however expressed, must still fail.
+  for truthy in 'true' '1' '"SQL injection"'; do
+    put "{\"review\":{\"security_concerns\":$truthy,\"key_issues_to_review\":[]}}"
+    if inside >/dev/null 2>&1; then echo "security_concerns=$truthy did not fail" >&2; rc=1
+    else st=$?; [ "$st" = 2 ] || { echo "security_concerns=$truthy exited $st, expected 2" >&2; rc=1; }; fi
+  done
+
+  # The effort clamp still parses a numeric field.
+  put '{"review":{"estimated_effort_to_review_[1-5]":5,"key_issues_to_review":[]}}'
+  if ( cd "$d" && PREFLIGHT_DIR=.preflight PREFLIGHT_GATE_MAX_EFFORT=3 bash "$gate" ) >/dev/null 2>&1; then
+    echo "effort clamp did not fail at 5 > 3" >&2; rc=1
+  fi
+
+  # The doc tier: a finding on documentation is advisory and must NOT fail the gate, while one on code
+  # must. `relevant_file` carries a trailing newline in real payloads, which is what a naive
+  # `endswith('.md')` gets wrong, so the doc fixture keeps it.
+  put '{"review":{"key_issues_to_review":[{"relevant_file":"README.md\n","issue_header":"typo","issue_content":"c"}],"security_concerns":"No"}}'
+  if ! ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight bash "$gate" ) >/dev/null 2>&1; then
+    echo "a documentation finding failed the gate (it is advisory by default)" >&2; rc=1
+  fi
+  if ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight PREFLIGHT_GATE_DOC_BLOCKS=1 bash "$gate" ) >/dev/null 2>&1; then
+    echo "PREFLIGHT_GATE_DOC_BLOCKS=1 did not make a documentation finding block" >&2; rc=1
+  fi
+  put '{"review":{"key_issues_to_review":[{"relevant_file":"src/preflight\n","issue_header":"bug","issue_content":"c"}],"security_concerns":"No"}}'
+  if ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight bash "$gate" ) >/dev/null 2>&1; then
+    echo "a code finding passed the gate (the doc tier must not cover code)" >&2; rc=1
+  fi
+
+  rm -rf "$d"
+  [ "$rc" = 0 ] && echo "gate field shapes OK"
+  return "$rc"
+}
+
+stage_coverage() {
+  # `preflight` decides whether a review covered the whole diff by matching pr-agent's coverage footer in
+  # review.md. That file is model-generated prose, and a finding may discuss coverage - a review of this
+  # very feature did, repeatedly. Text matching alone loses: the model can reproduce the footer's words
+  # while explaining them. What the shipped check keys on is the footer AS pr-agent EMITS it - a
+  # horizontal rule, the header, the sentence, and the generated file bullets - restricted to the text
+  # after the review table.
+  #
+  # This runs the SHIPPED summary-line block over fixtures rather than restating its logic, and covers
+  # both directions: the emitted footer must be detected, and the prose and in-table quotes that broke
+  # earlier versions must not be.
+  #
+  # What this CANNOT catch, and does not claim to: upstream DRIFT. CI deliberately never installs
+  # pr-agent (no network, no paid key), so the fixture here is a literal copied from pr-agent's source;
+  # if a future pr-agent rewords the footer this stays green while the marker stops matching and a
+  # partial review quietly reads as complete. That is exactly why tests/run.sh REQ-HOOK-28 re-checks the
+  # marker against the INSTALLED package's own footer source on any machine that has one.
+  python3 - <<'PY'
+import re, subprocess, sys, tempfile, os
+
+src = open("src/preflight", encoding="utf-8").read()
+blocks = re.findall(r"python3 - \"\$out_json\" \"\$out_md\" <<'PY'[^\n]*\n(.*?)\nPY\n", src, re.S)
+if not blocks:
+    sys.exit("cannot find the summary-line block in src/preflight; update this guard")
+d = tempfile.mkdtemp()
+json_path = os.path.join(d, "review.json")
+open(json_path, "w").write('{"review":{"key_issues_to_review":[]}}')
+script = os.path.join(d, "summary.py")
+open(script, "w").write(blocks[-1])
+
+def summary(body):
+    md = os.path.join(d, "review.md")
+    open(md, "w", encoding="utf-8").write(body)
+    # The marker only fires for the branch scopes: a pending-commit diff is far below the token budget,
+    # so pr-agent never prunes it. This exercises the marker's matching, so it runs in the scope where
+    # the marker can appear at all.
+    env = dict(os.environ)
+    env["PREFLIGHT_SCOPE_IS_BRANCH"] = "1"
+    return subprocess.run([sys.executable, script, json_path, md],
+                          capture_output=True, text=True, env=env).stdout
+
+# pr-agent emits: "\n\n<hr>\n\n" + the header + the sentence + "\n" + bullet lines.
+footer = ("\n\n<hr>\n\n\u26a0\ufe0f **Review coverage:** The following files were not "
+          "included in this review because of the token budget:\n- `late.py`\n")
+
+fails = []
+# The real footer, where pr-agent emits it: after the review table.
+if "PARTIAL" not in summary("<table>\n<tr><td>clean</td></tr>\n</table>" + footer):
+    fails.append("the real footer, after the table, was not detected")
+# No table at all: the marker must still fire on the emitted footer.
+if "PARTIAL" not in summary(footer):
+    fails.append("the footer without a table was not detected")
+# Shapes that tripped earlier versions, each making a fully-reviewed diff report PARTIAL.
+for label, body in (
+    ("a finding quoting the footer verbatim inside the table",
+     "<table>\n<tr><td>finding:<br>" + footer + "</td></tr>\n</table>\n"),
+    ("the header and sentence without pr-agent's rule-and-bullet structure",
+     "<table></table>\n\n**Review coverage:** The following files were not included in this "
+     "review because of the token budget:\n"),
+    ("a review that merely says the generated files were not included in this review",
+     "a review that merely says: generated files were not included in this review, and stops."),
+):
+    if "PARTIAL" in summary(body):
+        fails.append(label + " was misread as coverage")
+# The plain line always carries its counts, whatever the verdict.
+if "issues=0" not in summary(footer):
+    fails.append("the summary line lost its counts")
+# A review.md that is not valid UTF-8 (the footer holds an emoji) must still print the counts:
+# UnicodeDecodeError is a ValueError, so a read guarded only by `except OSError` would drop the whole
+# line, not just the marker.
+md = os.path.join(d, "latin1.md")
+open(md, "wb").write(b"caf\xe9 - a review in cp1252\n")
+got = subprocess.run([sys.executable, script, json_path, md], capture_output=True, text=True).stdout
+if "issues=0" not in got:
+    fails.append("a non-UTF-8 review.md lost the summary line: " + got.strip())
+
+if fails:
+    for f in fails:
+        print("FAIL:", f)
+    sys.exit(1)
+print("coverage marker ignores prose and matches the real footer")
+PY
+}
+
+stage_hooktests() {
+  # Offline cases only: the live-endpoint case needs a paid key, and the gate must never depend on one.
+  ./tests/run.sh hook
+}
+
+stage_selfcheck() {
+  # Re-runs the suite above against a neutered hook and requires that exactly the enforcement-sensitive
+  # cases fail. Without it, a case that claims to test enforcement but passes with the hook disabled
+  # would go unnoticed - the suite would still be green.
+  ./tests/run.sh selfcheck
+}
+
+run tools        stage_tools
+run syntax       stage_syntax
+run install      stage_install
+run config       stage_config
+run version      stage_version
+run gateshapes   stage_gateshapes
+run coverage     stage_coverage
+run hooktests    stage_hooktests
+run selfcheck    stage_selfcheck
+
+# Only on a full run: a caller that asked for one stage is not asking for the lint. In CI the lint is its
+# own job with a pinned binary, which is why an absent `actionlint` here is reported rather than fatal.
+if [ "$#" -eq 0 ]; then
+  if command -v actionlint >/dev/null 2>&1; then
+    printf '\n== actionlint\n'
+    if actionlint .github/workflows/ci.yml; then
+      printf '   ok  actionlint\n'
+    else
+      printf '   FAIL actionlint\n' >&2
+      rc=1
+      failed="$failed actionlint"
+    fi
+  else
+    printf '\n== actionlint: SKIPPED (not installed; CI runs it in its own job with a pinned binary)\n'
+  fi
+fi
+
+printf '\n'
+if [ "$rc" = 0 ]; then
+  echo "gate: PASS"
+else
+  echo "gate: FAIL (failed stages:$failed)" >&2
+fi
+exit "$rc"

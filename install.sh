@@ -21,19 +21,21 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-files="$here/files"
+src="$here/src"
+config="$here/config"
+scripts="$here/scripts"
 cfg="${PREFLIGHT_HOME:-$HOME/.config/preflight}"
 bindir="${PREFLIGHT_BIN_DIR:-$HOME/.local/bin}"
 py="${PREFLIGHT_PY:-3.13}"
 # Pinned, because `preflight` reads pr-agent's own output structure: the coverage marker matches the
 # exact wording of pr-agent's "files were not included" footer, so an unpinned upgrade can stop
 # coverage=PARTIAL from printing - a silently partial review, the failure this bundle exists to prevent.
-# Override to test a new release; CI asserts this pin (see .github/workflows/ci.yml).
+# Override to test a new release; the gate asserts this pin (scripts/verify, the `install` stage).
 pr_agent_version="${PREFLIGHT_PR_AGENT_VERSION:-0.47.0}"
 api_base="${PREFLIGHT_API_BASE:-https://api.cline.bot/api/v1}"
 key="${PREFLIGHT_KEY:-}"
 
-# Provider overrides (empty = keep the value baked into files/preflight.toml).
+# Provider overrides (empty = keep the value baked into config/preflight.toml.example).
 model="${PREFLIGHT_MODEL:-}"
 fallbacks="${PREFLIGHT_FALLBACK_MODELS:-}"
 custom_max="${PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS:-}"
@@ -57,7 +59,7 @@ fi
 mkdir -p "$cfg" "$bindir"
 
 say "==> writing $cfg/preflight.toml (endpoint: $api_base)"
-cp "$files/preflight.toml" "$cfg/preflight.toml"
+cp "$config/preflight.toml.example" "$cfg/preflight.toml"
 
 # Apply provider overrides, if any, to the values just written. Anchored on our own known keys so
 # `max_model_tokens` can never match inside `custom_model_max_tokens`.
@@ -86,7 +88,7 @@ if [ -f "$cfg/.secrets.toml" ]; then
   say "==> keeping existing $cfg/.secrets.toml"
 else
   say "==> writing $cfg/.secrets.toml (chmod 600)"
-  sed "s#__API_BASE__#$api_base#g" "$files/secrets.toml.example" > "$cfg/.secrets.toml"
+  sed "s#__API_BASE__#$api_base#g" "$config/secrets.toml.example" > "$cfg/.secrets.toml"
   chmod 600 "$cfg/.secrets.toml"
 fi
 
@@ -103,23 +105,23 @@ PY
 fi
 
 say "==> installing helpers into $bindir"
-install -m 0755 "$files/preflight-pr"   "$bindir/preflight-pr"
-install -m 0755 "$files/preflight"      "$bindir/preflight"
-install -m 0755 "$files/preflight-gate" "$bindir/preflight-gate"
-install -m 0644 "$files/VERSION"        "$cfg/VERSION"
-install -m 0644 "$files/ensure-link.sh" "$cfg/ensure-link.sh"
+install -m 0755 "$src/preflight-pr"   "$bindir/preflight-pr"
+install -m 0755 "$src/preflight"      "$bindir/preflight"
+install -m 0755 "$src/preflight-gate" "$bindir/preflight-gate"
+install -m 0644 "$src/VERSION"        "$cfg/VERSION"
+install -m 0644 "$scripts/ensure-link.sh" "$cfg/ensure-link.sh"
 # The gate's policy template. Installed only if absent, so an edited live file is never overwritten -
 # the gate has built-in defaults, so an untouched file and no file behave identically.
-if [ -f "$files/gate.toml.example" ] && [ ! -f "$cfg/gate.toml" ]; then
-  install -m 0644 "$files/gate.toml.example" "$cfg/gate.toml"
+if [ -f "$config/gate.toml.example" ] && [ ! -f "$cfg/gate.toml" ]; then
+  install -m 0644 "$config/gate.toml.example" "$cfg/gate.toml"
 fi
 # preflight-hook is what a repo's committed .githooks/pre-commit calls (via $PREFLIGHT_HOOK or
 # ~/.config/preflight/preflight-hook), so it lives with the config rather than on PATH.
-install -m 0755 "$files/preflight-hook" "$cfg/preflight-hook"
-if [ -d "$files/githooks" ]; then
+install -m 0755 "$src/preflight-hook" "$cfg/preflight-hook"
+if [ -d "$src/githooks" ]; then
   mkdir -p "$cfg/githooks"
-  install -m 0755 "$files/githooks/pre-commit"  "$cfg/githooks/pre-commit"
-  install -m 0755 "$files/githooks/post-commit" "$cfg/githooks/post-commit"
+  install -m 0755 "$src/githooks/pre-commit"  "$cfg/githooks/pre-commit"
+  install -m 0755 "$src/githooks/post-commit" "$cfg/githooks/post-commit"
 fi
 if [ -f "$here/AGENTS-review-snippet.md" ]; then
   install -m 0644 "$here/AGENTS-review-snippet.md" "$cfg/AGENTS-review-snippet.md"
@@ -149,7 +151,7 @@ fi
 case ":$PATH:" in *":$bindir:"*) : ;; *) say "!! $bindir is not on your PATH - add it, e.g. export PATH=\"\$PATH:$bindir\"" ;; esac
 
 say ""
-say "Done. Installed bundle version: $(head -n1 "$files/VERSION" 2>/dev/null || printf 'unknown')"
+say "Done. Installed bundle version: $(head -n1 "$src/VERSION" 2>/dev/null || printf 'unknown')"
 # Only ask for a key that is actually missing. On a refresh install the file is usually already
 # configured, and telling that user to paste a key they set months ago trains them to ignore the
 # line - which is the line they need to read on a genuinely new machine.

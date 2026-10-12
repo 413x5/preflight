@@ -6,7 +6,7 @@
 #             --help / -h and --version / -V are handled before anything else.
 #
 #   hook    — verify that the content being committed was already reviewed. This is what a repo's
-#             .githooks/pre-commit calls; it is read-only and never runs a review. See docs/DESIGN.md.
+#             .githooks/pre-commit calls; it is read-only and never runs a review. See docs/architecture.md.
 #
 # Scope (PREFLIGHT_SCOPE):
 #   commit (default)   — the pending change: HEAD -> working tree, untracked files included (a commit
@@ -36,9 +36,9 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # some honoured the override they could read different directories.
 cfgdir="${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}"
 
-# files/VERSION is the single source of truth, installed next to the config: looked up beside the
-# script first (a checkout or vendored copy), then in cfgdir. `unknown` rather than an error, because a
-# missing VERSION should not make the tool unusable.
+# VERSION is the single source of truth for the bundle version, installed next to the config: looked up
+# beside the script first (a checkout or vendored copy), then in cfgdir. `unknown` rather than an error,
+# because a missing VERSION should not make the tool unusable.
 #
 # ${HOME:-} and not $HOME: bash expands every word of the `for` list before the loop starts, so a bare
 # $HOME is evaluated even when the FIRST candidate would have matched - and under `set -u` an unset HOME
@@ -89,7 +89,7 @@ Environment:
   PREFLIGHT_SHUTDOWN_WAIT seconds to wait for pr-agent to EXIT after the artifact exists
                           (default 120); on expiry it is stopped and the run still succeeds,
                           because the review is already complete and preflight-gate decides
-                          the verdict. See docs/TROUBLESHOOTING.md ("never exits").
+                          the verdict. See docs/runbooks/troubleshooting.md ("never exits").
 
 Config:  <dir>/preflight.toml, where <dir> is PREFLIGHT_HOME or ~/.config/preflight
          (any OpenAI-compatible endpoint; see README "Using another provider")
@@ -422,7 +422,7 @@ issues = _raw_issues if isinstance(_raw_issues, list) else []
 # `merge_recommendation` is one of the four things preflight-gate fails on (effort, security,
 # merge_recommendation, issues); making it visible here means `preflight review` can no longer report a
 # review the gate would then refuse. `risk_level` is reported but NOT enforced - the gate reads it only
-# to print it, so `risk=low` alongside real findings passes regardless. See ROADMAP.md.
+# to print it, so `risk=low` alongside real findings passes regardless. See docs/roadmap.md.
 def as_text(value):
     if value is None:
         return ''

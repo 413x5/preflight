@@ -1,4 +1,4 @@
 .DS_Store
 *.swp
-# never commit a real secrets file (the bundle ships only secrets.toml.example)
+# never commit a real secrets file (the bundle ships only config/secrets.toml.example)
 .secrets.toml

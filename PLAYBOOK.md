@@ -151,6 +151,27 @@ judgement — say so honestly in the record and rely on review, rather than ship
 pretends to cover it. A test that only looks like it enforces something is the false result this whole
 section is against.
 
+**An assertion earns trust by failing.** Before relying on a check, make the thing it asserts false and
+watch it fail. This is a **different property** from proving the feature is needed — reverting the fix and
+watching the check go red says the feature matters; flipping the *assertion's own subject* says the check
+is live. Do both, and do the second one while writing the check.
+
+It is not a formality, because every way a check can fail to fail is silent. A branch that cannot run (a
+printable summary where a non-zero status was needed, under an `else` that is therefore unreachable); a
+fixture aimed at the wrong path (a read-only grandparent while the code wrote to a writable child); a
+comparison over constant bytes (a stub producing identical output, so a genuine overwrite compares equal);
+a selection by position where the order is not chronological (`tail -1` over an id whose numeric part is
+unpadded). Each of those passed a fully green suite. **A check that cannot fail is the same false result as
+no check, and worse, because it is counted.**
+
+**Where a rule lives decides whether it fires.** Revisit a rule's *trigger*, not only its wording. A rule
+filed under one file's heading, or written as "if you change X", is invisible to every change of the same
+kind that happens not to touch X — and the author reads the rule, agrees with it, and still does not apply
+it. When the same defect could occur anywhere, key the rule to the **class of change** and place it where
+that change is made. This applies to rules enforced by discipline — a review, an agent instruction file, a
+convention. A rule a scheduled check runs unconditionally does not have the problem, which is also the
+argument for making the trigger mechanical wherever it can be.
+
 ## 5. Records: decisions and incidents
 
 Two kinds of writing keep a project's reasoning alive. They have different shapes and different jobs.

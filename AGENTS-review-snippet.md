@@ -53,6 +53,22 @@ Two fields on the summary line matter to the loop:
 `risk=` is reported but the gate never decides on it; the gate fails on security concerns,
 `merge_recommendation=changes_required`, key issues, or effort above `PREFLIGHT_GATE_MAX_EFFORT`.
 
+### A round is a full model call
+
+Nothing here is free, so the loop's exit conditions above are the thing that keeps it short. Three habits
+that cost nothing and save rounds:
+
+- **Fix everything material in one pass.** One round that resolves five findings is five times cheaper
+  than five rounds that resolve one each - and the review re-reads the whole diff every time, not just the
+  part you changed.
+- **A review reports on prose as hard as on code.** Comments and documentation state facts, and a factual
+  claim the reviewer can check and you have not is a finding you bought. This is usually the cheapest
+  finding to avoid: write less commentary, and make sure what you write is true.
+- **Do not document behaviour you have not settled.** Write the code, confirm what it does, then describe
+  it. A rationale written ahead of its behaviour is a guess, and it is the most reliable way to earn a
+  second round - the code settles one way, the paragraph says another, and the next review reports the
+  paragraph.
+
 ### Operating invariants
 
 - **Do not commit to be reviewed.** The loop runs in the working tree; commit once, for the pull request.

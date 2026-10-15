@@ -130,9 +130,40 @@ something that passes everything. For any behavioural change:
 3. **Classify it** in the `sensitive` or `insensitive` list beside `case_selfcheck`. An unclassified case
    fails `./tests/run.sh selfcheck`; so does a case marked sensitive that passes with the hook neutered.
    This is what stops a case from claiming to test enforcement without actually testing it.
-4. **Revert your fix and confirm the new case fails.** A case that cannot fail is worth nothing - one was
-   written during this project, shown to be unfalsifiable, and deleted rather than kept as false coverage.
+4. **Prove the case can fail** in both directions - see "Assertions must be falsifiable" below.
 5. If the change is a fix rather than a feature, add it to the containment table in `docs/architecture.md`.
+
+## Assertions must be falsifiable
+
+**Every test case and every guard, not only the hook's.** A check that cannot fail is the same false result
+as no check, and worse than no check because it is *counted*. This section is deliberately not filed under
+one file's heading: keying a rule to a file makes it invisible to every change of the same kind elsewhere,
+which is how the case below happened.
+
+Two directions, and they are different properties:
+
+1. **Revert the fix; the case must fail.** That the feature is needed.
+2. **Falsify what the assertion asserts; the case must fail.** That the assertion is live.
+
+Direction 1 alone is not enough. The session that added the run history ran eight mutations of direction 1
+- all correct, each one watched failing - while four assertions in that same new case could not fail, and
+the suite was green throughout. Run direction 2 on the assertion you just wrote, *before* trusting it.
+
+The four shapes, each of which passed a green `./scripts/verify` in this repository:
+
+- **A branch that cannot run.** A Python block that `print`ed its findings and exited 0, under
+  `if python3 ...; then :; else <fail>; fi` - the `else` was unreachable. Five forged problems still
+  "passed". `sys.exit` is what makes the status non-zero.
+- **A fixture aimed at the wrong path.** A read-only *grandparent* directory while the code created and
+  wrote in a writable *child*, so the intended failure was never reached and the case exited through an
+  unrelated branch.
+- **A comparison over constant bytes.** `cmp` between an archived artifact and a fixture that wrote
+  identical output on every run, so a genuine overwrite compared equal.
+- **Selection by position where the order is not chronological.** `ls | tail -1` over `<UTC second>-<pid>`:
+  the pid is unpadded, so `…-1000` sorts before `…-999` and "the last one" is not the newest.
+
+Write the failing state deliberately, watch the case fail, then restore. If you cannot make it fail, the
+check is not testing what its name says; fix the check or delete it rather than keep false coverage.
 
 ## Commands
 
@@ -317,6 +348,17 @@ that holds it. Measured cost of not doing this: the `reasoning_effort` forwardin
 full in five files, and the copies disagreed - two of them still claimed "pr-agent's `medium` default
 applies" after a probe showed no effort is sent at all. The rule is what makes a fact cheap to correct.
 
+**Settle the behaviour before you describe it.** A document states what the code *does*, never what it is
+meant to do. Prose written ahead of its code is a guess about behaviour the code has not yet settled, and
+when the code then changes the document is not part of that change - so the text is left asserting the old
+shape. This is the ordering half of the rule above, and it is where the point-one-two rule earns its keep:
+a fact in one file is corrected by the change that settles it, while a fact copied into five is corrected
+in at most one of them.
+
+When behaviour changes, grep for the *opposite* phrasing of the old claim as well as the new one - "is
+kept" as well as "is not kept" - because a copy that inverts the meaning will not match a search for the
+new wording.
+
 ## Keep each round's change small, or the loop will not converge
 
 This repo's own loop is the thing being built, so it is worth knowing how it fails to end. There are three
@@ -346,6 +388,9 @@ So:
 - **Delete a claim rather than qualify it.** When a review says a comment overstates, the fix is normally to
   remove the sentence, not to add a caveat. The caveats are the surface the next round works on.
 - **`new=0` means judge, and usually means change nothing.** Two rounds at `new=0` is the hand-off point.
+  A clean round is not a licence to add prose: a session here saw `new=0` at round four and then
+  documented the feature anyway, which added fresh claims for the next round to check and reset a
+  converged signal. Fix the code; when the loop is clean, stop.
 - **The mutation-table rule is not a formality.** Every row in `tests/README.md` must have been *run*: apply
   the mutation, watch the case fail, revert, watch it pass. A row claiming coverage that no case provides is
   worse than no row, because it retires the requirement without testing it.

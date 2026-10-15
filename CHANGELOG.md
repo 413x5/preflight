@@ -26,6 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, and every mutation in its row of [`tests/README.md`](tests/README.md) was applied, watched failing
   the case, and reverted.
 
+### Changed
+
+- **The rule that a fix must be provable now triggers on a class of change, not on one file.** It also
+  required only that reverting a fix makes the new case fail - which proves the *feature* is needed, not
+  that the *assertion* is live. Building the run history above ran 16 review rounds, and four of its
+  assertions turned out to be dead, vacuous or unfalsifiable while eight correct mutations of the other
+  kind passed: 17 of its 24 findings (71%) were about claims and tests rather than the feature (see
+  [`docs/measurements.md`](docs/measurements.md)). `AGENTS.md` gains **"Assertions must be falsifiable"**,
+  stating both directions and the four shapes that survived a green suite, plus **"Settle the behaviour
+  before you describe it"** for the documentation half. [`PLAYBOOK.md`](PLAYBOOK.md) §4 gains the
+  transferable form - an assertion earns trust by failing, and *where a rule lives* decides whether it
+  fires - and [`AGENTS-review-snippet.md`](AGENTS-review-snippet.md) gains the consumer side: a round is a
+  full model call, a review reports on prose as hard as on code, and behaviour should be settled before it
+  is described. No product behaviour changes.
+
 ## [0.4.0] - 2026-10-12
 
 ### Added

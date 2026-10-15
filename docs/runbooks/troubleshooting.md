@@ -85,6 +85,23 @@ you want the whole diff in a single call.
 added on the next run. If you set `PREFLIGHT_DIR` to an absolute or escaping path, the exclude is skipped
 on purpose.
 
+## I want the earlier reviews, not only the last one
+
+They are all there. `review.md`/`review.json` hold the latest run, and every run is also kept under
+`.preflight/runs/<id>/`:
+
+```sh
+ls -1 .preflight/runs                      # the id is <UTC start>-<pid>, sorted as text by ls
+cat .preflight/runs/*/run.json             # start, finish, duration, artifacts, gate verdict
+cat .preflight/runs/<id>/review.md         # that run's review
+```
+
+Only runs that succeeded AND wrote output are kept - that is what makes the history useful for "how long
+is a review actually taking". A run that failed, or that completed an empty diff without writing anything,
+has no entry, so nothing in the history is partial. The output path is cleared before every run, so `.preflight/review.md` and friends always
+belong to the most recent run that actually wrote them - which may not be the most recent run.
+Nothing prunes these directories - `rm -rf .preflight/runs/<id>` drops one.
+
 ## Output is cut off / summaries stop around 32k tokens
 
 `max_model_tokens` was not raised (or was set to a low value). The default here is 1,000,000 so the

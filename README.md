@@ -15,6 +15,10 @@ is just the built-in default.
 | `preflight-gate` | Machine check over `review.json` (exit 0 = pass) |
 | `preflight-pr …` | PR-Agent with the global config (hosted/PR mode, needs a token) |
 
+Every run that succeeds and produces output is also kept, with its start time, finish time and
+`duration`, under `.preflight/runs/<id>/` — nothing is pruned, so the previous review survives the next
+one.
+
 - Reviews include committed **plus uncommitted and untracked** changes — a review never needs a commit.
 - Secrets live in `~/.config/preflight/.secrets.toml` (chmod 600), symlinked into the PR-Agent package.
   **Nothing secret ever goes into your shell environment.**
@@ -96,6 +100,12 @@ preflight describe     # or: preflight improve ; preflight ask "<question>"
 preflight --help       # every command and environment variable
 preflight --version    # the installed bundle version
 ```
+
+Those paths always hold the **latest** run. Each run that succeeds and produces output is also archived
+under `.preflight/runs/<id>/`, with a `run.json` recording when it started, when it finished and how long
+it took; nothing prunes them, so `ls .preflight/runs` is the history of what has been reviewed. A run
+that failed, or that finished without writing anything (an empty diff), has no entry: every entry is a
+run that produced output you can read.
 
 The default scope is `commit`: the review diffs `HEAD` against the working tree, untracked files included,
 and needs no remote, no base and no fetch. `PREFLIGHT_SCOPE=worktree` reviews the
@@ -208,6 +218,9 @@ key) and migrate it by hand.
 
 - `preflight` adds `.preflight/` to each repo's `.git/info/exclude` automatically, so review output is never
   committed.
+- Runs are append-only under `.preflight/runs/` and nothing deletes them; remove a directory to drop that
+  run. The top-level `review.md`/`review.json`/`review.meta.json` stay as they are, because the commit
+  hook and `preflight-gate` read them by name.
 - The commit hook is opt-in per repo: copy `~/.config/preflight/githooks/*` into the repo's `.githooks/` and
   set the **relative** `core.hooksPath`. See "Make it enforced" above.
 - The helpers run the upstream **`pr-agent`** tool (installed by `uv`); "pr-agent" here always means that

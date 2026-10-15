@@ -1413,6 +1413,365 @@ SLOW
 "; fi
 }
 
+# ---------------------------------------------------------------------------- run history
+
+case_run_history() {
+  # Every run that SUCCEEDS is kept under `$dir/runs/<id>/` with its start, finish and duration, because
+  # the next run DESTROYS the previous one: `preflight` removes `review.json`/`review.md` before launching
+  # pr-agent (phase 1 polls for the file, so a stale one would report the previous run's counts). That
+  # removal is load-bearing and stays - which is exactly why the run it removes has to be preserved
+  # somewhere, and why the assertions below are about the PREVIOUS run surviving, not only about a
+  # directory existing.
+  #
+  # The fixed top-level paths must keep meaning "the latest run": the commit hook reads
+  # `.preflight/review.meta.json` and preflight-gate reads `.preflight/review.json`, both by name. So the
+  # history is additive, and the case asserts the old paths still land.
+  #
+  # Only a successful run is archived, and that is the sharp edge this case mostly guards: the fixed
+  # paths are not deleted before a describe/improve/ask launch (only review's are), so after a failed run
+  # they still hold the PREVIOUS run's file. Archiving on "the artifact exists" therefore filed stale
+  # output - and, before that, the previous review's sidecar - under a run that never produced it.
+  #
+  # Drives the REAL helper against a stub `pr-agent` - the pattern REQ-HOOK-32/REQ-HOOK-34 established -
+  # so it needs no key and no network and therefore runs in CI. The stub DRAINS STDIN: `preflight` pipes
+  # the diff into it, and a stub that exits without reading kills the writing side with SIGPIPE, which
+  # the helper reads as the model call failing. That is the stub's bug, not the helper's, and it would
+  # make this case assert the wrong thing.
+  local d fake cfg problems="" rc out first
+  d="$work/history"; fake="$work/history-bin"; cfg="$work/history-cfg"
+  mkdir -p "$d" "$fake" "$cfg"
+  # The success stub, reused: `agent_ok` restores it after a case installs a failing one.
+  # Each invocation writes DIFFERENT bytes, so "the first run's archived review.json still holds the
+  # first run's output" is a claim a comparison can actually falsify. A stub with constant output made
+  # that check unfalsifiable: reusing the first run's directory would compare equal and pass (found by
+  # reviewing this change with the tool).
+  agent_ok() {
+    cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+cat >/dev/null
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+seq=$(cat "$FAKE_SEQ" 2>/dev/null || echo 0); seq=$((seq + 1)); [ -n "$FAKE_SEQ" ] && printf '%s' "$seq" > "$FAKE_SEQ"
+[ -n "$js" ] && printf '%s\n' "{\"review\":{\"key_issues_to_review\":[{\"relevant_file\":\"a.py\",\"issue_header\":\"H\",\"issue_content\":\"run-$seq\"}],\"security_concerns\":\"No\",\"estimated_effort_to_review_[1-5]\":3},\"usage\":{\"total_tokens\":$seq}}" > "$js"
+[ -n "$out" ] && printf '<table></table>\nrun %s\n' "$seq" > "$out"
+exit 0
+FAKE
+    chmod +x "$fake/pr-agent"
+  }
+  agent_ok
+
+  ( cd "$d" \
+      && git init -q -b main . \
+      && printf 'a\n' > f.txt \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m init \
+      && printf 'b\n' >> f.txt ) >/dev/null 2>&1
+  git -C "$d" rev-parse --verify -q HEAD >/dev/null 2>&1 || {
+    bad "every successful run is kept with its start, finish and duration" "REQ-HOOK-41" "a seeded repository" "no commit" \
+        "the case could not build its fixture, so the run history was never exercised"
+    return
+  }
+
+  run() { ( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" FAKE_SEQ="$work/history-seq" \
+              bash "$repo_root/src/preflight" "$1" ) 2>&1; }
+
+  rc=0; out="$(run review)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | the first review failed (exit $rc): $out"
+
+  first="$(ls -1 "$d/.preflight/runs" 2>/dev/null | head -n1)"
+  [ -n "$first" ] || problems="$problems
+        | no run directory was created under .preflight/runs/"
+
+  if [ -n "$first" ]; then
+    for f in run.json review.md review.json; do
+      [ -f "$d/.preflight/runs/$first/$f" ] || problems="$problems
+        | the first run did not archive $f"
+    done
+    # start, finish and duration, read as JSON rather than grepped for - a field that is present but
+    # empty, or a duration that is not a number, would satisfy a substring check.
+    #
+    # `if python3 ... <<'PY'`, not an assignment from `$( ... <<'PY' ... )`: that is the form every other
+    # Python block in this suite uses, and it avoids the heredoc-inside-command-substitution shape that
+    # AGENTS.md documents as a bash 3.2 mis-parse (the bodies here carry no apostrophe, which is what
+    # actually triggers it, but there is no reason to take the risk).
+    if python3 - "$d/.preflight/runs/$first/run.json" <<'PY'
+import json, sys
+bad = []
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as exc:
+    sys.exit("run.json is not readable JSON: %s" % exc)
+for key in ("started_at", "finished_at"):
+    stamp = d.get(key)
+    if not isinstance(stamp, str) or not stamp.endswith("Z") or "T" not in stamp:
+        bad.append("%s=%r is not a UTC timestamp" % (key, stamp))
+if not isinstance(d.get("duration_seconds"), int):
+    bad.append("duration_seconds=%r is not a number" % (d.get("duration_seconds"),))
+if d.get("command") != "review":
+    bad.append("command=%r" % (d.get("command"),))
+if sorted(d.get("artifacts") or []) != ["review.json", "review.md", "review.meta.json"]:
+    bad.append("artifacts=%r" % (d.get("artifacts"),))
+# Non-zero on a finding: `print` alone exits 0, so the `if` below would never take its else-branch and
+# every assertion in this block would be dead (found by reviewing this change with the tool).
+if bad:
+    sys.exit("\n".join(bad))
+PY
+    then :; else problems="$problems
+        | run.json does not record the run (diagnostic above)" ; fi
+    # The old paths still mean "the latest run" - the commit hook and the gate read them by name.
+    [ -f "$d/.preflight/review.meta.json" ] || problems="$problems
+        | the sidecar is no longer at the fixed path the commit hook reads"
+    cp "$d/.preflight/runs/$first/review.json" "$work/history-first.json"
+  fi
+
+  rc=0; out="$(run review)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | the second review failed (exit $rc): $out"
+  # Order-independent: `ls` sorts ids lexically and the pid is not zero-padded, so two runs in the same
+  # UTC second can sort either way (…-1000 before …-999) and a head/tail comparison would report a false
+  # failure. The set is what matters, and the directory COUNT already proves the first was not reused.
+  [ "$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')" = 2 ] || problems="$problems
+        | a second run did not leave two run directories, so the first was lost"
+  [ "$(ls -1 "$d/.preflight/runs" 2>/dev/null | grep -cxF "$first")" = 1 ] || problems="$problems
+        | the first run's directory is no longer present after a second run"
+  if [ -n "$first" ] && [ -f "$work/history-first.json" ]; then
+    cmp -s "$work/history-first.json" "$d/.preflight/runs/$first/review.json" || problems="$problems
+        | the second run overwrote the FIRST run's archived review.json"
+  fi
+
+  # Every command is archived, not just `review` - and ONLY its own artifacts. `describe` writes no
+  # sidecar, so it must not inherit the `review.meta.json` a previous review left at the fixed path:
+  # keying the archive on the run succeeding rather than on the command credited describe with the
+  # previous review's sidecar (found by reviewing this change with the tool).
+  rc=0; out="$(run describe)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | describe failed (exit $rc): $out"
+  # Same `if python3 ... <<'PY'` shape as above, for the same reason: no `$( )` around a heredoc.
+  if python3 - "$d/.preflight/runs" <<'PY'
+import json, os, sys
+runs = sys.argv[1]
+found = None
+for name in sorted(os.listdir(runs)):
+    path = os.path.join(runs, name, "run.json")
+    if not os.path.isfile(path):
+        continue
+    # A read that fails must be REPORTED, not skipped: this is JSON the helper wrote, so a malformed one
+    # means the helper wrote it badly, which is exactly what this assertion exists to catch.
+    try:
+        record = json.load(open(path))
+    except Exception as exc:
+        sys.exit("run.json under runs/%s is not readable JSON: %s" % (name, exc))
+    if record.get("command") != "describe":
+        continue
+    found = name
+    if sorted(record.get("artifacts") or []) != ["description.md"]:
+        sys.exit("the describe run archived %r, not just its own description.md" % (record.get("artifacts"),))
+    if os.path.exists(os.path.join(runs, name, "review.meta.json")):
+        sys.exit("the previous review's review.meta.json was archived into the describe run")
+if found is None:
+    sys.exit("describe was not recorded in the run history")
+PY
+  then :; else problems="$problems
+        | the describe run's record is wrong (diagnostic above)" ; fi
+
+  # A FAILED run must not be archived, because its artifacts cannot be told apart from output a previous
+  # run left at the fixed paths. Archiving on "the file exists" filed the first run's description.md
+  # under the failed second run (found by reviewing this change with the tool). The fixed path itself is
+  # cleared before the launch, so nothing stale is left there to be mistaken for this run's output.
+  printf '#!/bin/sh\ncat >/dev/null\nexit 3\n' > "$fake/pr-agent"
+  chmod +x "$fake/pr-agent"
+  before="$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')"
+  rc=0; out="$(run describe)" || rc=$?
+  [ "$rc" != 0 ] || problems="$problems
+        | a failing describe exited 0"
+  [ "$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')" = "$before" ] || problems="$problems
+        | a FAILED run was archived, so it was credited with the previous run's description.md"
+  # A well-formed agent that exits non-zero AFTER writing the artifact: the output exists and is fresh,
+  # but the run did not succeed. This is the case an "the file exists" guard still misses even when
+  # nothing stale is involved, so it is what makes `run_ok` the deciding condition rather than a
+  # belt-and-braces check.
+  printf '#!/bin/sh\ncat >/dev/null\nwhile [ $# -gt 0 ]; do case "$1" in --output) o="$2"; shift 2;; *) shift;; esac; done\n[ -n "$o" ] && printf "partial\\n" > "$o"\nexit 4\n' > "$fake/pr-agent"
+  chmod +x "$fake/pr-agent"
+  rc=0; out="$(run describe)" || rc=$?
+  [ "$rc" != 0 ] || problems="$problems
+        | a describe that exited non-zero after writing its artifact exited 0"
+  [ "$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')" = "$before" ] || problems="$problems
+        | a run that wrote an artifact but FAILED was still archived"
+  agent_ok
+
+  # A well-formed agent that exits 0 without writing anything - an empty diff, or an agent that silently
+  # produces nothing. The run succeeded, so `run_ok` is set, and only the pre-launch removal of the
+  # output path keeps it from archiving the PREVIOUS run's file as its own. Without that removal this
+  # filed the earlier run's description.md under a run that never wrote it (found by reviewing this
+  # change with the tool).
+  printf '#!/bin/sh\ncat >/dev/null\nexit 0\n' > "$fake/pr-agent"
+  chmod +x "$fake/pr-agent"
+  before="$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')"
+  rc=0; out="$(run describe)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | a describe whose agent wrote nothing failed (exit $rc): $out"
+  [ "$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')" = "$before" ] || problems="$problems
+        | a successful run that wrote NOTHING archived the previous run's artifact as its own"
+  [ ! -f "$d/.preflight/description.md" ] || problems="$problems
+        | a run that wrote nothing left the previous run's description.md at the fixed path"
+  agent_ok
+
+  # A run that produces nothing leaves nothing: an empty directory would read as a run whose artifacts
+  # went missing rather than as one that never wrote any.
+  local before after
+  before="$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')"
+  printf '#!/bin/sh\nexec sleep 600\n' > "$fake/pr-agent"; chmod +x "$fake/pr-agent"
+  rc=0; out="$( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" FAKE_SEQ="$work/history-seq" \
+                 PREFLIGHT_REVIEW_WAIT=2 PREFLIGHT_SHUTDOWN_WAIT=2 \
+                 bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
+  [ "$rc" != 0 ] || problems="$problems
+        | a run that wrote nothing exited 0"
+  after="$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$before" = "$after" ] || problems="$problems
+        | a run that produced no artifact still left a run directory behind"
+
+  # Without python3 there can be no run.json, so there must be no run directory either - otherwise
+  # `cat .preflight/runs/*/run.json` (the documented way to read the history) fails for that entry, and
+  # the warning claiming the run "was not recorded" is contradicted by a directory that exists (found by
+  # reviewing this change with the tool).
+  #
+  # Two things about the fixture matter, and both were wrong in the first version:
+  #   - the PATH must be the REAL one minus python3, not a stub directory with a binary or two in it.
+  #     With almost nothing on PATH the helper fails long before the archive, so the assertion would
+  #     pass against the very bug it is for.
+  #   - `$fake` must come FIRST, or the real `pr-agent` on the inherited PATH is what runs, which needs
+  #     a key and a network and breaks this case's whole premise.
+  # `python3.13` is excluded by the glob, which is the name a venv or a `uv` install actually puts there.
+  agent_ok
+  local nopy="$work/history-nopy" dir entry
+  mkdir -p "$nopy"
+  local IFS=':'
+  for dir in $PATH; do
+    [ -d "$dir" ] || continue
+    for entry in "$dir"/*; do
+      [ -x "$entry" ] && [ ! -d "$entry" ] || continue
+      case "${entry##*/}" in python3*) continue ;; esac
+      ln -sf "$entry" "$nopy/${entry##*/}" 2>/dev/null || true
+    done
+  done
+  unset IFS
+  # The stub LAST, so it wins over any real pr-agent the loop above linked in.
+  ln -sf "$fake/pr-agent" "$nopy/pr-agent"
+  [ ! -e "$nopy/python3" ] || problems="$problems
+        | the fixture still has python3 on PATH, so the case would not exercise the missing-python3 path"
+  before="$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')"
+  ( cd "$d" && env PATH="$nopy" PREFLIGHT_HOME="$cfg" \
+      bash "$repo_root/src/preflight" describe ) >/dev/null 2>&1 || true
+  after="$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$before" = "$after" ] || problems="$problems
+        | without python3 a run directory was left behind with no run.json in it"
+
+  # A bookkeeping failure must not leave a run directory with no run.json - the documented
+  # `cat .preflight/runs/*/run.json` would fail for it, and the failure would otherwise be silent
+  # (found by reviewing this change with the tool).
+  #
+  # A `python3` that exists but fails is what exercises the branch. The previous fixture made
+  # PREFLIGHT_DIR read-only instead, which was vacuous in two ways: `mkdir -p "$run_dir"` still succeeds
+  # under an already-created writable `runs/`, and the stub cannot write its artifact at all, so the case
+  # exited through the "nothing to archive" path and the write-failure branch was never reached.
+  agent_ok
+  local badpy="$work/history-badpy"
+  mkdir -p "$badpy"
+  printf '#!/bin/sh\nexit 1\n' > "$badpy/python3"
+  chmod +x "$badpy/python3"
+  out="$( cd "$d" && PATH="$badpy:$fake:$PATH" PREFLIGHT_HOME="$cfg" FAKE_SEQ="$work/history-seq" \
+            bash "$repo_root/src/preflight" describe 2>&1 )" || true
+  printf '%s' "$out" | grep -q 'could not write' || problems="$problems
+        | an unrecordable run did not say so; silence here is the failure mode this branch exists for"
+  for entry in "$d"/.preflight/runs/*/; do
+    [ -f "${entry}run.json" ] || problems="$problems
+        | ${entry}holds artifacts but no run.json, so the documented cat of every run.json fails"
+  done
+
+  mkdir -p "$work/history-blocked"
+  printf 'not a directory\n' > "$work/history-blocked/runs"
+  # A run directory that cannot be CREATED must warn too, for the same reason: a silently incomplete
+  # history is indistinguishable from a complete one. `runs` as a regular file is the simplest way to
+  # make `mkdir -p "$run_dir"` fail, and it also proves the run itself still succeeds (found by reviewing
+  # this change with the tool).
+  out="$( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" FAKE_SEQ="$work/history-seq" \
+            PREFLIGHT_DIR="$work/history-blocked" bash "$repo_root/src/preflight" review 2>&1 )" || true
+  printf '%s' "$out" | grep -q 'could not create' || problems="$problems
+        | a run that could not create its run directory was dropped from the history in silence"
+
+  # The sidecar is the one artifact with a fixed name rather than deriving from the command, and it is
+  # never removed before the launch (only review's two artifacts are). So its pre-WRITE removal is what
+  # keeps a failed write from leaving the previous run's sidecar at the fixed path for archive_run to
+  # file - which would leave run.json recording THIS run's verdict beside a file holding the older one.
+  # A python3 shim that fails only on the sidecar path is the only way to reach that branch (found by
+  # reviewing this change with the tool).
+  agent_ok
+  local shim="$work/history-shim" realpy
+  realpy="$(command -v python3)"
+  mkdir -p "$shim"
+  # Matched on the SECOND argument, which is the path the helper passes to every `python3 - <path> ...`
+  # call. Matching the whole argument list instead trips on the ARCHIVE call too, because the artifact
+  # list it is handed contains the sidecar's name - so the run's own run.json write failed and the
+  # assertion fired for a reason unrelated to provenance.
+  #
+  # The real interpreter must be an ABSOLUTE path: `exec python3 ...` inside the shim would resolve to
+  # the shim itself, which sits first on the PATH this fixture builds, and recurse until it dies.
+  cat > "$shim/python3" <<SHIM
+#!/bin/sh
+case "\$2" in *review.meta.json) exit 1 ;; esac
+exec "$realpy" "\$@"
+SHIM
+  chmod +x "$shim/python3"
+  # The fixture is only meaningful if the shim passes everything except the sidecar write through, so
+  # prove it before relying on it: a shim that failed every call would leave the shim run with no archive
+  # at all, and the assertion below would pass for the wrong reason.
+  "$shim/python3" -c 'print("ok")' 2>/dev/null | grep -q '^ok$' || problems="$problems
+        | the python3 shim does not pass non-sidecar calls through, so the probe proves nothing"
+  # A review first, so a real sidecar exists to be wrongly inherited.
+  rc=0; out="$( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" FAKE_SEQ="$work/history-seq" \
+                 bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | the sidecar probe's setup review failed (exit $rc): $out"
+  ls -1 "$d/.preflight/runs" > "$work/history-before-shim.txt" 2>/dev/null || : > "$work/history-before-shim.txt"
+  rc=0; out="$( cd "$d" && PATH="$shim:$fake:$PATH" PREFLIGHT_HOME="$cfg" \
+                 bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
+  # Only the run this invocation added is inspected, and by IDENTITY rather than by position: run ids are
+  # `<UTC second>-<pid>` with an unpadded pid, so two runs in the same second can sort either way and
+  # "the last entry" is not reliably the one under test.
+  out="$(python3 - "$d/.preflight/runs" "$work/history-before-shim.txt" <<'PY'
+import json, os, sys
+runs, before_path = sys.argv[1:3]
+before = set(open(before_path).read().split())
+new = [n for n in sorted(os.listdir(runs)) if n not in before]
+if len(new) != 1:
+    print("expected exactly one new run directory, found %d" % len(new))
+    raise SystemExit
+path = os.path.join(runs, new[0], "run.json")
+if not os.path.isfile(path):
+    print("the new run directory holds no run.json, so its record cannot be checked")
+    raise SystemExit
+record = json.load(open(path))
+if "review.meta.json" in (record.get("artifacts") or []):
+    print("the run whose sidecar write failed inherited the previous review's review.meta.json")
+if os.path.exists(os.path.join(runs, new[0], "review.meta.json")):
+    print("the run whose sidecar write failed left a sidecar in its archive")
+PY
+)"
+  [ -z "$out" ] || problems="$problems
+        | $out"
+
+  if [ -z "$problems" ]; then ok "every successful run is kept with its start, finish and duration" "REQ-HOOK-41"
+  else bad "every successful run is kept with its start, finish and duration" "REQ-HOOK-41" \
+        "two run dirs after two runs, the first intact, describe and review archived, nothing for a failed or empty run" "see below" "$problems
+"; fi
+}
+
 # ---------------------------------------------------------------------------- bundle hygiene
 
 case_bundle_hooks_executable() {
@@ -2095,7 +2454,7 @@ REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK
 insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
 REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31
 REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36 REQ-HOOK-37 REQ-HOOK-38
-REQ-HOOK-39 REQ-HOOK-40'
+REQ-HOOK-39 REQ-HOOK-40 REQ-HOOK-41'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -2224,6 +2583,7 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_summary_wiring \
     case_verdict_fields \
     case_bounded_shutdown \
+    case_run_history \
     case_scope_defaults \
     case_commit_scope_reviews_untracked \
     case_bundle_hooks_executable \

@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Added
+
+- **A run history under `.preflight/runs/`, with the start, finish and duration of every run.** A run used
+  to destroy its predecessor: `preflight` removes `review.json`/`review.md` before launching pr-agent
+  (phase 1 of the wait polls for the file, so a stale one would report the previous run's counts), and
+  `review.meta.json` was overwritten in place. Each run now also archives itself to
+  `runs/<UTC start>-<pid>/` - a `run.json` carrying `started_at`, `finished_at`, `duration_seconds`,
+  `stopped`, the archived artifacts and the gate verdict, beside copies of that run's
+  `review.md`/`review.json`/`review.meta.json`. Every command is archived, not only `review`; a run that
+  failed, or that finished without writing anything, is not.
+
+  The fixed top-level paths are deliberately unchanged, because the commit hook reads
+  `.preflight/review.meta.json` and `preflight-gate` reads `.preflight/review.json` by name; the history is
+  additive. The record is written from the existing `EXIT` trap, and a run is archived only if it
+  SUCCEEDED - the output path is cleared before each launch, so an archive never files a previous run's
+  file as this run's. Nothing prunes the history; delete a run's directory to drop it. `REQ-HOOK-41` guards
+  it, and every mutation in its row of [`tests/README.md`](tests/README.md) was applied, watched failing
+  the case, and reverted.
 
 ## [0.4.0] - 2026-10-12
 

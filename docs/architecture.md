@@ -212,6 +212,35 @@ by the hook: leaving it in place lets a blocked review be inspected, each run re
 would buy nothing anyway - if someone acts on stale findings the content changes and the comparison fails,
 and if they change nothing the recorded verdict was already `fail`.
 
+### The run history, and why it is additive
+
+A run destroys its predecessor's output: `preflight` removes `review.json`/`review.md` before launching
+pr-agent, because phase 1 of the review wait polls for `review.json` and a stale file would make that wait
+return immediately with the **previous** run's counts. That removal is load-bearing, so the run it removes
+is preserved beside the fixed paths instead - each run is archived under `runs/<UTC start>-<pid>/`, with a
+`run.json` (start, finish, duration, `stopped`, artifacts, gate verdict) and copies of that run's
+artifacts. Every command is archived, not only `review`.
+
+The fixed paths keep meaning "the latest run", and that is the point rather than a convenience: the commit
+hook reads `.preflight/review.meta.json` and `preflight-gate` reads `.preflight/review.json`, both by name,
+so a history that moved them would break the enforcement path it exists to serve. Nothing prunes the
+history - an append-only directory cannot lose a run to a retention bug, and the operator can delete a
+directory deliberately.
+
+The record is written from the existing `EXIT` trap, and only a run that SUCCEEDED is archived. The
+output path is removed *before* the launch for every command, not only for `review` (where the removal is
+separately required, so phase 1 waits for this run's artifact): description.md / improve.md / answer.md
+are written only when pr-agent actually produces them, so without the removal an agent that exits 0 having
+written nothing would leave the previous run's file in place - and archiving on "the file exists" would
+file it, and record it in `run.json`, as this run's output. With the path cleared, a file present at
+archive time is provably this run's. That is also the limit of the guarantee, and it is worth stating:
+the clearing protects against a *previous* run's file being mistaken for this one's, not against this
+run's own partial output, which is left at the fixed path for inspection. So an artifact at the top level
+belongs to the most recent run that wrote one, which may not be the most recent run - the history under
+`runs/` is the thing that records completed runs and nothing else. The gate verdict comes from the
+sidecar this same run wrote, so it too is only ever the current run's. And a run that wrote nothing
+leaves no directory, because an empty one reads as a run whose artifacts went missing.
+
 Consequently the hook is **strictly read-only**: it never touches the index, `HEAD`, the working tree, or
 the artifacts. It needs no per-run state of its own.
 

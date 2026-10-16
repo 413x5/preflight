@@ -24,6 +24,12 @@
 #   review -> review.md + review.json (+ review.meta.json, the hook's record of what was reviewed)
 #   describe -> description.md | improve -> improve.md | ask -> answer.md
 #
+# Those paths always hold the LATEST run, because that is what the commit hook and preflight-gate read.
+# Every run that SUCCEEDS AND WRITES OUTPUT is also kept under runs/<UTC-start>-<pid>/ - a run.json
+# (start, finish, duration, artifacts) beside copies of that run's artifacts - so the next run cannot
+# destroy the last one. A run that failed, or that finished without writing anything, has no entry:
+# every entry is a run whose output can be read. Nothing prunes them; delete a directory to drop a run.
+#
 # The model/endpoint come from ~/.config/preflight/preflight.toml (any OpenAI-compatible endpoint;
 # ClinePass is only the default). Plain-diff mode: prints to stdout and writes the files above.
 # Never modifies your index/HEAD/history, and never posts to GitHub.
@@ -69,6 +75,9 @@ Commands:
   ask "<question>"     ask about the diff -> .preflight/answer.md
   hook                 verify that the content being committed was reviewed (used by the
                        repo's own .githooks/pre-commit; read-only, never runs a review)
+
+  Those paths hold the latest run. Every run that succeeds and writes output is also kept, with its
+  start time, finish time and duration, under .preflight/runs/<id>/run.json (nothing prunes them).
 
 Options:
   -h, --help           this text
@@ -220,7 +229,123 @@ idxf=''
 prev_json=''
 hook_tree=''
 diff_base=''
-cleanup() { if [ -n "$idxf" ]; then rm -f "$idxf"; fi; if [ -n "$prev_json" ]; then rm -f "$prev_json"; fi; }
+run_id=''
+run_dir=''
+run_started=''
+run_ok=''
+run_stopped=''
+run_verdict=''
+
+# The run history. One directory per run under `runs/`, so the fixed top-level paths can stay "the
+# latest run" for the commit hook and preflight-gate while the previous run survives the `rm -f` that
+# starts a new one. Written from the EXIT trap rather than from the success path, so the record covers
+# every way a GOOD run ends - including one pr-agent stalled on and was stopped after the review was
+# already complete. A run that failed is not archived at all; archive_run says why.
+begin_run() {
+  run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  run_dir="$dir/runs/$run_id"
+  # Epoch seconds, so `duration_seconds` is arithmetic on the same clock as `finished_at` and the two
+  # cannot disagree about where the run began. Captured before the diff is built and before pr-agent is
+  # launched, so the number covers the whole run rather than only the model call.
+  run_started="$(date +%s)"
+}
+
+archive_run() {
+  [ -n "$run_dir" ] || return 0
+  # Only a run that SUCCEEDED is archived. The obvious "did the artifact appear?" test is not enough on
+  # its own: pr-agent may write a partial file and then fail, and filing that as a completed run would
+  # present half an answer as the run's output. A failed run is therefore not recorded at all - the
+  # output path is removed before the launch, so nothing of it survives at the fixed path either.
+  [ -n "$run_ok" ] || return 0
+  # Checked BEFORE the directory is created: a run directory without a run.json would break the
+  # documented `cat .preflight/runs/*/run.json` for that run, contradicting the warning below.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'preflight: warning: python3 not found, so this run was not recorded under %s/runs\n' "$dir" >&2
+    return 0
+  fi
+  local now arts='' landed='' f
+  now="$(date +%s)"
+  # These two paths are per-command (out_md is description.md / improve.md / answer.md for the others),
+  # so a name is never hardcoded here - which is also why the sidecar below needs its own guard.
+  if [ -n "$out_md" ] && [ -f "$out_md" ]; then arts="$arts $(basename "$out_md")"; fi
+  if [ -n "$out_json" ] && [ -f "$out_json" ]; then arts="$arts $(basename "$out_json")"; fi
+  # Only `review` writes a sidecar, so describe/improve/ask must not pick up the one a previous review
+  # left at the fixed path.
+  case "$cmd" in
+    review|review_pr) if [ -f "$dir/review.meta.json" ]; then arts="$arts review.meta.json"; fi ;;
+  esac
+
+  # The same "not recorded" warning as the two branches around it: a silent drop here would leave the
+  # history incomplete with nothing to say so, which is the failure mode this whole record exists to
+  # avoid. Nothing about the run itself is affected - the caller still sees `preflight: wrote ...`.
+  mkdir -p "$run_dir" 2>/dev/null || {
+    printf 'preflight: warning: could not create %s; the run is not recorded in the history\n' "$run_dir" >&2
+    return 0
+  }
+  for f in $arts; do
+    if cp "$dir/$f" "$run_dir/$f" 2>/dev/null && [ -f "$run_dir/$f" ]; then landed="$landed $f"; fi
+  done
+  # Nothing was actually written, so leave nothing behind: an empty directory reads as a run whose
+  # artifacts went missing rather than as one that never wrote any.
+  if [ -z "$landed" ]; then
+    rmdir "$run_dir" 2>/dev/null || true
+    return 0
+  fi
+
+  # Not inside `$( )`: the heredoc body sits in a command substitution otherwise, which is the macOS
+  # bash 3.2 mis-parse AGENTS.md documents.
+  #
+  # A directory holding artifacts but no run.json would break the documented
+  # `cat .preflight/runs/*/run.json`, so a write that produced no file is not tolerated: the directory is
+  # removed and the operator is told, the same way the missing-python3 case above behaves. Nothing here
+  # changes the run's own exit status - the review already succeeded, and failing it over a bookkeeping
+  # file would turn a good run into a blocked commit.
+  if ! python3 - "$run_dir/run.json" "$run_id" "$cmd" "$scope" "$run_started" "$now" \
+                "${run_stopped:+yes}" "$run_verdict" "$landed" <<'PY'
+import json, sys, datetime
+path, run_id, command, scope, started, finished, stopped, verdict, landed = sys.argv[1:10]
+
+def utc(epoch):
+    return datetime.datetime.fromtimestamp(int(epoch), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# No `status` field: only a run that succeeded is archived at all, so a status could only ever read
+# `ok`, and a constant is a claim a reader would have to verify rather than a fact the record carries.
+record = {
+    "id": run_id,
+    "command": command,
+    "scope": scope,
+    "started_at": utc(started),
+    "finished_at": utc(finished),
+    "duration_seconds": int(finished) - int(started),
+    "stopped": stopped == "yes",
+    "artifacts": landed.split(),
+}
+# Absent rather than empty on a run that recorded no verdict, so a reader cannot mistake `null` for a
+# gate that failed.
+if verdict:
+    record["gate"] = {"verdict": verdict}
+with open(path, "w") as fh:
+    json.dump(record, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+  then
+    printf 'preflight: warning: could not write %s; the run is not recorded in the history\n' "$run_dir/run.json" >&2
+    rm -rf "$run_dir" 2>/dev/null || true
+    return 0
+  fi
+  [ -s "$run_dir/run.json" ] || {
+    printf 'preflight: warning: %s is missing or empty; the run is not recorded in the history\n' "$run_dir/run.json" >&2
+    rm -rf "$run_dir" 2>/dev/null || true
+    return 0
+  }
+  return 0
+}
+
+cleanup() {
+  if [ -n "$idxf" ]; then rm -f "$idxf"; fi
+  if [ -n "$prev_json" ]; then rm -f "$prev_json"; fi
+  archive_run
+}
 trap cleanup EXIT
 if [ "$scope" = 'head' ]; then
   diff_ref="${base}...HEAD"
@@ -256,6 +381,7 @@ case "$cmd" in
 esac
 
 mkdir -p "$dir"
+begin_run
 cfg="file://${cfgdir}/preflight.toml"
 if [ "$scope" = 'commit' ]; then
   echo "preflight: ${cmd} (scope=commit) — pending change since HEAD -> ${dir}/" >&2
@@ -393,8 +519,7 @@ emit_summary() {
   [ -z "${summary_printed:-}" ] || return 0
   [ -f "$out_json" ] || return 0
   local rc=0
-  if [ "$scope" = 'commit' ]; then coverage_scope='0'; else coverage_scope='1'; fi
-  PREFLIGHT_PREV_JSON="$prev_json" PREFLIGHT_SCOPE_IS_BRANCH="$coverage_scope" \
+  PREFLIGHT_PREV_JSON="$prev_json" \
     PREFLIGHT_CONTEXT_NOTE="$context_note" \
     python3 - "$out_json" "$out_md" <<'PY' >&2 2>/dev/null || rc=$?
 import json, os, re, sys
@@ -459,6 +584,14 @@ COVERAGE_RE = re.compile(
     r"<hr>\s*\n\s*[^\n]*\*\*Review coverage:\*\*\s*The following files were not included in this "
     r"review because of the token budget:\s*\n\s*-\s*`",
     re.S)
+# Whether the CONFIGURED model answered, or a fallback did. pr-agent tries `config.model` and only then
+# `fallback_models`, recording the winner in run details - which reach the review as prose, NOT as a
+# field in review.json (checked against v0.47.0: the JSON carries only `review` and `usage`). So this is
+# read from review.md, and the line it reads is the one pr-agent writes for every review, not a shape
+# invented here. It matters because a fallback answer is a different model's judgement presented as the
+# configured one - a run that looked at home in the bundle's own output while the model it was set up
+# for never answered.
+FALLBACK_RE = re.compile(r"^- Models?: .*\((?:includes fallback|fallback)\)", re.M)
 try:
     # errors='replace', not a bare read: a non-UTF-8 review.md would raise UnicodeDecodeError - a
     # ValueError, not an OSError, so the except below would not catch it - and the outer `|| true` would
@@ -472,10 +605,20 @@ except OSError:
 # `</table>` the whole file is searched. This is an AID pointing at the authoritative footer in
 # review.md, not a guarantee.
 tail = md[md.rfind('</table>') + len('</table>'):] if '</table>' in md else md
-# Only the branch scopes can hit this: a pending-commit diff is far below the token budget, so pr-agent
-# never prunes it and there is nothing to announce.
-if os.environ.get('PREFLIGHT_SCOPE_IS_BRANCH') == '1' and COVERAGE_RE.search(tail):
+# Reported for EVERY scope, not only the branch ones. It was once gated on the branch scopes, on the
+# reasoning that a pending-commit diff is far below the token budget - which holds for ordinary changes and
+# fails for a large one (a multi-megabyte generated or untracked file before the first commit). Since the
+# bundle does not chunk, pruning is what pr-agent does to an over-budget diff, so the marker is the only
+# thing that says a commit-scope review covered a slice. Suppressing it there would hide exactly the
+# partial review the marker exists to announce.
+if COVERAGE_RE.search(tail):
     line += " coverage=PARTIAL (token budget left files out - see review.md)"
+# A fallback model answering is not the same review as the configured one answering, and nothing else on
+# this line says which happened - `context=` tells an agent the repository facts reached the model, so
+# which model is not a detail it can assume. Read from the post-table tail for the same reason as coverage:
+# findings render inside the table, so a finding that quotes the run-details block cannot fire this.
+if FALLBACK_RE.search(tail):
+    line += " model=FALLBACK (the configured model did not answer - see review.md)"
 
 # How many findings are NEW since the previous review. Identity is (file, header, content) per
 # pr-agent's own dedupe key, so a different issue in the same file still counts as new. temperature and
@@ -519,15 +662,19 @@ PY
   return 0
 }
 
+# Remove this run's output path(s) BEFORE launching, for every command. For `review` it is also what
+# makes phase 1 below wait for THIS run's artifact (a stale file would make the wait return immediately
+# with the previous review's counts). For `describe`/`improve`/`ask` it is what makes the archived and
+# top-level artifact provably this run's: those commands only overwrite their output when pr-agent
+# actually writes it, so without this a pr-agent that exits 0 having produced nothing would leave the
+# PREVIOUS run's file in place, and archive_run would file it - and `run.json` would claim it - as this
+# run's output.
+rm -f "$out_md" ${out_json:+"$out_json"} 2>/dev/null || true
+
 # Run the review in the background and report its counts from the artifact, so a pr-agent that finishes
 # the review and then hangs on shutdown cannot hide `issues=`/`new=`/`coverage=`. Two bounded phases,
 # because a hang can happen before OR after the artifacts are written.
 if [ -n "$out_json" ]; then
-  # Remove the previous run's artifacts BEFORE launching, so phase 1 waits for THIS run's output: an old
-  # file present would make the wait return immediately with the previous review's counts. Removing after
-  # the launch would be a race.
-  rm -f "$out_json" "$out_md" 2>/dev/null || true
-
   git diff ${diff_base:+"$diff_base"} "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
     --output "$out_md" --json-output "$out_json" "$cmd" "$@" &
   pr_pid=$!
@@ -557,6 +704,7 @@ if [ -n "$out_json" ]; then
   stopped=''
   if kill -0 "$pr_pid" 2>/dev/null; then
     stopped=1
+    run_stopped=1
     if [ -n "$complete" ]; then
       printf 'preflight: warning: pr-agent did not exit within %ss after writing %s; stopping it (the review is complete and usable)\n' \
         "$shutdown_limit" "$out_json" >&2
@@ -584,6 +732,7 @@ if [ -n "$out_json" ]; then
 
   [ -n "$complete" ] && emit_summary
   [ "$pr_status" = 0 ] || exit "$pr_status"
+  run_ok=1
 else
   # describe/improve/ask write no JSON artifact, so there is nothing to salvage: they are not bounded, and
   # a timeout must never cut off slow-but-valid work.
@@ -591,6 +740,7 @@ else
     --output "$out_md" "$cmd" "$@" &
   pr_pid=$!
   wait "$pr_pid" 2>/dev/null || exit $?
+  run_ok=1
 fi
 echo "preflight: wrote ${out_md}${out_json:+ and ${out_json}}" >&2
 
@@ -617,6 +767,13 @@ if [ "$cmd" = 'review' ] || [ "$cmd" = 'review_pr' ]; then
       gate_code=127
     fi
     [ "$gate_code" = "0" ] && verdict="pass"
+    run_verdict="$verdict"
+    # Removed immediately before the write, for the same provenance reason as the artifacts above: the
+    # write below is guarded, so if it fails the PREVIOUS run's sidecar would otherwise still be here -
+    # and archive_run would file it, with this run's verdict in run.json beside the older verdict in the
+    # file. A missing sidecar is the honest outcome: the commit hook then fails closed with "no review
+    # found", which is correct for a review that could not record what it covered.
+    rm -f "$dir/review.meta.json" 2>/dev/null || true
     python3 - "$dir/review.meta.json" "$scope" "$dir" "$hook_tree" "$(git rev-parse HEAD)" "$verdict" "$gate_code" <<'PY' || true
 import json, sys, datetime
 path, scope, d, tree, head, verdict, code = sys.argv[1:8]

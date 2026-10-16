@@ -35,19 +35,20 @@ the outside - fix one and the loop is still slow.
    bundle does not set `pr_reviewer.extra_instructions`: pr-agent's own reviewer prompt already carries
    its severity guidance, and our additions argued against it. See `CHANGELOG.md` and `docs/roadmap.md`.
 2. **What the model was shown.** When a diff exceeds the token budget, pr-agent prunes files and reviews
-   the first patch unless `pr_reviewer.enable_large_pr_chunking` is on - so a "complete" review can cover a
-   slice of the tree. **This is the one that is easy to miss**, because every finding in a partial review is
-   a real finding; the missing coverage is invisible.
+   the first patch - so a "complete" review can cover a slice of the tree. **This is the one that is easy
+   to miss**, because every finding in a partial review is a real finding; the missing coverage is
+   invisible. The bundle does not chunk to close it; it **reports** it, which is why `coverage=PARTIAL`
+   must keep working. Mechanism and the keys left off deliberately: `docs/architecture.md`.
 3. **That the findings are *new*.** A reviewer cannot distinguish a deliberate, documented trade-off from
    an oversight, and each round reviews the code and comments the previous round wrote - so re-running
    keeps raising concerns already answered, at a full model call per round. `preflight` reports
    `new=N/M` on the summary line for exactly this reason, and `new=0` is the stopping signal.
 
-`config/preflight.toml.example` sets every completeness key, CI asserts each one (so adding a key means adding its
-assertion too), and `preflight` prints `coverage=PARTIAL` when anything was left out. Do not weaken any
-of it to save tokens: a partial review is what turns a two-round loop into an unbounded one, and silent
-partial coverage has the same shape as the other failures this repo guards against - an inability to
-check that is indistinguishable from a pass.
+`config/preflight.toml.example` sets the completeness key it keeps, and the `config` stage asserts that and
+the absence of the keys left off (so adding one means adding its assertion too). Do not weaken any of it to save tokens:
+a partial review is what turns a two-round loop into an unbounded one, and silent partial coverage has the
+same shape as the other failures this repo guards against - an inability to check that is indistinguishable
+from a pass.
 
 `new=` is the counterweight, and it must stay honest: it compares against the previous *run*, not against
 what the agent decided, so it never claims a finding is resolved - only that it is unchanged. Do not
@@ -73,7 +74,7 @@ can never miss anything".
 | `config/` | The templates `install.sh` writes into `$PREFLIGHT_HOME`: `preflight.toml.example` (model, provider knobs, review caps), `gate.toml.example` (`preflight-gate`'s policy - installed only if `$PREFLIGHT_HOME/gate.toml` is absent) and `secrets.toml.example` (an empty key) |
 | `scripts/verify` | The gate: every check, cheapest first, in one command. CI runs this |
 | `scripts/ensure-link.sh` | Re-links the secrets file after `uv tool upgrade` recreates the venv |
-| `AGENTS-review-snippet.md` | The block pasted into a *consumer* repo's `AGENTS.md` |
+| `AGENTS-review-snippet.md` | The block pasted into a *consumer* repo's `AGENTS.md`. **Adapted, not copied** - every section is classified `required` or `setup`, and the `snippet` stage fails if the sections and that table disagree |
 | `tests/run.sh`, `tests/sample/` | Integration tests for the hook; the fixture they build on |
 | `PLAYBOOK.md` | The development standard this repo follows - the gate, the docs doctrine, the records |
 | `docs/README.md` | The index: one line per document in the docs tree |
@@ -130,9 +131,41 @@ something that passes everything. For any behavioural change:
 3. **Classify it** in the `sensitive` or `insensitive` list beside `case_selfcheck`. An unclassified case
    fails `./tests/run.sh selfcheck`; so does a case marked sensitive that passes with the hook neutered.
    This is what stops a case from claiming to test enforcement without actually testing it.
-4. **Revert your fix and confirm the new case fails.** A case that cannot fail is worth nothing - one was
-   written during this project, shown to be unfalsifiable, and deleted rather than kept as false coverage.
+4. **Prove the case can fail** in each direction - see "Assertions must be falsifiable" below.
 5. If the change is a fix rather than a feature, add it to the containment table in `docs/architecture.md`.
+
+## Assertions must be falsifiable
+
+**Every test case and every guard, not only the hook's.** A check that cannot fail is the same false result
+as no check, and worse than no check because it is *counted*. This section is deliberately not filed under
+one file's heading: keying a rule to a file makes it invisible to every change of the same kind elsewhere,
+which is how the case below happened.
+
+The directions are different properties:
+
+1. **Revert the fix; the case must fail.** That the feature is needed.
+2. **Falsify what the assertion asserts; the case must fail.** That the assertion is live.
+
+Direction 1 alone is not enough. The session that added the run history ran mutations of direction 1
+- all correct, each one watched failing - while assertions in that same new case could not fail, and
+the suite was green throughout (the classified counts are in [`docs/measurements.md`](docs/measurements.md)).
+Run direction 2 on the assertion you just wrote, *before* trusting it.
+
+The shapes, each of which passed a green `./scripts/verify` in this repository:
+
+- **A branch that cannot run.** A Python block that `print`ed its findings and exited 0, under
+  `if python3 ...; then :; else <fail>; fi` - the `else` was unreachable. Forged problems still
+  "passed". `sys.exit` is what makes the status non-zero.
+- **A fixture aimed at the wrong path.** A read-only *grandparent* directory while the code created and
+  wrote in a writable *child*, so the intended failure was never reached and the case exited through an
+  unrelated branch.
+- **A comparison over constant bytes.** `cmp` between an archived artifact and a fixture that wrote
+  identical output on every run, so a genuine overwrite compared equal.
+- **Selection by position where the order is not chronological.** `ls | tail -1` over `<UTC second>-<pid>`:
+  the pid is unpadded, so `…-1000` sorts before `…-999` and "the last one" is not the newest.
+
+Write the failing state deliberately, watch the case fail, then restore. If you cannot make it fail, the
+check is not testing what its name says; fix the check or delete it rather than keep false coverage.
 
 ## Commands
 
@@ -148,7 +181,8 @@ below exist to run one stage while working, not to replace it.
 ./scripts/verify hooktests    # the offline hook cases - seconds, no network, no key. Run this constantly.
 ./scripts/verify hooktests selfcheck   # the suite, then the suite against a neutered hook
 
-./tests/run.sh e2e            # the one live case: needs the installed helpers and a real key. NOT in CI
+./tests/run.sh e2e            # the one live case: needs the installed helpers and a real key, and skips
+                              # itself without them. NOT in CI
 ```
 
 `selfcheck` exists because a green suite is **not** proof the hook enforces: many of the offline cases
@@ -162,32 +196,36 @@ fails.
 
 | Stage | What it checks |
 |---|---|
-| `tools` | `git`, `python3`, `awk`, `sed`, `mktemp` are present |
+| `tools` | `git`, `python3`, `awk`, `sed`, `mktemp` are present, and `python3` can `import tomllib` (3.11+) |
 | `syntax` | Every script parses - `bash -n` for the helpers and installer, `sh -n` for the hooks and tests |
 | `install` | `install.sh` deploys into a throwaway prefix, is idempotent, and never clobbers `.secrets.toml` |
-| `config` | The generated config parses, the completeness keys are set, the deliberate omissions are absent, and the gate template is inert |
+| `config` | The generated config parses, the completeness keys are set and the keys left off are absent, and the gate template is inert |
 | `version` | `src/VERSION`, the CHANGELOG's released heading for it, and `--version` agree |
 | `gateshapes` | `preflight-gate` survives the JSON shapes the model really produces |
 | `coverage` | The coverage marker matches pr-agent's footer and ignores prose |
+| `snippet` | Every section of `AGENTS-review-snippet.md` is classified required or setup, so the file keeps telling a consumer what it may drop |
 | `hooktests` | The commit-hook integration suite (offline cases) |
 | `selfcheck` | That suite re-run against a neutered hook |
 
-Two things move with the gate and are easy to forget: **CI must not grow a step** that re-lists a check -
-it belongs in `scripts/verify`; and **`actionlint` is the one check that needs a binary** the gate does
+These move with the gate and are easy to forget: **CI must not grow a step** that re-lists a check -
+it belongs in `scripts/verify`, and CI names a **group** (`./scripts/verify fast`) rather than the stages
+in it, so a stage added to the script is picked up there without editing the workflow; and **`actionlint`
+is the one check that needs a binary** the gate does
 not require, so CI runs it in its own job and `scripts/verify` runs it only when it is installed (a full
 run says so when it is not).
 
 Pass **one** file per `-n` invocation. `bash -n a.sh b.sh` only parses `a.sh` - the second name becomes a
 positional parameter, so a syntax error in `b.sh` is silently not reported.
 
-`python3` is available and is used by the hook, the tests and CI. **Do not `pip install` anything** -
-the machine is externally managed (PEP 668) and nothing here needs a dependency. YAML can be parsed with
-Ruby's built-in Psych if you need to inspect config.
+`python3` is what the hook, the tests and the gate run on. **Do not `pip install` anything**: nothing here
+needs a dependency, and a system interpreter commonly refuses one (PEP 668) anyway. YAML can be parsed
+with Ruby's built-in Psych if you need to inspect config.
 
 ## Never do these
 
 - **Never commit a secret.** Only `config/secrets.toml.example` (empty key) is committed. Real keys live in
-  `~/.config/preflight/.secrets.toml`, which is gitignored and never belongs in the environment.
+  `$PREFLIGHT_HOME/.secrets.toml` (`~/.config/preflight` by default), which is gitignored and never belongs
+  in the environment.
 - **Never set `core.hooksPath` in this repository.** It is clone-wide: setting it here would affect this
   checkout *and* every worktree of this clone, and would start enforcing a hook against this repo's own
   commits. Do all hook testing in a `mktemp -d` repository.
@@ -212,37 +250,75 @@ Ruby's built-in Psych if you need to inspect config.
 
 macOS ships **bash 3.2**, and its parser mis-handles a heredoc that sits **inside `$( )`** when the body
 contains an **apostrophe**: it treats the quote as opening a string and reports `unexpected EOF while
-looking for matching '`, pointing at a line far from the cause. The helper has five such sites
-(`src/preflight`, `src/preflight-hook`, `src/githooks/post-commit`, plus two in `tests/run.sh`).
+looking for matching '`, pointing at a line far from the cause. Sites like that live in `src/preflight`,
+`src/preflight-hook`, `src/githooks/post-commit` and `tests/run.sh`.
 
 So: an apostrophe is fine in a normal heredoc, and fine in a comment *outside* one - but not in the body
 of a `<<'PY'` that is inside a command substitution. Write `the hashes` rather than `the #'s`. The syntax
 check catches it (`sh -n` / `bash -n` per file), which is also how CI would.
 
-## This machine has the bundle installed
+## Do not assume the bundle is installed
 
-`preflight` is on `PATH` and a key is configured, so the live `e2e` case runs and you can exercise the real
-tool in a scratch repo:
+`install.sh` is what puts the helpers on `PATH` and writes the config, so a clone is not an installation.
+Ask which state the machine is in rather than reaching for either:
+
+```sh
+command -v preflight        # a path means installed; no output means a bare clone
+```
+
+- **Bare clone.** The offline half works with no key and no network: `./scripts/verify` is the whole gate,
+  and `tests/run.sh` drives the shipped hook (`src/preflight-hook`, overridable with `PREFLIGHT_TEST_HOOK`)
+  against throwaway repositories. A *real* review is the one thing that cannot run - it needs the installed
+  helpers, pr-agent and an API key - so `./tests/run.sh e2e` skips itself instead of failing.
+- **Installed.** The live case runs, and a scratch repo can go through a real review.
+
+`python3` 3.11 or newer is needed to run the gate, because it parses TOML with `tomllib`, which entered the
+standard library there; `tools` reports a too-old interpreter rather than letting a later stage die on an
+import error. What ships needs less - the hook, the installer and `preflight` import nothing outside the
+standard library, so they run on an interpreter the gate refuses, and only `preflight-gate` degrades (its
+row in [`docs/architecture.md`](docs/architecture.md) says how). The `python3` macOS ships is below the
+floor, so a machine needs another one on `PATH`.
+
+A scratch repo, with the install in place:
 
 ```sh
 R="$(mktemp -d)"; cd "$R"; git init -q -b main .
 printf 'def add(a, b):\n    return a + b\n' > util.py
 git add -A
 git -c commit.gpgsign=false commit -q --no-verify -m init
-mkdir -p .githooks && install -m 0755 ~/.config/preflight/githooks/* .githooks/
+mkdir -p .githooks && install -m 0755 "${PREFLIGHT_HOME:-$HOME/.config/preflight}"/githooks/* .githooks/
 git add .githooks
 git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit   # git IGNORES a non-executable hook
 git config core.hooksPath .githooks
 preflight review && preflight-gate          # expect a pass, then the commit is accepted
 ```
 
-The `git add -A` before the first commit is required: `preflight review` exits 3 on a repo with no commits,
-and without it the single file stays untracked.
+Without an install that last line cannot run - there is no `preflight` to review with - so copy the hooks
+from `src/githooks/` instead of the config dir, and commit with the checkout's helper, which is the one a
+clone modifies:
 
-A review is token-heavy (roughly 15-23k tokens). Do not run one in a loop.
+```sh
+CHECKOUT=/path/to/the/preflight/checkout   # set this to your clone
+mkdir -p .githooks && install -m 0755 "$CHECKOUT/src/githooks/"* .githooks/
+git add .githooks && git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit
+git config core.hooksPath .githooks
+PREFLIGHT_HOOK="$CHECKOUT/src/preflight-hook" git -c commit.gpgsign=false commit --allow-empty -m should-block
+```
+
+The `git add -A` before the first commit is required: `preflight review` exits 3 on a repo with no commits,
+and without it the single file stays untracked. The first commit passes unreviewed by design, because the
+hook cannot be installed before the commit that installs it. `core.hooksPath` is local to the clone you set
+it in, so a `mktemp -d` repository is the only thing it affects; never set it in a preflight checkout,
+because it would then guard that checkout's own commits.
+
+A review is a full model call, and what a run costs moves - it is measured in `docs/measurements.md` rather
+than repeated here. Do not run one in a loop.
 
 Note when testing the *gate*: `PREFLIGHT_GATE_ALLOW_ISSUES=1` relaxes key issues only.
-`security_concerns` and `merge_recommendation=changes_required` still fail, regardless of the opt-out.
+`security_concerns` still fails, regardless of the opt-out. The gate's
+`merge_recommendation = changes_required` rule is intact but inert in a default install: the bundle does not
+set `require_merge_recommendation`, so the field is not in the schema the model is sent and `merge=` reports
+`n/a`. `docs/architecture.md` covers why.
 
 ## Before you start: check docs/roadmap.md for handoff state
 
@@ -254,7 +330,7 @@ shipped work** (`[x]` items whose still-open paragraph is the work). A second se
 own docs say", records what pr-agent's shipped `_help_docs/` says about models and settings, so it is not
 re-derived.
 
-Two rules it follows, worth keeping: an experiment must state **what would falsify it**, and a lever that
+The rules it follows, worth keeping: an experiment must state **what would falsify it**, and a lever that
 has been tested and rejected stays in the file **with its result** - re-testing `seed` because nobody
 recorded that it is inert on this endpoint would waste another hour.
 
@@ -275,6 +351,37 @@ behaviour, grep for every place that describes it: `README.md`, `AGENTS-review-s
 `CHANGELOG.md`, `docs/architecture.md`, `docs/runbooks/troubleshooting.md`, `tests/README.md`, `CONTRIBUTING.md`. Case
 counts, the requirement table, and the containment table go stale fastest.
 
+**A change to `AGENTS-review-snippet.md` is a change to a consumer's instruction file.** Adding, removing
+or renaming a section means adding, removing or renaming its row in the classification table at the top of
+the file - the `snippet` stage fails otherwise, so the table cannot drift from the sections. The class is
+the interface: `required` facts are the ones a consumer must keep as written, so promoting something to it
+means arguing the loop is incorrect without it, and demoting something out of it means a consumer may drop
+it and still be correct.
+
+## Never write a number into a sentence
+
+**A figure in prose is a copy that nothing checks.** Something else already owns the fact — the run, the
+code, the artifact, the dated record — and the sentence is the copy with no reason to stay right. Every
+shape of it is one defect: **what a run printed** (a check count, a suite duration, an `N of M` figure);
+**a count of the text's own list** ("three habits", "the two boundaries"); **a measurement of an artifact**
+(a file's line count, a comment ratio, a size). It rots silently, and a reader who catches it cannot tell
+whether the text or the thing it describes moved.
+
+State the **shape** instead ("every section passed", "these habits"), quote the run's own output in a code
+fence so it reads as one transcript rather than a claim about the project, or point at the dated record.
+The test is *who notices when it is wrong*: if the answer is "a reader, eventually", the number does not
+belong in the sentence.
+
+**A number that IS the interface stays.** A knob's value, a timeout, a port, an exit code, a version, a
+format's offsets - changing one means changing the code, and the code is where it is checked. This applies
+wherever prose lives (a doc, a comment, a test's message, a template, a commit body), so a number repeated
+into a second document is the same defect as one written twice in one file. The full form is in
+[`PLAYBOOK.md`](PLAYBOOK.md) §6.
+
+The numbers that legitimately appear in this file are knobs and the dated measurements that
+[`docs/measurements.md`](docs/measurements.md) owns; a suite's own output belongs in a code fence or in
+the run, never in a sentence.
+
 ## Comments in code files state current invariants, nothing else
 
 A comment in `src/*` or `*.toml` explains the code as it **is**: the invariant that a change would
@@ -287,10 +394,10 @@ decision journey that produced the line.
   `docs/architecture.md`; operator symptoms belong in `docs/runbooks/troubleshooting.md`.
 - **An unverifiable comment is a liability, not documentation.** Prose is not executed, so a comment that
   contradicts the code beside it survives indefinitely. A documentation pass took `config/preflight.toml.example` to
-  73% comments (61 of 84 lines) and left a `post-commit` comment instructing users to "run `preflight
-  review` with the default worktree scope" - a scope that had not been the default since the `commit` scope
-  landed. Trimming that comment is what exposed the matching bug (the advisory warned on every
-  default-scope commit), which no test had covered.
+  mostly comments - the ratio is in [`docs/measurements.md`](docs/measurements.md), which owns it - and left
+  a `post-commit` comment instructing users to "run `preflight review` with the default worktree scope" - a
+  scope that had not been the default since the `commit` scope landed. Trimming that comment is what exposed
+  the matching bug (the advisory warned on every default-scope commit), which no test had covered.
 
 ## Each fact lives in exactly one file, chosen by audience
 
@@ -314,8 +421,19 @@ audience, and a fact belongs in the one that audience reads:
 
 **When a second file needs the same fact, it gets a pointer, not a copy**: one sentence naming the file
 that holds it. Measured cost of not doing this: the `reasoning_effort` forwarding rule ended up stated in
-full in five files, and the copies disagreed - two of them still claimed "pr-agent's `medium` default
+full in several files, and the copies disagreed - some still claimed "pr-agent's `medium` default
 applies" after a probe showed no effort is sent at all. The rule is what makes a fact cheap to correct.
+
+**Settle the behaviour before you describe it.** A document states what the code *does*, never what it is
+meant to do. Prose written ahead of its code is a guess about behaviour the code has not yet settled, and
+when the code then changes the document is not part of that change - so the text is left asserting the old
+shape. This is the ordering half of the rule above, and it is where the point-one-two rule earns its keep:
+a fact in one file is corrected by the change that settles it, while a fact copied into five is corrected
+in at most one of them.
+
+When behaviour changes, grep for the *opposite* phrasing of the old claim as well as the new one - "is
+kept" as well as "is not kept" - because a copy that inverts the meaning will not match a search for the
+new wording.
 
 ## Keep each round's change small, or the loop will not converge
 
@@ -327,9 +445,10 @@ A round reports one defect. Fix the code: usually a few lines. The temptation is
 comments around it, add a docs paragraph, add a changelog bullet, and add a row to the mutation table.
 That diff is mostly *claims*, which are the part most likely to be wrong, because prose written to describe
 a fix is not verified the way the fix is - and the next round reviews all of it. Correcting prose adds more
-prose, which is a loop with no stopping condition. `CHANGELOG.md` records a change here that measured
-**~56 lines of executable logic against ~271 lines of comment about it**, across five rounds whose later
-findings were almost entirely about the writing.
+prose, which is a loop with no stopping condition. One change here measured
+**more lines of comment about a change than lines of the change**, across several rounds whose later
+findings were almost entirely about the writing - the figures are in
+[`docs/measurements.md`](docs/measurements.md), which owns them.
 
 So:
 
@@ -346,6 +465,9 @@ So:
 - **Delete a claim rather than qualify it.** When a review says a comment overstates, the fix is normally to
   remove the sentence, not to add a caveat. The caveats are the surface the next round works on.
 - **`new=0` means judge, and usually means change nothing.** Two rounds at `new=0` is the hand-off point.
+  A clean round is not a licence to add prose: a session here saw `new=0` at round four and then
+  documented the feature anyway, which added fresh claims for the next round to check and reset a
+  converged signal. Fix the code; when the loop is clean, stop.
 - **The mutation-table rule is not a formality.** Every row in `tests/README.md` must have been *run*: apply
   the mutation, watch the case fail, revert, watch it pass. A row claiming coverage that no case provides is
   worse than no row, because it retires the requirement without testing it.
@@ -373,8 +495,9 @@ until it does not.
 - **`docs/roadmap.md` holds to-dos only**, and finished items are deleted from it into `CHANGELOG.md`. A `[x]`
   item appears only under "Open questions on shipped work", where the tick marks the shipping as settled
   and the paragraph beneath it as the work; the shipping paragraph is context for it.
-- **Reviews here are non-deterministic on identical content.** 0, 2 and 1 findings have each been
-  observed on the same bytes, so `new=0` is a judgement signal, not a clean bill of health.
+- **Reviews here are non-deterministic on identical content.** The spread is in
+  [`docs/measurements.md`](docs/measurements.md), so `new=0` is a judgement signal, not a clean bill of
+  health.
 
 ## Commits
 

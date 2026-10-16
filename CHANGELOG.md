@@ -7,7 +7,167 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Added
+
+- **A run history under `.preflight/runs/`, with the start, finish and duration of every run.** A run used
+  to destroy its predecessor: `preflight` removes `review.json`/`review.md` before launching pr-agent
+  (phase 1 of the wait polls for the file, so a stale one would report the previous run's counts), and
+  `review.meta.json` was overwritten in place. Each run now also archives itself to
+  `runs/<UTC start>-<pid>/` - a `run.json` carrying `started_at`, `finished_at`, `duration_seconds`,
+  `stopped`, the archived artifacts and the gate verdict, beside copies of that run's
+  `review.md`/`review.json`/`review.meta.json`. Every command is archived, not only `review`; a run that
+  failed, or that finished without writing anything, is not.
+
+  The fixed top-level paths are deliberately unchanged, because the commit hook reads
+  `.preflight/review.meta.json` and `preflight-gate` reads `.preflight/review.json` by name; the history is
+  additive. The record is written from the existing `EXIT` trap, and a run is archived only if it
+  SUCCEEDED - the output path is cleared before each launch, so an archive never files a previous run's
+  file as this run's. Nothing prunes the history; delete a run's directory to drop it. `REQ-HOOK-41` guards
+  it, and every mutation in its row of [`tests/README.md`](tests/README.md) was applied, watched failing
+  the case, and reverted.
+
+### Changed
+
+- **A clone no longer assumes the bundle is installed on the machine.** `AGENTS.md` carried a section
+  stating, as the machine's state, that `preflight` was on `PATH` and a key was configured - true of the
+  machine it was written on, and false of a fresh clone, which is the case a newcomer is in. It is now
+  `## Do not assume the bundle is installed`: ask with `command -v preflight`, and the section splits by the
+  answer. Offline work needs neither an install nor a key (the gate and the hook suite run either way, and
+  the live case skips itself), while a real review needs both - so the scratch-repo recipe gained a
+  checkout-based variant for the state where `preflight` is not yet on `PATH`, and the hook recipe there and
+  in [`CONTRIBUTING.md`](CONTRIBUTING.md) resolves `$PREFLIGHT_HOME` rather than hard-coding `~/.config`,
+  which is wrong for anyone who installed with that override.
+
+  The prerequisite that was implicit is now stated, and checked: `python3` 3.11 or newer, because the gate
+  parses TOML with `tomllib`. It was only ever enforced as a side effect - the failure surfaced as an
+  `ImportError` from inside the `config` stage, which reads as a broken repository rather than a missing
+  prerequisite. `scripts/verify`'s `tools` stage now imports `tomllib` itself and names the interpreter it
+  refused. The shipped helpers need no such floor: the hook, the installer and `preflight` import only the
+  oldest standard-library modules, so they run on an interpreter the gate rejects, and only `preflight-gate`
+  degrades below 3.11 (its row in [`docs/architecture.md`](docs/architecture.md) covers that). macOS ships
+  an older `python3` than the gate needs, so the check fires on a default machine rather than in theory.
+
+- **Numbers no longer belong in prose, and the rule is general rather than run-shaped.** The rule arrived
+  from a consuming repo, where a session kept having stale figures flagged in review and wrote itself a
+  rule to stop - scoped, as such rules are, to the shapes that session had hit: check counts, suite
+  durations, `N of M` figures. Those are all *run output*, so it did not recognise a count of a document's
+  own list ("three habits", "the two boundaries") - the same defect in different clothes. It is now stated
+  as the mechanism: **a figure in a sentence is a copy nothing checks**, with the run figure, the self-count
+  and the artifact measurement named as its shapes. The "fact a reader can check" exception - wide enough to
+  license a self-count, since a reader can count the bullets - is replaced by the test that decides it:
+  *who notices when it is wrong*, and whether the number **is** the interface (a knob, a timeout, a port, an
+  exit code, a version, a format's offsets), where changing it means changing code that checks it.
+  `AGENTS.md` gains the rule at top level, because it applies before a reader knows which area they are
+  touching - and its absence there is how the class survived in this repo: that file still described
+  `config/preflight.toml.example` comment ratio from a documentation pass long after the file had shrunk to
+  a fraction of it, and restated the comment-vs-code figure [`docs/measurements.md`](docs/measurements.md)
+  already owns. Both now point at the record, as does the "non-deterministic reviews" bullet that is sent
+  with every review. [`AGENTS-review-snippet.md`](AGENTS-review-snippet.md) carries the rule too, under
+  **"Optimising the review process"** rather than in the invariants: it is a round-cost habit, since the
+  reviewer reports prose as hard as code and a stale figure therefore comes back as a finding - and the
+  copy that reaches a consuming repo is the installed one, so the repo copy and
+  `$PREFLIGHT_HOME/AGENTS-review-snippet.md` were re-synced rather than left to diverge.
+
+- **`AGENTS-review-snippet.md` is now classified for adaptation, not verbatim pasting.** Each section is
+  tagged **required** (the loop is not correct without it) or **setup** (needed to install the bundle or
+  adopt the hook, and worth nothing once that is done), with a row per section saying what survives and
+  when the rest can go. This came from a consuming repo: told to update the bundle and re-apply the
+  snippet, an agent dropped the install instructions rather than pasting them wholesale, because its
+  `AGENTS.md` did not need to carry setup it had already done. That is reading the file correctly - the
+  snippet is the union of what every repository *might* need - so the classes make the surviving facts
+  explicit instead of leaving them to whoever pastes. `required` facts are to be kept **as written**,
+  because a paraphrase of a fact about the installed helper drifts from the helper; the hook's *behaviour*
+  stays required even where its *recipe* is setup; and the hook section now states that `core.hooksPath` is
+  local config a clone does not inherit (verified by cloning), since dropping that step leaves a repo
+  enforcing nothing while looking installed. The section on keeping the loop short - renamed **"Optimising
+  the review process"** from "A round is a full model call", and trimmed - moved from optional to required:
+  it is what holds the round count down, and the round count is the loop's whole cost, so it is process
+  guidance that pays for itself rather than advice a consumer may drop. That left the class vocabulary
+  with no unclassifiable remainder, so the `optional` class is gone. `scripts/verify` gains a `snippet`
+  stage that fails on a section with no row, a row naming a heading that no longer exists, or a table whose
+  vocabulary stops distinguishing (nothing required, or nothing setup). Each of those was applied to the
+  shipped file and watched to fail, and the fence-aware heading scan was falsified by neutering it against
+  the file's own fenced `Code review`
+  example. Reasoning: [`docs/architecture.md`](docs/architecture.md).
+
+- **The rule that a fix must be provable now triggers on a class of change, not on one file.** It also
+  required only that reverting a fix makes the new case fail - which proves the *feature* is needed, not
+  that the *assertion* is live. Building the run history above ran far more review rounds than it should
+  have, and some of its assertions turned out to be dead, vacuous or unfalsifiable while correct mutations
+  of the other kind passed: most of its findings were about claims and tests rather than the feature - the
+  breakdown is in [`docs/measurements.md`](docs/measurements.md). `AGENTS.md` gains **"Assertions must be
+  falsifiable"**, stating both directions and the shapes that survived a green suite, plus **"Settle the
+  behaviour before you describe it"** for the documentation half. [`PLAYBOOK.md`](PLAYBOOK.md) §4 gains the
+  transferable half - **"prove a move lost nothing, because prose has no compiler"**, and the sweep for whole
+  phrases that an identifier-only check cannot see - and [`AGENTS-review-snippet.md`](AGENTS-review-snippet.md)
+  gains the consumer side: how to keep
+  the round count down, that a review reports on prose as hard as on code, and that behaviour should be
+  settled before it is described. No product behaviour changes.
+
+- **`config/preflight.toml.example` now lists every `[pr_reviewer]` knob pr-agent accepts.** The file set
+  the bundle's own settings and nothing else, so steering the review meant reading pr-agent's source to
+  find out what else existed. It now carries the rest of the section - at upstream's own values, as
+  comments, so an untouched install keeps inheriting upstream's defaults rather than freezing today's - which
+  is also why they are not live: a pinned pr-agent whose config sets every key is a pr-agent that silently
+  stops following the defaults. The list is a copy, so `REQ-HOOK-29` compares it against the installed
+  pr-agent for a key upstream declares but the file omits, a commented entry whose value no longer matches
+  upstream's, and an **orphan** entry naming a key pr-agent does not declare at all - the last being the one
+  the first two cannot see, since a key REMOVED upstream leaves an entry that reads as configurable and
+  does nothing. Each fails the case rather than reading as advice. As before, CI never
+  installs pr-agent, so the case skips there and the comparison is a local one - which is where the list is
+  edited.
+
+- **The finding cap is lowered, and the review stops asking for the merge signal and for large-diff
+  chunking.** The keys the bundle used to set are now absent, and the `config` stage asserts each stays
+  absent so none returns without a decision:
+
+  - `require_merge_recommendation` - the field is conditional in pr-agent's reviewer schema, so not asking
+    for it removes it from the prompt. `preflight-gate`'s `merge_recommendation = changes_required` rule is
+    intact, but with nothing emitting the field it cannot fire and the gate reports `merge=n/a`. The verdict
+    now rests on `security_concerns`, the key-issue count and effort.
+  - `enable_large_pr_chunking` and `max_number_of_calls` - an over-budget diff is **pruned**, not split, so
+    a large change costs the single AI call an ordinary one costs. What makes that safe is the report
+    rather than the split: pr-agent emits its "files were not included" footer from `remaining_files_list`,
+    which is populated on the non-chunked path too (verified in v0.47.0's `pr_reviewer.py`), so
+    `coverage=PARTIAL` still fires and a partial review still announces itself.
+
+    Removing chunking also removed the reason that marker was scoped to the branch scopes: it assumed a
+    pending-commit diff was far below the token budget, which is what chunking had been covering for. A
+    large pending diff is pruned and reviewed as a slice while the summary line stayed silent, so the
+    marker is now reported in every scope and `REQ-HOOK-43` drives that path.
+
+  `num_max_findings` drops from 20 to 10 - still above upstream's default of 3, which is what the cap is
+  for, but the finding cap is also a noise lever, and pr-agent's own FAQ names the default configuration as
+  the way to reduce noise. A review that returns ten findings, and says so when it covered only part of the
+  diff, converges in a round without inviting padding.
+
+  `review_heading` is set for the first time, so a review renders under `Preflight - PR Reviewer Guide`
+  rather than upstream's plain `PR Reviewer Guide` - the heading is the only thing in the artifact that
+  says which tool produced it.
+
+- **A review now says when a fallback model answered, and the output cap that caused it is set.** Both
+  come from one diagnosis, made on a real run: a review of this repository reported `issues=0`, ran far
+  longer and cost far more tokens than a review normally does, and had in fact been answered by
+  `glm-5.3-flash` rather than the configured `deepseek-v4.1-flash`. The primary model had not timed out - it
+  generated for minutes and returned the endpoint's output ceiling as truncated YAML. pr-agent could not
+  parse that, treated it as a failed attempt, and fell through to `fallback_models`. The figures are in
+  [`docs/measurements.md`](docs/measurements.md), which owns them.
+
+  Each half is needed on its own, because either alone leaves the failure readable:
+
+  - **`config.max_output_tokens` is now set.** Unset, the *endpoint* chose the ceiling, and a reasoning
+    model spent the whole of it thinking rather than emitting a review. The key is asserted in the `config`
+    stage, since dropping it silently restores that ceiling. It is reserved from `max_model_tokens` when the
+    diff is fitted, so the two leave room for the diff between them - the reserve is checked, not assumed.
+  - **`model=FALLBACK` on the summary line, guarded by `REQ-HOOK-42`.** Until now the only place the
+    answering model appeared was the run-details prose at the bottom of `review.md`, so a fallback review
+    was indistinguishable from a configured-model one on the line an agent actually reads. The marker is
+    read from that same prose (pr-agent's plain-diff JSON carries no model field) and reported rather than
+    fatal: it is a real review, but not the one this install was set up to produce.
+
+  Neither half claims the model is now pinned. `model=FALLBACK` reports *which* model answered; whether the
+  abandoned attempt hit a cap, a rate limit or a `500` is visible in the endpoint's own usage log, and only
+  the first of those is a request-side problem this fixes. `docs/runbooks/troubleshooting.md` says so.
 
 ## [0.4.0] - 2026-10-12
 

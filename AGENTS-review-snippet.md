@@ -13,6 +13,32 @@ preflight-gate     # exit 0 = pass, 1 = changes required, key issues, or effort 
 `preflight --help` lists every command and environment variable; `preflight --version` reports the
 installed bundle version.
 
+### What to keep, and what to drop
+
+**This block is meant to be adapted, not pasted whole.** An installed bundle does not need its own
+installation instructions repeated in every repository that uses it, and every line that stays is a line
+the next agent reads before it reaches the rules it has to follow. Keep the **required** material as it is
+written - a paraphrase of a fact about the installed helper is a fact that drifts from it - and cut the
+**setup** parts once they are done.
+
+- **required** - the loop does not work correctly without it: what a review covers, what the gate decides
+  on, how to read the stop signal, how to keep the round count down, and (if the repo enforces) what the
+  hook does.
+- **setup** - needed to install the bundle or adopt the hook, and worth nothing once that is done.
+
+| Section | Class | What must survive, or when it can go |
+|---|---|---|
+| `## Review before the pull request (preflight)` | required | the loop, the commands and the gate's exit codes; the `--help`/`--version` line is optional |
+| `### What to keep, and what to drop` | setup | you have read it |
+| `### Scope` | required | what a review covers, and that a `head`-scope review cannot be enforced |
+| `### Read the review` | required | `new=` and `coverage=` are the stop condition; the `review.json` field list is optional unless something parses that file |
+| `### Optimising the review process` | required | every habit in it: they are what keep the round count - and the loop's whole cost - down |
+| `### Operating invariants` | required | the install pointer at the end is setup; the rest is not |
+| `### Make it enforced: refuse a commit that was not reviewed` | setup | `.githooks/` is committed - **but keep the per-clone `git config core.hooksPath .githooks` step somewhere**, since it is local config that a clone does not inherit, or no clone will enforce |
+| `#### What the hook does, and does not do` | required | drop it only if the repository does not enforce: this is what makes a blocked commit explicable, and it is not derivable from the recipe above it |
+| `### Tell the reviewer what is true about this repo` | required | it is what stops a documented trade-off being reported as a finding, which is a round the loop otherwise pays for |
+| `### Where the bundle lives, and how to get current guidance` | setup | the upgrade recipe goes; **if the repository re-pastes after upgrades, keep the rule that the copy to paste is the installed one** (`$PREFLIGHT_HOME/AGENTS-review-snippet.md`, `~/.config/preflight` by default), not the repository's - plus a pointer to the repository |
+
 ### Scope
 
 `preflight review` reviews **the pending commit**: everything HEAD does not yet contain, tracked and
@@ -31,7 +57,7 @@ for it.
 
 ### Read the review
 
-`preflight review` prints a summary line and writes two artifacts:
+`preflight review` prints a summary line and writes its artifacts:
 
 - `.preflight/review.md` - prose.
 - `.preflight/review.json` - structured: `review.key_issues_to_review[]`, `review.security_concerns`,
@@ -41,7 +67,7 @@ for it.
 Loop until `preflight-gate` exits 0: fix every entry in `key_issues_to_review[]` and anything under
 `security_concerns` in one pass, then re-run `preflight review` and `preflight-gate`.
 
-Two fields on the summary line matter to the loop:
+What matters on the summary line is the loop's exit conditions:
 
 - `new=N/M` - N of the M findings were not in the previous review. `new=0` means every finding was already
   raised: judge each one rather than re-fixing blind.
@@ -49,9 +75,32 @@ Two fields on the summary line matter to the loop:
   review, so a low `issues=` count means "the rest was not looked at", not "the change is clean". Inform
   that `config.max_model_tokens` / `custom_model_max_tokens` can be raised (see
   `docs/runbooks/troubleshooting.md`) rather than round-tripping until the omitted files happen to come into view.
+- `model=FALLBACK (the configured model did not answer - see review.md)` - the review you are reading came
+  from the fallback model, not the configured one. Treat a clean result with more caution than usual: it is
+  a different model's judgement, and the run may be much slower and more expensive than the same review
+  normally is. Raise `config.max_output_tokens` if you see it on an install that does not set it - see
+  `docs/runbooks/troubleshooting.md` rather than re-running.
 
 `risk=` is reported but the gate never decides on it; the gate fails on security concerns,
-`merge_recommendation=changes_required`, key issues, or effort above `PREFLIGHT_GATE_MAX_EFFORT`.
+key issues, effort above `PREFLIGHT_GATE_MAX_EFFORT`, or - when the repository asks for it with
+`require_merge_recommendation` - `merge_recommendation=changes_required`.
+
+### Optimising the review process
+
+Every round is a full model call that re-reads the whole diff, so these habits are what keep the loop short:
+
+- **Fix everything material in one pass.** A round that resolves many findings is cheaper than many rounds
+  that resolve one each.
+- **A review reports on prose as hard as on code.** A claim the reviewer can check and you have not is a
+  finding you bought. Write less commentary, and make sure what you write is true.
+- **Do not document behaviour you have not settled.** Write the code, confirm what it does, then describe
+  it - a rationale written ahead of its behaviour tends to contradict it, and the next review reports the
+  paragraph.
+- **A number in prose is a copy nothing checks.** The run, the code and the artifact already own the fact,
+  so the copy in your prose goes stale in silence - and a review reports prose as hard as code, so it comes
+  back as a finding. State the shape ("every section passed") or quote the run's output in a code fence;
+  this covers a count of the list you just wrote as much as a run result. A number that *is* the interface
+  (a timeout, an exit code, a port) stays.
 
 ### Operating invariants
 
@@ -69,8 +118,9 @@ Two fields on the summary line matter to the loop:
 
 ### Make it enforced: refuse a commit that was not reviewed
 
-To make the repo **refuse** an unreviewed commit, commit a pre-commit hook and point git at it - once per
-clone, covering every worktree:
+To make the repo **refuse** an unreviewed commit, commit a pre-commit hook and point git at it. The hook
+files are committed; `core.hooksPath` is **local config, not a committed file**, so a fresh clone does
+**not** inherit it and enforces nothing until it is set again there:
 
 ```sh
 mkdir -p .githooks
@@ -85,7 +135,7 @@ Use `install -m`, not `cp`: git ignores a hook file that is not executable, so a
 enforces nothing. `git update-index --chmod=+x` puts the mode in the *index*, which is what a fresh clone
 obeys. Check both with `git ls-files -s .githooks/` - each line must read `100755`.
 
-What the hook does, and does not do:
+#### What the hook does, and does not do
 
 - It **verifies** that the content being committed was what `preflight review` reviewed. Unreviewed content
   blocks the commit, and the offending paths are named. The recorded review must also have **passed**

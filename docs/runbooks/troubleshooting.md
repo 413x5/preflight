@@ -54,26 +54,25 @@ works too, while the `openai/` prefix above routes through LiteLLM's OpenAI-comp
 
 ## The review reports few issues per round and the loop will not converge (the "cascade")
 
-This has **two** causes, and only fixing the first one leaves the loop slow.
+Fixing only one of these leaves the loop slow.
 
-**1. A cap on how many findings are returned.** `pr_reviewer.num_max_findings` defaults to 3, so each
-run reports 3 findings, the agent fixes 3 and re-runs to find 3 more. It is set to 20 here. That setting
+**1. A cap on how many findings are returned.** `pr_reviewer.num_max_findings` defaults to a handful, so each
+run reports that many findings, the agent fixes them and re-runs to find as many again. It is raised here
+(see [`../../config/preflight.toml.example`](../../config/preflight.toml.example) for the value). That setting
 does not change what the model is *shown* - raise it and a review still only covers the content the model
 received.
 
 **2. A pruned diff.** That is the half `num_max_findings` cannot fix. When a diff exceeds the token
-budget, pr-agent's default is to **prune files** and review only the first patch, so one "complete"
-review silently covers a slice of the tree. The next run, against different content, surfaces findings
-that were there all along - which looks identical to an agent that only found one issue. `preflight.toml`
-therefore sets `enable_large_pr_chunking = true` (with `max_number_of_calls = 3`), so an oversized diff
-is split, up to `max_number_of_calls` chunks are reviewed, and the findings are unioned into one review. It is inert unless the
-budget actually leaves files out, so a normal diff still costs exactly one AI call.
+budget, pr-agent **prunes files** and reviews only the first patch, so one "complete" review silently
+covers a slice of the tree. The next run, against different content, surfaces findings that were there
+all along - which looks identical to an agent that only found one issue.
 
-If a review could not cover everything, it says so: the summary line contains
-`coverage=PARTIAL (token budget left files out - see review.md)`, and `review.md` names the omitted
-files. Treat that as "there may be more here" and do **not** read a low `issues=` count on a partial
-review as "the change is nearly clean". Raise `config.max_model_tokens` / `custom_model_max_tokens` if
-you want the whole diff in a single call.
+The bundle does not split the diff to fix this: large-PR chunking is left off, so the pruning is what
+happens and the **report** is what prevents it going unnoticed. A pruned review says so: the summary line
+contains `coverage=PARTIAL (token budget left files out - see review.md)`, and `review.md` names the
+omitted files. Treat that as "there may be more here" and do **not** read a low `issues=` count on a
+partial review as "the change is nearly clean". Raise `config.max_model_tokens` / `custom_model_max_tokens`
+if you want the whole diff in a single call.
 
 ## `preflight review` says the repository has no commits yet
 
@@ -85,11 +84,56 @@ you want the whole diff in a single call.
 added on the next run. If you set `PREFLIGHT_DIR` to an absolute or escaping path, the exclude is skipped
 on purpose.
 
+## I want the earlier reviews, not only the last one
+
+They are all there. `review.md`/`review.json` hold the latest run, and every run is also kept under
+`.preflight/runs/<id>/`:
+
+```sh
+ls -1 .preflight/runs                      # the id is <UTC start>-<pid>, sorted as text by ls
+cat .preflight/runs/*/run.json             # start, finish, duration, artifacts, gate verdict
+cat .preflight/runs/<id>/review.md         # that run's review
+```
+
+Only runs that succeeded AND wrote output are kept - that is what makes the history useful for "how long
+is a review actually taking". A run that failed, or that completed an empty diff without writing anything,
+has no entry, so nothing in the history is partial. The output path is cleared before every run, so `.preflight/review.md` and friends always
+belong to the most recent run that actually wrote them - which may not be the most recent run.
+Nothing prunes these directories - `rm -rf .preflight/runs/<id>` drops one.
+
 ## Output is cut off / summaries stop around 32k tokens
 
 `max_model_tokens` was not raised (or was set to a low value). The default here is 1,000,000 so the
 packing clamp does not cut the diff; set it to `0` to disable the clamp entirely. For a model LiteLLM
 already knows, `custom_model_max_tokens = 0` lets LiteLLM declare the real window instead.
+
+## A review is clean but the run was slow, and a different model answered
+
+Symptom: `preflight review` reports a low `issues=` count, takes far longer than usual, and finishing well
+over the token figure a review normally costs. It may also print nothing unusual at all - which is the
+point.
+
+The causes look identical from the summary line, and each is reported now:
+
+- **`model=FALLBACK` on the summary line.** pr-agent tried `config.model`, that attempt failed, and the
+  answer you are reading came from `fallback_models` instead. The review is real, but it is a *different
+  model's* judgement than the one this install is configured for, so a clean run under the fallback is not
+  the clean run a primary-model result would be. `review.md`'s run-details block names which model answered
+  (pr-agent writes `Model: ... (fallback)` or `Models: ... (includes fallback)`); the summary line repeats
+  it because that line is what an agent actually reads.
+- **The endpoint's own output ceiling.** `config.max_output_tokens` unset means the *host* picks the cap,
+  and on this endpoint that cap was low enough that the model spent all of it reasoning and returned
+  truncated YAML - which does not parse, so the attempt counts as a failure and the run falls through to
+  `fallback_models`. The bundle sets `max_output_tokens` for exactly this reason. If you see
+  `model=FALLBACK` on an install that predates that key, add it rather than re-running.
+
+The distinction matters when choosing what to do: `model=FALLBACK` says *which* model answered, and the
+`Usage` line in your endpoint's own console says whether the failed attempt hit an output cap or something
+else. The tell is the count itself - a cap shows up as a **round, suspiciously service-shaped number**
+(a power of two, a round thousand) rather than the ragged count a finished answer produces. A cap that
+lands exactly on such a default is a request-side problem and is fixed here; a `500` or a rate limit is the
+provider's, and re-running is reasonable. The measured ceiling that led to this section is in
+[`../measurements.md`](../measurements.md).
 
 ## `git commit-tree` fails with a GPG error
 
@@ -112,14 +156,16 @@ later edit invalidates it. It is not a bug and there is no time-based expiry to 
 ## `git commit` says "the last review did not pass"
 
 The review ran but the gate verdict was not a pass - `preflight-gate` decides this (key issues,
-security concerns, `changes_required`, or an effort over the limit). Read `.preflight/review.md`, fix the
-findings, and re-review. The artifacts are left in place on a block precisely so you can read them.
+security concerns, an effort over the limit, or `merge_recommendation=changes_required` when the model was
+asked for that field). Read `.preflight/review.md`, fix the findings, and re-review. The artifacts are left
+in place on a block precisely so you can read them.
 
 **A finding on documentation does not reach this point.** `preflight-gate` derives a tier from each
 finding's file type and treats documentation (a `.md`/`.markdown`/`.rst`/`.adoc` file) as
 **advisory**: it is printed and tagged `[advisory]`, and it does not fail the gate on its own, so a typo
 in a README no longer blocks a commit by itself. Code under `docs/` and a `requirements.txt` still block,
-and `merge_recommendation = changes_required` fails the gate regardless of tier. A finding on code, or one with no file attached, blocks as before. Set `PREFLIGHT_GATE_DOC_BLOCKS=1` (or `doc_blocks = true` in the gate's config file, see
+and `merge_recommendation = changes_required` fails the gate regardless of tier when the field was
+reported. A finding on code, or one with no file attached, blocks as before. Set `PREFLIGHT_GATE_DOC_BLOCKS=1` (or `doc_blocks = true` in the gate's config file, see
 `preflight-gate --help`) to make documentation findings block too.
 
 The gate's policy - which file types count as documentation, whether they block, whether key issues are
@@ -139,10 +185,10 @@ Running `preflight-gate` on its own only prints an exit code - it never rewrites
 sidecar on `fail` and the commit still blocked. That re-review costs another full model run; for a single
 commit, `git commit --no-verify` is cheaper and leaves no trace.
 
-Note that `PREFLIGHT_GATE_ALLOW_ISSUES` relaxes **key issues only**. Security concerns and
-`merge_recommendation=changes_required` still fail the gate (see the header of `preflight-gate`), so a
-review that is blocked for one of those will stay blocked no matter how it is re-run. Genuinely
-disagreeing with *those* is a `--no-verify` decision, not an opt-out.
+Note that `PREFLIGHT_GATE_ALLOW_ISSUES` relaxes **key issues only**. Security concerns still fail the gate,
+and so does `merge_recommendation=changes_required` when the model reported it (see the header of
+`preflight-gate`), so a review that is blocked for one of those will stay blocked no matter how it is
+re-run. Genuinely disagreeing with *those* is a `--no-verify` decision, not an opt-out.
 
 ## `git commit` says "commit blocked: the preflight helper is missing"
 
@@ -159,7 +205,7 @@ Check, in order:
   committing anyway. This is the one that looks installed: `git config core.hooksPath` is right, the file
   is committed, and the commit still goes through. Check the **committed** mode with
   `git ls-files -s .githooks/` - it must be `100755` - as well as the file on disk, because a fresh clone
-  checks out whatever the index says. Fix both halves: `install -m 0755` for the file, then
+  checks out whatever the index says. Fix each half: `install -m 0755` for the file, then
   `git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit` for the index. The second step
   is what covers a git running with `core.fileMode=false`, where `git add` records `100644` however the
   file was installed.
@@ -278,7 +324,8 @@ That "out" count is the number to watch, and it is usually far larger than the r
 ~500-line diff on this machine has reported **23,467 completion tokens in 111s**, of which only about
 2,500 characters reached `review.md`. The rest was **hidden reasoning**: tokens the model spent
 deliberating and then discarded, invisible in `review.json` and on the summary line. That is the extreme
-end rather than the norm - the same diff has also completed in 11s / 2,126 tokens - which is exactly why
+end rather than the norm - the same diff has also completed in seconds, at a fraction of the tokens (both
+figures are in [`../measurements.md`](../measurements.md)) - which is exactly why
 the count is worth watching: a slow review looks like a slow provider when it may be an unset reasoning
 budget, and the same content can take ten times longer from one run to the next.
 

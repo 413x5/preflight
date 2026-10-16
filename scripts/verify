@@ -19,27 +19,39 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$here" || exit 1
 
-STAGES="tools syntax install config version gateshapes coverage hooktests selfcheck"
+STAGES="tools syntax install config version gateshapes coverage snippet hooktests selfcheck"
+# A group CI can ask for by NAME, so the workflow does not re-list stages: a stage added above is then
+# picked up by CI automatically instead of appearing locally and never running there. The split is by cost
+# - these need no pr-agent and no network - and `GROUP_fast` is checked against STAGES below.
+GROUP_fast="tools syntax install config version gateshapes coverage snippet"
+for s in $GROUP_fast; do
+  case " $STAGES " in
+    *" $s "*) ;;
+    *) echo "verify: GROUP_fast names '$s', which is not a stage (see --list)" >&2; exit 2 ;;
+  esac
+done
 rc=0
 failed=""
 
 usage() {
   cat <<'EOF'
-Usage: scripts/verify [stage ...]
+Usage: scripts/verify [stage|group ...]
 
   (no arguments)   every stage, in cost order
+  fast             the stages CI runs in its fast job (no pr-agent, no network)
   --list           print the stage names, one per line
   -h, --help       this text
 
 Stages, cheapest first:
-  tools        the commands every other stage needs are present
+  tools        the commands every other stage needs are present and usable
   syntax       every script parses - bash -n for bash, sh -n for POSIX sh
   install      install.sh deploys into a throwaway prefix and is idempotent
   config       the generated config and the gate template parse, and the
-               completeness keys are still set (and the deliberate omissions still absent)
+               completeness keys are set and the keys left off are absent
   version      src/VERSION, the CHANGELOG heading and --version agree
   gateshapes   preflight-gate survives the JSON shapes the model really produces
   coverage     the coverage marker matches pr-agent's footer and ignores prose
+  snippet      every section of AGENTS-review-snippet.md is classified required or setup
   hooktests    the commit-hook integration suite (offline cases)
   selfcheck    that suite re-run against a neutered hook
 
@@ -63,9 +75,14 @@ if [ "$#" -eq 0 ]; then
   selected="$STAGES"
 else
   for want in "$@"; do
+    case "$want" in
+      # A group expands to its stages, in the group's own order, so the caller names intent rather than
+      # a list it has to keep in sync.
+      fast) for s in $GROUP_fast; do selected="$selected $s"; done; continue ;;
+    esac
     case " $STAGES " in
       *" $want "*) selected="$selected $want" ;;
-      *) echo "verify: unknown stage '$want' (see --list)" >&2; exit 2 ;;
+      *) echo "verify: unknown stage or group '$want' (see --list)" >&2; exit 2 ;;
     esac
   done
 fi
@@ -100,6 +117,14 @@ stage_tools() {
     command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
   done
   [ -z "$missing" ] || { echo "missing required tool(s):$missing" >&2; return 1; }
+  # Capability, not a version string. `config` parses TOML with `tomllib`, which is stdlib only from
+  # Python 3.11 - and macOS ships an older `python3`, so on a machine that has not installed another
+  # one the first failure would be an ImportError raised from inside `config`. That reads as a broken
+  # repository rather than a missing prerequisite, which is the one thing this stage exists to say.
+  python3 -c 'import tomllib' >/dev/null 2>&1 || {
+    echo "python3 ($(command -v python3)) cannot 'import tomllib', so the gate cannot parse TOML: it needs Python 3.11 or newer" >&2
+    return 1
+  }
   echo "required tools present"
 }
 
@@ -169,20 +194,28 @@ cfg = d["config"]
 assert cfg["model"], "no model configured"
 assert cfg["fallback_models"], "no fallback model configured"
 assert d["litellm"]["force_streaming_api_base_substrings"], "no streaming host configured"
-# The completeness knobs, asserted here so they cannot be dropped silently. Each answers a different
-# half of the review->fix->review cascade, and a regression in any one of them shows up as a loop that
-# will not converge rather than as a failing build:
-#   num_max_findings          - how many findings one review may RETURN
-#   enable_large_pr_chunking  - review the whole diff instead of a pruned slice of it
-#   max_number_of_calls       - the bound on those extra chunking calls
+# The completeness key that stays set, asserted here so it cannot be dropped silently: a regression
+# shows up as a loop that will not converge rather than as a failing build. `num_max_findings` is how
+# many findings one review may RETURN.
 rv = d["pr_reviewer"]
 assert rv["num_max_findings"] >= 10, "num_max_findings is back down to a cascade-sized cap"
-assert rv["enable_large_pr_chunking"] is True, "a token-budget-pruned diff would be reviewed as a slice"
-assert rv["max_number_of_calls"] >= 2, "chunking is on but capped at a single call, so it cannot cover the diff"
-# A separate concern from the three above - the gate's go/no-go signal - so it is named after what it
-# checks rather than counted among them.
-assert rv["require_merge_recommendation"], \
-    "no go/no-go signal: preflight-gate fails on merge_recommendation=changes_required"
+# The completeness keys this bundle DELIBERATELY does not set - chunking, its call bound, and the merge
+# recommendation the gate reads - asserted absent so none returns without a decision. Without chunking
+# an over-budget diff is PRUNED rather than split, which is survivable only because the pruning is
+# reported (pr-agent's coverage footer, repeated as coverage=PARTIAL on the summary line). What that
+# line does and does not guarantee is docs/architecture.md.
+assert "enable_large_pr_chunking" not in rv, \
+    "large-PR chunking is on again: an over-budget diff would be split across extra calls (see docs/architecture.md)"
+assert "max_number_of_calls" not in rv, \
+    "the chunking call bound is set again: it does nothing unless enable_large_pr_chunking is on"
+assert "require_merge_recommendation" not in rv, \
+    "require_merge_recommendation is on again: the bundle does not ask for that field (see docs/architecture.md)"
+# The OUTPUT cap, asserted so it cannot be dropped back to the endpoint's own ceiling. Unset, the host
+# stopped at 65536 tokens and a reasoning model spent all of it without emitting parseable YAML, so the
+# run silently fell through to `fallback_models` - the configured model never answered while the review
+# looked normal. The measured numbers live in docs/measurements.md; this only holds the key in place.
+assert cfg.get("max_output_tokens", 0) >= 100000, \
+    "max_output_tokens is unset or low again: the endpoint's own ceiling produced truncated, unparseable YAML (see docs/measurements.md)"
 # The two keys this bundle DELIBERATELY does not set, asserted as absent so neither can be reintroduced
 # silently. The bundle used to inject extra_instructions; capturing the literal prompt showed it argued
 # against pr-agent's own text ("prefer not reporting over guessing", "an empty list is acceptable") by
@@ -431,6 +464,84 @@ print("coverage marker ignores prose and matches the real footer")
 PY
 }
 
+stage_snippet() {
+  # `AGENTS-review-snippet.md` is pasted into a consuming repo's AGENTS.md and then EDITED: the
+  # classification table tells that repo which sections it may drop, so the section list and the table
+  # cannot drift apart. A section with no row is a section with no instruction, and a row naming a
+  # heading that no longer exists is an instruction about nothing.
+  #
+  # The scan reads the shipped file rather than a fixture, and its fence tracking is not defensive: the
+  # file documents the `Code review` heading inside a fenced example, so a fence-unaware scan reports that
+  # example as an unclassified section and fails.
+  python3 - AGENTS-review-snippet.md <<'PY'
+import re, sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().split("\n")
+
+# Headings outside fenced code blocks, as `#`-runs followed by a space. `#hashtag` and `#!/bin/sh` are not
+# headings in CommonMark, and a heading-looking line inside a fence is content.
+headings, fence = [], None
+for n, line in enumerate(lines, 1):
+    run = re.match(r"(`{3,}|~{3,})", line)
+    if run:
+        char = run.group(1)[0]
+        # CommonMark closes a fence with the same character; a ``` inside a ~~~ block stays content.
+        fence = None if fence == char else (fence or char)
+        continue
+    if fence is not None:
+        continue
+    hm = re.match(r"(#{1,6}) +(.*)", line)
+    if hm:
+        headings.append((len(hm.group(1)), hm.group(2).strip(), n))
+
+titles = [f"{'#' * lv} {t}" for lv, t, _ in headings]
+if not titles:
+    sys.exit("no headings found in " + path + " - the scan is broken, not the file")
+
+# The classification table sits directly under its heading, so the section ends at the NEXT heading the
+# fence-aware scan found. Taking that boundary from a raw `#` prefix instead would end it early on a
+# `#hashtag` or `#!/bin/sh` line, and the table's rows would then be read from wherever they happened to
+# fall.
+try:
+    idx = next(i for i, (_lv, t, _n) in enumerate(headings) if t.startswith("What to keep"))
+except StopIteration:
+    sys.exit('no heading starting with "What to keep" - the classification section was renamed or removed')
+body_end = headings[idx + 1][2] - 1 if idx + 1 < len(headings) else len(lines)
+
+classes = {}
+for line in lines[headings[idx][2] : body_end]:
+    m = re.match(r"\|\s*`([^`]+)`\s*\|\s*(required|setup)\s*\|", line)
+    if m:
+        classes[m.group(1)] = m.group(2)
+
+problems = []
+for t in titles:
+    if t not in classes:
+        problems.append(f"'{t}' has no row in the classification table (class it required or setup, "
+                        f"or it tells a consumer nothing)")
+for t in classes:
+    if t not in titles:
+        problems.append(f"the classification table names '{t}', which is not a heading in this file")
+
+# The vocabulary has to keep distinguishing: all-required would make the table a formality no consumer
+# could act on, and a class nothing is tagged with is a class that tells a reader nothing.
+kinds = set(classes.values())
+if "required" not in kinds:
+    problems.append("no section is marked required - then nothing is mandatory and the table is wrong")
+if "setup" not in kinds:
+    problems.append("no section is marked setup - then there is nothing a consumer may drop, and this "
+                    "table cannot be the reason the file is being read")
+
+if problems:
+    print("\n".join(problems))
+    sys.exit(1)
+print(f"{len(classes)} sections classified: "
+      + ", ".join(f"{k}={sum(1 for v in classes.values() if v == k)}"
+                  for k in ("required", "setup") if k in kinds))
+PY
+}
+
 stage_hooktests() {
   # Offline cases only: the live-endpoint case needs a paid key, and the gate must never depend on one.
   ./tests/run.sh hook
@@ -450,6 +561,7 @@ run config       stage_config
 run version      stage_version
 run gateshapes   stage_gateshapes
 run coverage     stage_coverage
+run snippet      stage_snippet
 run hooktests    stage_hooktests
 run selfcheck    stage_selfcheck
 

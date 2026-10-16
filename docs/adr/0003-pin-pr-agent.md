@@ -33,7 +33,7 @@ The installer previously tracked the latest release.
 Pin. `install.sh` installs a fixed version (default `0.47.0`) and exposes `PREFLIGHT_PR_AGENT_VERSION`
 to override it, because a pin that cannot be moved is a pin that blocks an urgent upgrade.
 
-CI asserts two things so the pin cannot drift silently: that the `uv tool install` line carries the pin,
+CI asserts the pin cannot drift silently: that the `uv tool install` line carries it,
 and that its value is the version the coverage-footer fixture in `tests/run.sh` was copied from. A bump
 therefore has to come with a re-check of that fixture rather than a silent edit.
 

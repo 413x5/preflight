@@ -90,7 +90,7 @@ review defeated it. What finally held was matching the footer **as pr-agent emit
 header, sentence, then the generated file bullets - and additionally restricting the search to the text
 after the review's last `</table>`.
 
-Two things are deliberate in the survivor. The match spans the rule and the bold header with a wildcard
+Deliberate choices shape the survivor. The match spans the rule and the bold header with a wildcard
 rather than naming pr-agent's emoji, because the read is deliberately lenient (so counts survive a
 non-UTF-8 `review.md`) and that same leniency rewrites an invalid emoji as U+FFFD - requiring the emoji
 meant the marker could never fire on exactly the file it was written to tolerate. And the pinned pr-agent

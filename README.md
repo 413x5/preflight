@@ -15,6 +15,10 @@ is just the built-in default.
 | `preflight-gate` | Machine check over `review.json` (exit 0 = pass) |
 | `preflight-pr …` | PR-Agent with the global config (hosted/PR mode, needs a token) |
 
+Every run that succeeds and produces output is also kept, with its start time, finish time and
+`duration`, under `.preflight/runs/<id>/` — nothing is pruned, so the previous review survives the next
+one.
+
 - Reviews include committed **plus uncommitted and untracked** changes — a review never needs a commit.
 - Secrets live in `~/.config/preflight/.secrets.toml` (chmod 600), symlinked into the PR-Agent package.
   **Nothing secret ever goes into your shell environment.**
@@ -97,6 +101,12 @@ preflight --help       # every command and environment variable
 preflight --version    # the installed bundle version
 ```
 
+Those paths always hold the **latest** run. Each run that succeeds and produces output is also archived
+under `.preflight/runs/<id>/`, with a `run.json` recording when it started, when it finished and how long
+it took; nothing prunes them, so `ls .preflight/runs` is the history of what has been reviewed. A run
+that failed, or that finished without writing anything (an empty diff), has no entry: every entry is a
+run that produced output you can read.
+
 The default scope is `commit`: the review diffs `HEAD` against the working tree, untracked files included,
 and needs no remote, no base and no fetch. `PREFLIGHT_SCOPE=worktree` reviews the
 whole branch instead (default branch → working tree); only that scope resolves a base, trying `origin/HEAD`,
@@ -105,11 +115,13 @@ target something else (a release branch, a fork's trunk); if nothing resolves, `
 rather than guessing a ref that does not exist.
 
 One review is meant to report **everything** it was shown, so the loop converges instead of re-discovering
-one issue at a time. That takes settings in `config/preflight.toml.example`: `num_max_findings` governs what the
-model *reports*, and `enable_large_pr_chunking` governs whether it was shown the whole diff at all - without
-it an oversized diff is pruned to a slice of the tree, and each round "discovers" more. If
-anything still could not be covered, the summary line contains `coverage=PARTIAL` and `review.md` names the
-omitted files; treat that as "there may be more here", not as a clean review.
+one issue at a time. `num_max_findings` in `config/preflight.toml.example` governs what the model *reports*,
+and that file lists every `[pr_reviewer]` knob pr-agent accepts - the bundle's own settings live and the rest
+commented at upstream's value - so the levers are visible without reading pr-agent's source.
+What that setting cannot do is change what the model was *shown*: when a diff exceeds the token budget
+pr-agent reviews it minus the files it pruned, so if anything could not be covered the summary line contains
+`coverage=PARTIAL` and `review.md` names the omitted files. Treat that as "there may be more here", not as a
+clean review, and raise the token budget rather than round-tripping until the files happen to come into view.
 
 Reporting everything is not the same as converging, though: a reviewer cannot tell a deliberate,
 documented trade-off from an oversight, and each round reviews the text the previous round wrote. The
@@ -121,8 +133,11 @@ not the same as unresolved. Full detail in
 ## Teach your coding agents
 
 Paste `AGENTS-review-snippet.md` into the repo's `AGENTS.md` so every agent follows the loop: review → fix all
-findings in one pass → re-review → commit once when the gate is green. The snippet also points at this repo, so
-an agent can look up current guidance as the bundle evolves.
+findings in one pass → re-review → commit once when the gate is green. **Adapt it rather than copying it
+whole** - every section is classified `required` or `setup`, and the `setup` parts (the install and
+hook-adoption recipes) are worth nothing once they have been run. Keep the `required` facts as written,
+because a paraphrase of a fact about the installed helper is a fact that drifts from it. The snippet also
+points at this repo, so an agent can look up current guidance as the bundle evolves.
 
 ## Make it enforced (recommended)
 
@@ -208,6 +223,9 @@ key) and migrate it by hand.
 
 - `preflight` adds `.preflight/` to each repo's `.git/info/exclude` automatically, so review output is never
   committed.
+- Runs are append-only under `.preflight/runs/` and nothing deletes them; remove a directory to drop that
+  run. The top-level `review.md`/`review.json`/`review.meta.json` stay as they are, because the commit
+  hook and `preflight-gate` read them by name.
 - The commit hook is opt-in per repo: copy `~/.config/preflight/githooks/*` into the repo's `.githooks/` and
   set the **relative** `core.hooksPath`. See "Make it enforced" above.
 - The helpers run the upstream **`pr-agent`** tool (installed by `uv`); "pr-agent" here always means that

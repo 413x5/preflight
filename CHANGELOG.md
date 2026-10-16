@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+## [0.5.0] - 2026-10-16
+
 ### Added
 
 - **A run history under `.preflight/runs/`, with the start, finish and duration of every run.** A run used
@@ -795,7 +799,8 @@ Initial release: a deployable, machine-local PR-Agent review setup for the Cline
   initial commits plus the `v0.1.0` tag are **GPG-signed** (the signed history replaces earlier unsigned
   commits).
 
-[Unreleased]: https://github.com/413x5/preflight/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/413x5/preflight/releases/tag/v0.5.0
 [0.4.0]: https://github.com/413x5/preflight/releases/tag/v0.4.0
 [0.3.0]: https://github.com/413x5/preflight/releases/tag/v0.3.0
 [0.2.0]: https://github.com/413x5/preflight/releases/tag/v0.2.0

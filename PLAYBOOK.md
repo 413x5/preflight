@@ -5,7 +5,7 @@ It is written for whoever picks up the work next — a new contributor or an age
 about the language, framework or product. Where a rule depends on tooling, it names the _job_ ("the type
 checker", "the fast tests", "the gate command"), not a specific tool.
 
-Two kinds of material sit side by side here. One is _principles_ — the habits, and the reasoning behind
+Material sits side by side here. One kind is _principles_ — the habits, and the reasoning behind
 them. The other is the _concrete conventions_ those habits are usually realized with: a repository layout,
 a documentation structure, and the handful of named standards worth adopting. The principles are the part
 you adapt to a project; the conventions are well-worn defaults to start from, and none of them assumes a
@@ -59,6 +59,14 @@ Give every such check a _single-commit_ escape hatch (an environment variable, a
 that whoever uses it **says so out loud** — in the commit message or the pull-request body. A deliberate,
 visible bypass is fine; a silent one is the thing these checks exist to prevent.
 
+**Enforce where the change lands, not only where it is made.** A local hook runs on the machine of whoever is
+committing, and it runs on the message they are about to write. Both of those are escape routes:
+the bypass flag, and the tool that commits without running hooks at all — and on a host that squash-merges, the
+message that reaches the trunk is not the one the hook read but the **pull-request title**. So a rule that
+matters is read a second time from what actually arrived (the pushed range, the title, the merged diff), where a
+bypass is visible to everyone. The local check stays: it is the fast, courteous half. It is just not the
+enforcement.
+
 ## 3. The review loop (a second, enforced half of the gate)
 
 Passing tests is necessary, not sufficient. Before a change becomes a pull request, it is **reviewed** — by
@@ -110,7 +118,7 @@ the code.
 
 **Select by change, with a conservative fallback.** Map every source file to the checks that can observe it
 (in a machine-readable table, one entry per test group). Given a change, run only the affected group. This
-is what lets a working session stay fast. Two rules keep it honest:
+is what lets a working session stay fast. Rules keep it honest:
 
 - A file **no** rule claims, and the test harness's own files, escalate to **run everything** — never to run
   nothing. When ownership is unknown, the safe direction is more testing, not less.
@@ -151,30 +159,25 @@ judgement — say so honestly in the record and rely on review, rather than ship
 pretends to cover it. A test that only looks like it enforces something is the false result this whole
 section is against.
 
-**An assertion earns trust by failing.** Before relying on a check, make the thing it asserts false and
-watch it fail. This is a **different property** from proving the feature is needed — reverting the fix and
-watching the check go red says the feature matters; flipping the *assertion's own subject* says the check
-is live. Do both, and do the second one while writing the check.
+**Prove a move lost nothing, because prose has no compiler.** Moving text between documents — a split, a trim, an
+extraction — is the one refactor nothing checks: a rule can disappear and every test still passes, because no test
+reads prose. The habit is to make the loss visible. Take the distinctive strings of the original — the identifiers,
+the command spellings, the class names, the diagnostic text — and assert that each still appears **somewhere** in
+the tree afterwards. Whatever appears nowhere is either relocated deliberately or was lost by accident, and only a
+reading tells the two apart. It is cheap, it runs in the inner loop like any other check, and it catches the class
+of mistake a careful rewrite makes most often: the sentence you were sure you moved. (The complement of §6's
+"docs travel with the code": that rule says update the document; this one says prove you kept the content.)
 
-It is not a formality, because every way a check can fail to fail is silent. A branch that cannot run (a
-printable summary where a non-zero status was needed, under an `else` that is therefore unreachable); a
-fixture aimed at the wrong path (a read-only grandparent while the code wrote to a writable child); a
-comparison over constant bytes (a stub producing identical output, so a genuine overwrite compares equal);
-a selection by position where the order is not chronological (`tail -1` over an id whose numeric part is
-unpadded). Each of those passed a fully green suite. **A check that cannot fail is the same false result as
-no check, and worse, because it is counted.**
-
-**Where a rule lives decides whether it fires.** Revisit a rule's *trigger*, not only its wording. A rule
-filed under one file's heading, or written as "if you change X", is invisible to every change of the same
-kind that happens not to touch X — and the author reads the rule, agrees with it, and still does not apply
-it. When the same defect could occur anywhere, key the rule to the **class of change** and place it where
-that change is made. This applies to rules enforced by discipline — a review, an agent instruction file, a
-convention. A rule a scheduled check runs unconditionally does not have the problem, which is also the
-argument for making the trigger mechanical wherever it can be.
+Sweep for **whole phrases, not only identifiers**. A loss the identifier sweep cannot see is a sentence with nothing
+quoted in it — the symptom a reader recognises the failure by ("the name pushes the column wider"), the command that
+diagnoses it ("check the health endpoint for a `busy` that never clears"), the reason a field is read in that order.
+Those carry no distinctive token, so grep for the _cue_ around them (`the tell`, `when a scrape`, `the check to
+run`) and read what it belongs to. The check that passes while a sentence was dropped is the false result this rule
+is against.
 
 ## 5. Records: decisions and incidents
 
-Two kinds of writing keep a project's reasoning alive. They have different shapes and different jobs.
+Writing keeps a project's reasoning alive, in kinds that have different shapes and different jobs.
 
 ### 5.1 Decision records (the _why_)
 
@@ -219,7 +222,7 @@ produced**. The shape:
 7. **What it changed** — the payload. Each item is a _rule, a check, a guard, or a process change_, not a
    resolution.
 
-Two habits make these pay off:
+These habits make it pay off:
 
 - **Turn the incident into a durable check.** The fix that lasts is the one a test or hook now holds. "What
   it changed" should name the check, not just the patch.
@@ -243,24 +246,64 @@ restate.**
 | Incident records        | "what broke, what it cost, what rule it produced" | anyone about to re-introduce the bug | append-only                                                      |
 | Measurements            | "the dated numbers"                               | anyone about to quote a count        | numbers **with the reason each moved**                           |
 | The roadmap             | "what is left, and how to take it"                | whoever picks up next                | **only work that is not done**                                   |
+| Reference material      | "what is the shape _now_"                         | whoever is changing that part        | current state only; the history lives in the narrative record    |
 
 Rules that fall out of this:
 
 - **Docs travel with the code, in the same edit.** A change is not finished while a doc still describes the
   old behaviour. Ask "who would be wrong now?" and update that document.
+- **A reference is not a log.** Reference material — the shape of the system, the flags, the formats — states what
+  is true **now**. What it replaced, and the measurement that forced the change, belong to the narrative record:
+  keeping both in one document means the reader has to work out which half they are looking at. The one thing
+  that stays is a reason the next person still needs — a floor a change must not drop, a constraint the current
+  code still relies on. The test is whether the sentence would change their decision; "the rule is X, because Y
+  breaks" is reference, while "the rule used to be W" is history. A reference that accumulates its own history is
+  the doc the split (§7) was meant to prevent, one level down.
 - **A claim that turned out to be false is repaired or deleted, never left as aspiration.** A design that
   was decided but never built moves to the roadmap's "not done" section — it does not linger in a doc as if
   it existed.
 - **Comments follow the same rule as docs.** If your change makes a comment untrue, fix the comment in the
   same edit. A stale comment is worse than none.
-- **Keep counts and durations out of prose.** They change with every edit, and a stale one reads like a
-  report nobody can trust — worse, a number that went _down_ for a bad reason (a check started giving up
-  instead of seeing the app) looks like an improvement. Quote a number from a _run_, or from a dated record
-  that says why it moved.
+- **A number in prose is a copy that nothing checks.** A figure written into a sentence is a second copy of
+  a fact something else already owns — the run, the code, the artifact, the dated record — and the sentence
+  is the copy with no reason to stay right. It rots silently, and a reader who catches it cannot tell
+  whether the text or the thing it describes is the one that moved. Every shape of it is one defect:
+  - **What a run printed** — a check count, a suite duration, an "N of M selected" figure. Worse than
+    stale: a count that fell for a bad reason (a check started giving up instead of seeing the app) reads
+    as an improvement.
+  - **A count of the text's own list** — "three habits", "the two boundaries". It carries no information,
+    since the list is right there, and it is one more thing to update beside the list it describes.
+  - **A measurement of an artifact** — a file's line count, a comment ratio, a size in bytes.
+
+  State the **shape** instead ("every section passed", "the sections the change can affect", "these
+  habits"), quote the run's own output in a code fence so it reads as one transcript rather than a claim
+  about the project, or point at the dated record. The test is *who notices when it is wrong*: if the
+  answer is "a reader, eventually", the number does not belong in the sentence.
+
+  **A number that IS the interface stays.** A knob's value, a timeout, a port, an exit code, a version, a
+  format's bytes and offsets: changing one means changing the code, and the code is where it is checked.
+  It applies to prose wherever it lives — a doc, a comment, a test's message, a template, a commit body —
+  so a number repeated into a second document is the same defect as one written twice in the same file.
+  Encode what can be encoded, and be honest about the rest: a count is greppable while a duration reads the
+  same as a timeout, so that half stays with review — an advisory is not a resolution (§4).
 - **Record a number only when it is dated and tied to the reason it moved** — especially when the direction
   is counter-intuitive.
 - **Live, external facts get a date.** Facts surveyed from a website or a vendor page ("surveyed on this
   date", "re-check before you rely on it") decay; say when they were read and mark unverified ones.
+- **The always-loaded file is the expensive one.** Documents are not equally cheap to keep open: one file is read
+  **whole, every time, whether or not its subject comes up** (the rules file an agent loads, the contributor
+  on-ramp, the readme), while the rest are read **on demand**, when a reader's task needs them. So the two are
+  budgeted differently. The always-read file holds what is needed **before the reader knows which part they are
+  touching** — the rules, the commands, the entry points, the traps and the ids — and **links out** for everything
+  else. Detail there is not wrong, it is merely charged to every reader; the test is "would this change what
+  someone does before they have chosen an area?" and anything past that belongs in the on-demand file. The budget
+  shows up as review time, not as a failing check: an always-read file that has doubled is a cost no test reports.
+- **A trap is worth its symptom and its tell.** A rules-and-traps file is not a manual: a trap earns its place for
+  things that exist nowhere else — what the failure **looks like** when it happens, and what **identifies** it
+  in the data or the output (the odd `null` in one field, the count that reads zero, the log line that repeats).
+  The mechanism belongs in the reference file for that component. So when you extract a trap, keep the symptom,
+  the rule and the tell, and link the explanation — and when you trim one, the test is whether the next reader
+  could still recognise the failure, not whether the sentence reads well.
 
 ## 7. Documentation layout
 
@@ -277,7 +320,7 @@ following set is deliberately standard — a reader who has seen it before knows
 | `SECURITY.md`                               | The threat model, and the private way to report a vulnerability.                                                                                        |
 | `LICENSE`                                   | The licence — or an explicit statement that the code is private and unlicensed. Never leave this implied.                                               |
 | `CODE_OF_CONDUCT.md`                        | For any project with contributors from outside.                                                                                                         |
-| `ARCHITECTURE.md` (or `docs/architecture/`) | The big picture, once it is too large for the README.                                                                                                   |
+| `ARCHITECTURE.md` (or `docs/architecture/`) | The big picture, once it is too large for the README. Split it per component when it stops fitting — see below.                                         |
 | `AGENTS.md` (or the tool's equivalent)      | The operational rules for whoever works on the code next: invariants, commands, traps. A subtree may carry its own — the nearest file wins.             |
 
 **The `docs/` tree.** Keep a `docs/README.md` that is an index — one line per document, so nothing is
@@ -291,10 +334,30 @@ docs/
 ├── runbooks/          how to operate, diagnose and recover
 ├── guides/            task-oriented "how do I…"
 ├── reference/         API, CLI, formats — the dry, complete tables
+├── design/            a component map, one file per part (see below), once one file cannot hold it
 ├── roadmap.md         what is left, and how to take an item
 ├── history.md         the narrative of what changed, and what it replaced
 └── measurements.md    the dated numbers, with the reason each moved
 ```
+
+**A component map, when one architecture file stops fitting.** A single architecture document is right until it
+is not, and the failure is quiet: it grows into a handful of unrelated sections, and a reader who needs to change
+one part has to hold all of them in their head at once. Split it **per component** — one file for each part,
+saying what that part **is**, how it is put together, what it promises and what it refuses. These make the
+split pay off rather than just moving the mess:
+
+- **Each file stands alone.** A reader arrives at one component and leaves knowing that component, without
+  having read the others. Say what enters, what leaves, and what it must not reach across.
+- **State the shape, and link to the why.** The rules and the traps keep one home; the decision record keeps the
+  reasoning. A component file links to both rather than restating either (§6).
+- **"What it refuses" is a section, not an omission.** The boundaries a component deliberately does not cross —
+  a layer it will not import, a field it will not invent, a case it refuses rather than guesses — are the part a
+  newcomer cannot infer from the code, and they are where a well-meaning change does damage.
+
+Keep the map indexed from `docs/README.md` like every other document, and keep the set from growing by
+accretion: a statement that stops being true is rewritten or deleted, never appended to. A reference is not a
+log (§6) — and that rule is the one this split most often breaks, because a component file is exactly where a
+"what it used to do" paragraph feels like context.
 
 **The four kinds of documentation.** A widely used model (Diátaxis) holds that documentation comes in four
 kinds, and that confusing them is what makes a doc set hard to use. Keep them separate, and be able to name
@@ -404,9 +467,14 @@ a subject** — it lives in the machine-readable version field and the tag. Enfo
 hook so a message that does not parse is rejected.
 
 **Evidence, not verdicts.** A pull request says what changed, why, and **what you ran and what it said** —
-commands and output, not "tests pass". A checklist covers the things that are easy to forget: the gate was
-green (or the reason it was skipped is stated), the docs were updated in the same change, and nothing
-private leaked into the diff.
+commands and output, not "tests pass". A checklist covers the things that are easy to forget — but only the ones
+a machine cannot already prove: the docs were updated in the same change, and nothing private leaked into the
+diff. **An item the gate, CI or a hook already refuses is noise**, and worse than noise, because a box that is
+ticked by obligation trains the reader to skim the list. The gate's own result belongs in the evidence, quoted
+from the run, not asked for as a promise. The roles of the template's text are worth separating for the same
+reason: a **heading** is the author's to fill in, while the guidance on what that heading wants is **hidden in a
+comment**, so it does not read as structure the author is meant to keep. A template that ships its instructions as
+visible prose gets those instructions back as the body.
 
 **Releases.** Cut a release with a script that derives as much as it honestly can and leaves the judgement
 to a person: bump the version, **draft** the changelog entry from the commits since the last tag, then let a

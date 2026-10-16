@@ -684,7 +684,7 @@ case_coverage_marker_matches_real_footer() {
   sp="$(ls -d "$HOME"/.local/share/uv/tools/pr-agent/lib/*/site-packages/pr_agent 2>/dev/null | head -n1)"
   if [ -z "$sp" ] || [ ! -f "$sp/tools/pr_reviewer.py" ]; then
     skip "the coverage marker ignores prose and matches the real footer" "REQ-HOOK-28" "pr-agent not installed"
-    skip "the completeness keys sit in the section pr-agent reads" "REQ-HOOK-29" "pr-agent not installed"
+    skip "the config keys sit where pr-agent reads them, and the knob list matches upstream" "REQ-HOOK-29" "pr-agent not installed"
     return
   fi
 
@@ -716,10 +716,6 @@ def summary(body, prev=None, current=None):
         env["PREFLIGHT_PREV_JSON"] = prev_path
     else:
         env.pop("PREFLIGHT_PREV_JSON", None)
-    # The coverage marker only fires for the branch scopes: a pending-commit diff is far below the token
-    # budget, so pr-agent never prunes it and there is nothing to announce. This case exercises the
-    # marker's matching, so it runs in the scope where the marker can appear at all.
-    env["PREFLIGHT_SCOPE_IS_BRANCH"] = "1"
     return subprocess.run([sys.executable, script, json_path, md],
                           capture_output=True, text=True, env=env).stdout
 
@@ -782,7 +778,8 @@ PY
         "a missed footer retires the PARTIAL marker (a partial review reads as complete); a spurious match fires it on a complete one"
   fi
 
-  # Part 2: the completeness keys must be in the table pr-agent actually reads them from.
+  # Part 2: the keys the bundle sets must be in the table pr-agent actually reads them from, and the
+  # example file's commented list must still match the pr-agent that is installed.
   if python3 - "$sp/settings/configuration.toml" "$repo_root/config/preflight.toml.example" "$repo_root" <<'PY'
 import re, sys, tomllib
 
@@ -794,13 +791,14 @@ defaults_path, ours_path, repo_root = sys.argv[1:4]
 # resolve a key to whichever section happens to be listed first and fail on a correctly-configured repo.
 # The assertion is therefore "pr_reviewer declares it", not "nothing else does".
 # Each key with the section pr-agent reads it from. These are the keys the bundle SETS; the ones it
-# deliberately leaves unset (`extra_instructions`, `reasoning_effort`, and the
-# `additional_reasoning_effort_models` that exists only to forward the latter) are not listed here, and
-# CI asserts their absence instead - a key that is absent cannot be put in the wrong section.
+# deliberately leaves unset (`extra_instructions`, `reasoning_effort`, the
+# `additional_reasoning_effort_models` that exists only to forward the latter, and the keys that change
+# what a review covers - `enable_large_pr_chunking`, `max_number_of_calls` and
+# `require_merge_recommendation`) are not listed here, and the `config` stage asserts their absence
+# instead - a key that is absent cannot be put in the wrong section.
 wanted = {
     "num_max_findings": "pr_reviewer",
-    "enable_large_pr_chunking": "pr_reviewer",
-    "max_number_of_calls": "pr_reviewer",
+    "review_heading": "pr_reviewer",
 }
 sections = {key: set() for key in wanted}
 section = None
@@ -824,6 +822,58 @@ if missing:
     print("config/preflight.toml.example does not set these: "
           + ", ".join(f"{k} under [{wanted[k]}]" for k in missing))
     sys.exit(3)
+
+# The published knob list: `[pr_reviewer]` is the steering surface for review quality, so the example
+# file carries every key pr-agent declares there - the ones the bundle sets LIVE, and the rest as
+# comments at upstream's own value. Comments because a live default freezes it: the pinned pr-agent
+# would stop inheriting a value upstream changed. That makes the list a copy of upstream's file, so it
+# is checked against it here - a key added upstream, renamed, or defaulted differently shows up as a
+# failing case rather than as advice that is quietly wrong.
+declared = set()
+sec = None
+for line in open(defaults_path, encoding="utf-8", errors="replace"):
+    m = re.match(r"^\[(\w+)\]", line)
+    if m:
+        sec = m.group(1)
+    m = re.match(r"^([a-z_][a-z0-9_]*)\s*=", line)
+    if m and sec == "pr_reviewer":
+        declared.add(m.group(1))
+upstream = tomllib.load(open(defaults_path, "rb"))["pr_reviewer"]
+
+# Only this section, so a later one's keys cannot satisfy the comparison by coincidence.
+body = open(ours_path, encoding="utf-8", errors="replace").read().split("[pr_reviewer]", 1)[1]
+body = re.split(r"(?m)^\[", body, 1)[0]
+live = tomllib.load(open(ours_path, "rb")).get("pr_reviewer", {})
+commented = {}
+for line in body.splitlines():
+    m = re.match(r"^\s*#\s*([a-z_][a-z0-9_]*)\s*=\s*(.+?)\s*$", line)
+    if m:
+        commented[m.group(1)] = tomllib.loads("%s = %s" % (m.group(1), m.group(2)))[m.group(1)]
+
+unlisted = sorted(set(declared) - set(live) - set(commented))
+if unlisted:
+    print("pr-agent declares these [pr_reviewer] keys and the example file does not list them: "
+          + ", ".join(unlisted))
+    sys.exit(5)
+
+# A commented entry claims "this is upstream's value". The live ones are the bundle's, so only the
+# commented half is compared - and a stale value here is worse than no list, because it reads as advice.
+drifted = sorted(k for k, v in commented.items() if k in upstream and v != upstream[k])
+if drifted:
+    print("these commented [pr_reviewer] entries no longer match pr-agent's default: "
+          + ", ".join("%s (listed %r, pr-agent has %r)" % (k, commented[k], upstream[k]) for k in drifted))
+    sys.exit(6)
+
+# The other direction of the same claim: a commented entry for a key pr-agent no longer declares. This is
+# the ONE no-op the two checks above cannot see - `unlisted` only looks at upstream's keys, and `drifted`
+# skips anything absent upstream - so a key REMOVED upstream would leave advice that reads as configurable
+# and does nothing, which is the failure this case exists to catch. Verified by mutation: adding an orphan
+# entry passed before this check existed.
+stale = sorted(k for k in commented if k not in upstream)
+if stale:
+    print("these commented [pr_reviewer] entries name keys pr-agent does not declare "
+          "(removed or renamed upstream), so uncommenting one would do nothing: " + ", ".join(stale))
+    sys.exit(7)
 
 # The DOCS also tell an operator which keys to set - and a wrong key path is silently ignored, so the
 # advice fails without feedback. That is not hypothetical: this section of the docs once said
@@ -893,11 +943,56 @@ if doc_errors:
     print("a documented config path that pr-agent ignores fails silently for whoever follows it")
     sys.exit(4)
 print("documented config paths checked:", checked)
+
+# The `model=FALLBACK` marker reads the run-details PROSE pr-agent writes, so hand-written fixtures in
+# REQ-HOOK-42 cannot show that the real shape is still the one the regex expects - a fixture agrees with
+# whatever the regex says. This derives the literals from the source that WRITES them and compiles the
+# shipped regex over them, so a reworded marker line fails here rather than silently never firing.
+import importlib.util, os as _os
+spec_path = _os.path.join(_os.path.dirname(defaults_path), "..", "algo", "run_output.py")
+if not _os.path.isfile(spec_path):
+    print("cannot find pr-agent's run_output.py beside its settings; update this case")
+    sys.exit(5)
+run_output = open(spec_path, encoding="utf-8", errors="replace").read()
+shipped = open(_os.path.join(repo_root, "src", "preflight"), encoding="utf-8", errors="replace").read()
+m = re.search(r"^FALLBACK_RE = re\.compile\((.*?)\)$", shipped, re.M)
+if not m:
+    print("src/preflight no longer defines FALLBACK_RE with a single re.compile; update this case")
+    sys.exit(6)
+# `eval` over the literal this repo writes - not untrusted input - so the check reads the SHIPPED pattern
+# rather than restating it. The captured text includes the flags argument (`..., re.M`), so the call is
+# recompiled here rather than the bare string being passed to `re.compile`.
+_fb_pattern = eval("re.compile(" + m.group(1) + ")", {"re": re})
+
+# The shapes pr-agent's own f-string builds, derived from that source rather than restated. The PREFIX
+# matters as much as the parenthetical: `Fallback: yes` would still contain the literal but never match the
+# shipped regex, and fixtures written with the same wrong prefix would agree with it - the silent
+# retirement this whole check exists to catch.
+_fb_prefixes = re.findall(r'f"(- Models?: )', run_output)
+if sorted(_fb_prefixes) != ["- Model: ", "- Models: "]:
+    print("pr-agent's run-details no longer build their model line with the expected prefixes "
+          "(found %r); check the marker's regex against the new wording" % (_fb_prefixes or "none"))
+    sys.exit(7)
+if "includes fallback" not in run_output or "(fallback)" not in run_output:
+    print("pr-agent's run-details no longer contain the fallback literals this marker reads: "
+          "check the marker's regex against the new wording")
+    sys.exit(7)
+# Rebuild each line the way pr-agent does, prefix included, then require the shipped regex to match it.
+for line in ("- Model: some/model (fallback)", "- Models: a, b (includes fallback)"):
+    if not _fb_pattern.search("<table></table>\n" + line + "\n"):
+        print("the model=FALLBACK marker no longer matches the line pr-agent emits: " + repr(line))
+        sys.exit(8)
+# And the direction that matters for false positives, against a real review's own text.
+for body in ("- Model: some/model\n", "- Models: a, b\n"):
+    if _fb_pattern.search("<table></table>\n" + body + "\n"):
+        print("the model=FALLBACK marker fires on a line that does NOT report a fallback: " + repr(body))
+        sys.exit(9)
+print("the model=FALLBACK marker matches pr-agent's own run-details wording")
 PY
-  then ok "the completeness keys sit in the section pr-agent reads" "REQ-HOOK-29"
-  else bad "the completeness keys sit in the section pr-agent reads" "REQ-HOOK-29" \
+  then ok "the config keys sit where pr-agent reads them, and the knob list matches upstream" "REQ-HOOK-29"
+  else bad "the config keys sit where pr-agent reads them, and the knob list matches upstream" "REQ-HOOK-29" \
         "each key under [pr_reviewer]" "not where pr-agent reads it" \
-        "a completeness key is in the wrong table or was renamed upstream, so the finding cap or chunking is silently inert while every check stays green"
+        "a completeness key is in the wrong table or was renamed upstream, so the finding cap is silently inert while every check stays green"
   fi
 }
 
@@ -1286,7 +1381,178 @@ FAKE
 "; fi
 }
 
-# ---------------------------------------------------------------------------- shutdown bound
+# --------------------------------------------------------------- the partial review, in every scope
+
+case_partial_review_announced_in_commit_scope() {
+  # A pruned diff must announce itself in the DEFAULT scope too. The marker was once gated on the branch
+  # scopes, on the reasoning that a pending-commit diff is far below the token budget - true of ordinary
+  # changes and false of a large one, and the bundle does not chunk, so pruning is what happens to an
+  # over-budget diff. With the marker suppressed there, a commit-scope review of a slice printed a clean
+  # summary line and nothing else said the rest was never looked at - the exact false-clean this bundle
+  # exists to prevent, reintroduced by a scope condition rather than by the matching.
+  #
+  # Driven through the real helper with a stubbed `pr-agent`, so the assertion is about the ship path
+  # (scope -> emit_summary) rather than about the marker regex in isolation.
+  local d fake out rc
+  d="$work/partial-scope"; fake="$work/partial-scope-bin"
+  mkdir -p "$d" "$fake"
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat >/dev/null
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No"},"usage":{"total_tokens":1}}' > "$js"
+# The real footer shape: after the findings' table, introduced by a horizontal rule.
+[ -n "$out" ] && {
+  printf '<table></table>\n' > "$out"
+  printf '\n<hr>\n\n' >> "$out"
+  printf '%s\n' '**Review coverage:** The following files were not included in this review because of the token budget:' >> "$out"
+  printf '%s\n' '- `big.py`' >> "$out"
+}
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent"
+  ( cd "$d" \
+      && git init -q -b main . \
+      && printf 'a\n' > f.txt \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m init \
+      && printf 'b\n' >> f.txt ) >/dev/null 2>&1
+  git -C "$d" rev-parse --verify -q HEAD >/dev/null 2>&1 || {
+    bad "a partial review announces itself in the default scope" "REQ-HOOK-43" \
+        "a seeded repository" "no commit" \
+        "the case could not build its fixture, so the commit-scope path was never exercised"
+    return
+  }
+
+  rc=0
+  out="$( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" PREFLIGHT_HOME="$work/partial-scope-cfg" \
+            bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
+  [ "$rc" = 0 ] || {
+    bad "a partial review announces itself in the default scope" "REQ-HOOK-43" \
+        "a completed run" "exit $rc" \
+        "the run failed, so the summary line was never produced: $out"
+    return
+  }
+  case "$out" in
+    *"scope=commit"*) ;;
+    *) bad "a partial review announces itself in the default scope" "REQ-HOOK-43" \
+           "scope=commit on the summary" "not the default scope" \
+           "the case did not run in the default scope, so it does not cover the gap: $out"; return ;;
+  esac
+  case "$out" in
+    *"coverage=PARTIAL"*) ok "a partial review announces itself in the default scope" "REQ-HOOK-43" ;;
+    *) bad "a partial review announces itself in the default scope" "REQ-HOOK-43" \
+         "coverage=PARTIAL on a commit-scope review whose diff was pruned" "silent" \
+         "a pruned commit-scope review reports a clean summary with no mention that files were left out: $out" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------- which model answered
+
+case_fallback_model_signal() {
+  # pr-agent tries `config.model` and only then `fallback_models`, and records the winner in the run
+  # details - which reach the review as PROSE, not as a field in review.json (v0.47.0's JSON carries only
+  # `review` and `usage`). So there is no structured field to read, and this case pins the text it does
+  # read, in both directions.
+  #
+  # It matters because a fallback answer is a different model's judgement presented as the configured
+  # one: the run looks normal, `issues=0` reads as a clean review, and nothing says the model the bundle
+  # was set up for never answered. That is the shape this repository guards against everywhere else - an
+  # inability to check that is indistinguishable from a pass.
+  local d out rc problems=""
+  d="$work/fallback"
+  mkdir -p "$d"
+  ( cd "$d" \
+      && git init -q -b main . \
+      && printf 'a\n' > f.txt \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m init \
+      && printf 'b\n' >> f.txt ) >/dev/null 2>&1
+  git -C "$d" rev-parse --verify -q HEAD >/dev/null 2>&1 || {
+    bad "the summary line says when a fallback model answered" "REQ-HOOK-42" \
+        "a seeded repository" "no commit" \
+        "the case could not build its fixture, so the signal was never exercised"
+    return
+  }
+
+  # One stub per run-details shape, each writing the block pr-agent really emits. The details sit AFTER
+  # the findings' `</table>`, which is what stops a finding that quotes them from firing the marker.
+  # `check <label> <FALLBACK|absent> '<run-details block>'`.
+  check() {
+    local label="$1" want="$2" details="$3" bin
+    bin="$work/fallback-bin/$(printf '%s' "$label" | tr -c 'a-zA-Z0-9' '-')"
+    mkdir -p "$bin"
+    # Written with a QUOTED heredoc so the JSON and the `%s\n` reach the stub intact: building this
+    # through `printf` eats a backslash and the JSON comes out as one line ending in a literal `n`,
+    # which is invalid JSON and silently costs the whole summary line.
+    cat > "$bin/pr-agent" <<'STUB'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+# Drain stdin before writing anything. `preflight` streams the diff into the child, so a stub that exits
+# without reading kills the writing side with SIGPIPE, which the helper reads as a failed model call - this
+# case would then fail, or flake on the timing of the write, for a reason unrelated to the marker it tests.
+cat >/dev/null
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No"},"usage":{"total_tokens":1}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+STUB
+    # The details are appended to the stub's output as a heredoc, so a multi-line block never has to be
+    # quoted through `printf %s`. Written BEFORE the `exit 0` below - appended after it, the shell would
+    # never reach it and every stub would look like a primary-model run.
+    {
+      cat <<'APPEND'
+cat >> "$out" <<'DETAILS' 2>/dev/null || true
+APPEND
+      printf '%s\n' "$details"
+      printf '%s\n' DETAILS 'exit 0'
+    } >> "$bin/pr-agent"
+    chmod +x "$bin/pr-agent"
+
+    rc=0
+    out="$( cd "$d" && rm -rf .preflight && PATH="$bin:$PATH" PREFLIGHT_HOME="$work/fallback-cfg" \
+              bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
+    [ "$rc" = 0 ] || problems="$problems
+        | the run failed (exit $rc) with $label: $out"
+    if [ "$want" = FALLBACK ]; then
+      case "$out" in *"model=FALLBACK"*) ;; *) problems="$problems
+        | $label: the summary line did not say a fallback answered: $out" ;; esac
+    else
+      case "$out" in *"model=FALLBACK"*) problems="$problems
+        | $label: the summary line claimed a fallback when the configured model answered: $out" ;; esac
+    fi
+  }
+
+  # A single model that lost to the fallback, and the plural form pr-agent emits when more than one model
+  # contributed (the chunking path, which marks it `(includes fallback)` instead).
+  check fallback-answered FALLBACK '- Model: openai/cline-pass/glm-5.3-flash (fallback)
+- Tokens: 1 / 2 / 3
+- AI calls: 1'
+  check multi-with-fallback FALLBACK '- Models: a, b (includes fallback)
+- Tokens: 1 / 2 / 3'
+  # The other direction: the configured model answered, so the line must stay quiet. Without these the
+  # marker could fire unconditionally and every assertion above would still pass.
+  check primary-answered absent '- Model: openai/cline-pass/deepseek-v4.1-flash
+- Tokens: 1 / 2 / 3
+- AI calls: 1'
+  check multi-no-fallback absent '- Models: a, b
+- Tokens: 1 / 2 / 3'
+
+  if [ -z "$problems" ]; then ok "the summary line says when a fallback model answered" "REQ-HOOK-42"
+  else bad "the summary line says when a fallback model answered" "REQ-HOOK-42" \
+        "model=FALLBACK when a fallback answered, absent when the configured model did" "see below" "$problems
+"; fi
+}
 
 case_bounded_shutdown() {
   # The post-run hang, without a network or a key: a fake `pr-agent` writes the two artifacts and then
@@ -2454,7 +2720,7 @@ REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK
 insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
 REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31
 REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36 REQ-HOOK-37 REQ-HOOK-38
-REQ-HOOK-39 REQ-HOOK-40 REQ-HOOK-41'
+REQ-HOOK-39 REQ-HOOK-40 REQ-HOOK-41 REQ-HOOK-42 REQ-HOOK-43'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -2582,6 +2848,8 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_coverage_marker_matches_real_footer \
     case_summary_wiring \
     case_verdict_fields \
+    case_fallback_model_signal \
+    case_partial_review_announced_in_commit_scope \
     case_bounded_shutdown \
     case_run_history \
     case_scope_defaults \

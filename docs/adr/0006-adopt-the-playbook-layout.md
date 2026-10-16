@@ -17,7 +17,7 @@ The divergences are not cosmetic, and one of them is the playbook's own central 
   tests, the selfcheck) exist only as inline CI steps and as a prose list in two documents. That is
   precisely the shape the playbook forbids - if CI and the local instructions list the steps separately,
   they drift, and a change passes one and fails the other.
-- **The same fact in two files.** [`../../AGENTS.md`](../../AGENTS.md) and
+- **The same fact in more than one file.** [`../../AGENTS.md`](../../AGENTS.md) and
   [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) each carry the layout table, the ground rules and the
   test commands. Duplicated facts disagree eventually; a reader cannot tell which copy is right.
 - **No decision or incident records.** The reasoning exists - it is scattered through
@@ -31,8 +31,8 @@ The divergences are not cosmetic, and one of them is the playbook's own central 
 
 - **Leave the layout, add only the records.** Costs the convergence problem: two lists of steps keep
   drifting, and the next change has to check both by hand.
-- **Rename to match the playbook exactly.** Buys guessability. Costs churn: `files/` is referenced 141
-  times across 14 files, including a GitHub API URL inside the consumer-facing snippet.
+- **Rename to match the playbook exactly.** Buys guessability. Costs churn - the reference count is in
+  [`../measurements.md`](../measurements.md) - including a GitHub API URL inside the consumer-facing snippet.
 - **A partial rename - keep `files/`, add `scripts/verify` and the docs tree.** Buys the gate and the docs
   with the least churn. Costs one permanent exception to explain: a directory name that no reader guesses
   and that the playbook explicitly warns against (`files` names nothing, like `util` or `helpers`).

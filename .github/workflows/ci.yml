@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Fast checks
         shell: bash
-        run: ./scripts/verify tools syntax install config version gateshapes coverage
+        run: ./scripts/verify fast
 
   hooks:
     name: commit hook (${{ matrix.os }})

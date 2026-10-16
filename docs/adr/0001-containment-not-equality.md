@@ -53,8 +53,8 @@ files and empty commits all behave.
 
 Bad: committing a subset of a reviewed *file*, or a deletion whose removal was not part of the review, is
 refused and needs a re-review. That is deliberate - re-reviewing is the intended way to accept a removal -
-but it is friction on a legitimate act, and it is the cost the other two options were trading against.
+but it is friction on a legitimate act, and it is the cost the other options were trading against.
 
-**What enforces it:** `REQ-HOOK-01`-`09` (the three-way comparison table, both directions), `REQ-HOOK-24`
+**What enforces it:** `REQ-HOOK-01`-`09` (the three-way comparison table, tested in each direction), `REQ-HOOK-24`
 (a deletion whose path git would quote) and `REQ-HOOK-25` (a gitlink removal) in
 [`../../tests/README.md`](../../tests/README.md).

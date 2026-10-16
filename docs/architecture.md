@@ -292,17 +292,23 @@ set. Reviews therefore sample freely - the stated limit of `new=N/M` - and `docs
 | Exit | Meaning |
 |---|---|
 | 0 | pass |
-| 1 | `merge_recommendation = changes_required`, or a key issue on non-documentation |
+| 1 | `merge_recommendation = changes_required` (only when the model was asked for the field - see below), or a key issue on non-documentation |
 | 2 | security concerns present |
 | 3 | no review found |
 
 Findings carry no severity field from the model, so the gate derives a tier from each finding's
 `relevant_file`: a documentation **file type** (`.md`, `.markdown`, `.rst`, `.adoc` by default) is
 **advisory** - printed and tagged, and never fatal on its own, so a doc typo cannot block a commit
-by itself; `merge_recommendation = changes_required` and `security_concerns` still fail - and everything
+by itself; `security_concerns` still fails - and everything
 else, including a finding with no file, is **blocking**. The path is normalised before it is matched
 (real payloads carry a trailing newline in `relevant_file`, and a naive `endswith('.md')` would classify
 those as code).
+
+The merge rule is the one exit the shipped configuration does not exercise: `preflight-gate` reads
+`review.merge_recommendation` and fails on `changes_required` whenever the field is present, but whether
+it is present is pr-agent's `require_merge_recommendation`, which gates the field in the schema the model
+is sent. The bundle leaves that off, so a default install reports `merge=n/a` and the rule cannot fire -
+which is why the summary line prints it as `n/a` rather than as a verdict nobody made.
 
 A finding's tier is always printed, and it is kept consistent with the verdict: with `doc_blocks` a
 promoted finding prints `[blocking]`, and with `allow_issues` a waived one prints `[waived]` and is
@@ -401,8 +407,8 @@ sets `ARTIFACT_PATH`, `ARTIFACT_INSTRUCTIONS` (both first-class env keys) and `A
 (dynaconf's `SECTION__KEY` form), and CI asserts that `[artifacts]` stays OUT of the config file so a
 future edit cannot reintroduce a setting that looks configured and does nothing.
 
-**Two rules.** The file carries *facts* - architecture, accepted trade-offs, known limitations - never
-verdicts: never "do not report X". Suppression is what the tier and the gate's opt-outs are for, and a
+**Facts, not verdicts.** The file carries *facts* - architecture, accepted trade-offs, known limitations -
+never verdicts: never "do not report X". Suppression is what the tier and the gate's opt-outs are for, and a
 context channel that can silence findings is a trust boundary in disguise. And it is read from the
 **working tree**, not the base branch, which is the opposite of what pr-agent and Codacy do with their
 config files; they read from the default branch so a change cannot edit its own reviewer instructions.
@@ -413,6 +419,42 @@ boundary against an untrusted repository.
 **What it does not fix.** Missing facts are only one cause of a wrong finding. A model that misreads
 context it already has - the shell-quoting false positive, where `cat <<'EOF'` was in the diff - is a
 different failure, and no amount of added context addresses it.
+
+## The snippet is adapted, not copied
+
+`AGENTS-review-snippet.md` is not a file to paste verbatim. It is the union of what every consuming
+repository might need, and a repository that has already installed the bundle needs less than that: the
+installation recipe, the hook-adoption recipe and the upgrade instructions are all worth exactly nothing
+once they have been run once, while every line that stays is read by an agent on the next change. A
+consuming agent that dropped the install instructions rather than pasting them was reading the file
+correctly.
+
+So each section carries a class - **required** or **setup** - and the class is what decides whether it
+survives. The split is not cosmetic: it exists because the alternative is a file that grows monotonically
+in every repository that adopts it, and because "which of these facts is load-bearing" was previously left
+to whoever happened to be pasting.
+
+Boundaries make the classification safe rather than merely permitted:
+
+- **`required` means the loop is not correct without it**, and those facts are to be kept as written. A
+  paraphrase of a fact about the installed helper is a fact that drifts from the helper - the same failure
+  the one-fact-one-file rule exists to prevent, applied to prose the bundle does not control.
+- **The hook's *behaviour* is required even where its *recipe* is setup.** Adopting `.githooks/` is a
+  one-time step, but what the hook does when it blocks - containment, not equality; content, not time; a
+  deletion blocked until a review covers it - is what makes a refusal explicable to whoever hits it, and
+  it cannot be recovered from the recipe above it. The same holds for `core.hooksPath`: it is local config,
+  so a clone does not inherit it, and a repository that dropped the step without replacing it enforces
+  nothing while still looking installed.
+
+Round economy is required for the same reason, and it is the one that looks like advice. The habits in
+that section are what keep the loop's round count down, and the round count is the loop's whole cost: a
+repository that dropped them keeps a correct-but-slow loop, which is the failure the completeness work
+exists to prevent. Process guidance that pays for itself in rounds is not optional material.
+
+`scripts/verify`'s `snippet` stage enforces that the section list and the classification table agree: a
+section added without a row, a row naming a heading that no longer exists, or a table that classifies
+everything the same way each fail the gate. The table is the whole interface, so a section it does not
+mention is a section with no instruction.
 
 ## Making one review report everything (why the loop converges)
 
@@ -435,13 +477,22 @@ at a time.
 
 **The model was shown only part of the diff.** This is the half `num_max_findings` cannot fix: raising a
 cap on *returned* findings does nothing if the diff itself was pruned before the call. When a diff exceeds
-the token budget, pr-agent's default is to prune files and review the first patch, so a "complete" review
-covers a slice of the tree - and a later run, against different content, surfaces findings that were there
-all along. `config/preflight.toml.example` therefore sets `enable_large_pr_chunking = true` (`max_number_of_calls = 3`),
-which splits an oversized diff, reviews up to `max_number_of_calls` chunks, and *unions* the per-chunk findings into one review
-(the merge rules live in pr-agent's `algo/review_merge.py`). It is inert unless the budget actually leaves
-files out, so an ordinary diff still costs exactly one AI call; only a genuinely oversized change pays for
-extra calls, and it pays them to avoid an unbounded fix/re-review loop.
+the token budget, pr-agent prunes files and reviews the first patch, so a "complete" review covers a slice
+of the tree - and a later run, against different content, surfaces findings that were there all along.
+
+This bundle does **not** compensate by chunking. `pr_reviewer.enable_large_pr_chunking` would split the
+diff, review each chunk within `max_number_of_calls`, and merge the per-chunk results
+(`algo/review_merge.py` upstream) - but it is left off deliberately, so an over-budget diff costs exactly
+the one AI call an ordinary diff costs and the pruning is **reported** instead of hidden. That report is
+the mechanism: pr-agent appends a coverage footer whenever `remaining_files_list` is non-empty, and this is
+independent of chunking (verified against v0.47.0's `pr_reviewer.py`, which emits the footer after the
+chunked branch), so the footer arrives whether or not the diff was split.
+
+The other fields the bundle leaves off are in the same family, because asking for a field changes the
+schema the model is sent. `require_merge_recommendation` gates `merge_recommendation` in pr-agent's reviewer
+prompt, so `preflight-gate`'s `FAIL merge_recommendation=changes_required` rule has nothing to read while it
+is off - the gate's `merge=` field reports `n/a`. What the gate decides on regardless is `security_concerns`,
+the key-issue count and effort.
 
 Whatever is left uncovered after that is reported rather than hidden. pr-agent appends a coverage footer
 to `review.md`, and `preflight` repeats it on the summary line as `coverage=PARTIAL ...`. That line exists
@@ -449,6 +500,12 @@ because the summary is what an agent actually reads: `issues=1` on a partial rev
 were not looked at", not "the change is nearly clean". Silent partial coverage is the failure this whole
 section guards against - the same shape as the base-resolution and gate failures above, where an
 inability to check was indistinguishable from a pass.
+
+The marker is reported in **every** scope. It was once gated on the branch scopes, on the reasoning that a
+pending-commit diff is far below the token budget - true of ordinary changes, and false of a large one (a
+generated or untracked file before the first commit). Since the bundle does not chunk, pruning is what
+pr-agent does to an over-budget diff, so a commit-scope review of a slice printed a clean summary line with
+nothing else saying the rest was never read. `REQ-HOOK-43` drives that path through the real helper.
 
 Detecting that footer is harder than it looks, because the file being searched is model-generated prose
 that may legitimately *discuss* coverage - and a review of this very feature did exactly that. Text
@@ -481,7 +538,38 @@ the near-miss shapes that must not fire, and `tests/run.sh` `REQ-HOOK-28` re-che
 table assumption is exercised against real output.
 
 The real budget lever is `config.max_model_tokens` / `custom_model_max_tokens`: raise those and the whole
-diff fits in a single call. Chunking is the fallback for when it does not.
+diff fits in a single call. The bundle does not chunk the diff to reach that; see the section on the
+output cap below for what it does instead.
+
+## Which model answered, and the output cap that decides it
+
+`config.model` is not necessarily the model that answered. pr-agent tries `config.model` first and only
+then each entry in `fallback_models`, recording the winner in the run details - and the run details reach
+`review.md` as prose, not as a field in `review.json` (v0.47.0's plain-diff JSON carries only `review` and
+`usage`). So the bundle reads the line pr-agent writes and repeats it on the summary line:
+
+```
+preflight: issues=0 security=No risk=n/a merge=n/a effort=3 tokens=84055 model=FALLBACK (the configured model did not answer - see review.md)
+```
+
+This exists because the failure it reports is invisible in every other way. A review produced by the
+fallback model looks exactly like a review produced by the configured one - `issues=0` reads as clean, the
+gate passes, and nothing in the artifacts says the model this install was set up for never answered. That
+is the same shape the rest of this bundle guards against: an inability to check that is indistinguishable
+from a pass. It is reported rather than fatal because a fallback answer is still a review; the reader needs
+to know what produced it, not to be blocked.
+
+**Why the fallback engages at all: the output cap.** `max_output_tokens` unset means the *endpoint* chooses
+the ceiling, and an endpoint that picks a low one creates a failure that looks like nothing: a reasoning
+model spends the whole allowance thinking and returns truncated YAML, which does not parse, which pr-agent
+treats as a failed attempt and hands to `fallback_models`. The bundle therefore sets `config.max_output_tokens`
+explicitly - the measured values and the method are in [`docs/measurements.md`](measurements.md), not
+repeated here. This is also why the key is asserted in the `config` stage: dropping it silently restores
+the endpoint's ceiling, and the only visible symptom is that the configured model stops answering.
+
+Note the interaction with the budget above: the output cap is *reserved* from `max_model_tokens` when the
+diff is fitted, so the cap and the window have to leave room for the diff between them. Setting the cap equal to the
+window would prune the diff, which is the failure the budget section exists to prevent.
 
 ## Why the loop converges: new findings, not a clean review
 
@@ -513,7 +601,7 @@ also pins temperature to 0) is the lever if that instability ever needs removing
 deliberately, because pinning can cost finding coverage, and shrinking what the loop finds is the worse
 failure when the judgement step already exists to handle a repeat.
 
-`new=0` is the stopping signal: **judge, do not re-fix**. Each finding is one of three things, and only
+`new=0` is the stopping signal: **judge, do not re-fix**. Each finding is one of these, and only
 the first is work:
 
 | The finding is | What to do |
@@ -535,7 +623,7 @@ gets less from it, which is why the identity key is the reviewer's own rather th
 invented.
 
 A related hazard, and the reason the loop must not be driven blindly: `preflight review` has been observed
-completing a review and writing both artifacts, then **never exiting** because pr-agent's post-run
+completing a review and writing its artifacts, then **never exiting** because pr-agent's post-run
 callback drain blocked on a stalled socket. The artifacts are complete and correct - only the exit hangs -
 so a scripted loop that waits for the process would stall forever.
 
@@ -546,7 +634,7 @@ cannot hide `issues=`/`new=`/`coverage=`, which is the signal the loop stops on.
 it expires the helper says so, stops the process, and still succeeds, because the review is complete and
 `preflight-gate` is what decides the verdict.
 
-Three boundaries are deliberate and each replaces a specific wrong answer:
+Boundaries are deliberate here, and each replaces a specific wrong answer:
 
 - **Both phases are bounded, and neither bound is short.** Phase 1 (`PREFLIGHT_REVIEW_WAIT`, default
   3600s) covers the review itself; phase 2 (`PREFLIGHT_SHUTDOWN_WAIT`, default 120s) covers only the tail
@@ -555,7 +643,7 @@ Three boundaries are deliberate and each replaces a specific wrong answer:
   backstop against a hang, not a performance target, and a timeout that cut off a slow but valid review
   would be the silent-truncation failure this project avoids everywhere else.
 - **A stopped hang is not a failed review - but only if it produced one.** When this code stops a process
-  that had already written both artifacts, the killed status (143/137) is normalised to success and the
+  that had already written its artifacts, the killed status (143/137) is normalised to success and the
   sidecar is still recorded, because `preflight-gate` grades the artifact and propagating the status would
   turn a cosmetic exit problem into a blocked commit. A run stopped *without* an artifact keeps its
   non-zero status, so a caller's loop cannot read a missing review as a pass. Any status other than this

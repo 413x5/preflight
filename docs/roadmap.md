@@ -71,15 +71,17 @@ Wanted; needs design, or an experiment to settle. Two groups:
 
       **What we now know sits against it:** pr-agent's FAQ recommends the **default configuration** for
       reducing noise, and names score thresholds and `extra_instructions` as the levers to *add* when
-      feedback is too noisy. `num_max_findings = 20` (4x the default) and our `extra_instructions` were
-      those two levers applied in the wrong direction, so the cascade was not only sampling variance -
-      two noise knobs were deliberately turned up.
+      feedback is too noisy. Our `extra_instructions` was one of those levers applied in the wrong
+      direction, so the cascade was not only sampling variance - a noise knob was deliberately turned up.
+      The finding cap is the other half of that trade-off: it is raised well above upstream's default,
+      which is what the cap is for, but it is also a lever in the noise direction. Its shipped value is in
+      [`config/preflight.toml.example`](../config/preflight.toml.example) rather than repeated here.
 
 ### Open questions on shipped work
 
 - [x] **Make the post-run hang survivable, and stop it hiding the counts.** `preflight review` writes
-      both artifacts and then sometimes never exits (4-13 minutes, in two shapes - sleeping in `kevent`,
-      spinning in the asyncio loop), because pr-agent's post-run callback drain blocks after the review is
+      its artifacts and then sometimes never exits (sleeping in `kevent`, or spinning in the asyncio
+      loop), because pr-agent's post-run callback drain blocks after the review is
       finished. The helper now reads the summary from `review.json` *before* waiting, so a hang cannot hide
       `issues=`/`new=`/`coverage=`, and it stops a process that has not exited `PREFLIGHT_SHUTDOWN_WAIT`
       seconds (default 120) after writing the artifact - reporting it, succeeding anyway, and still
@@ -112,7 +114,8 @@ Wanted; needs design, or an experiment to settle. Two groups:
       pin it again: measure on a real branch diff, interleaved, against `new=N/M` as well as wall clock
       (a cheaper round that reports fewer findings just moves the cost to a later round).
 
-      **Still open:** whether `num_max_findings = 20` invites padding, and `[config] seed` (unset), which
+      **Still open:** whether the raised `num_max_findings` invites padding (its shipped value is in
+      [`config/preflight.toml.example`](../config/preflight.toml.example)), and `[config] seed` (unset), which
       would pin sampling and stabilise `new=N/M` at the cost of whatever coverage pinning removes.
 - [x] **Make pending-commit review the default (the `commit` scope).** Changed the default so
       `preflight review` covers the pending commit - HEAD to the working tree, untracked files included -
@@ -125,8 +128,8 @@ Wanted; needs design, or an experiment to settle. Two groups:
       review pass, at the maintainer's direction.
 
 - [x] **Surface `risk_level` / `merge_recommendation` in `preflight`'s summary line.** The summary carried
-      only the two counts the gate fails on (issues, security), so `preflight review` could report a change
-      the gate then refused, discoverable only by running a second command. Both fields are now on the line
+      only the counts the gate fails on (issues, security), so `preflight review` could report a change
+      the gate then refused, discoverable only by running a second command. Those fields are now on the line
       and degrade to `n/a` when absent. `REQ-HOOK-35` asserts both, and that an omitted field does not
       print an empty or `None` value.
 - [x] **Make the hook recipe mode-safe.** Found by reviewing this repo with the tool: `git` ignores a
@@ -136,24 +139,27 @@ Wanted; needs design, or an experiment to settle. Two groups:
 - [x] **Assert the convergence signal on a real run.** The roadmap called for adding `new=` to the live
       `case_e2e_real_review`. That would have cost a *second* keyed model call (a `new=` count needs a
       previous review, and `reset_case` wipes `.preflight`) and still would not run in CI. Instead
-      `REQ-HOOK-34` drives the real helper twice against a stub `pr-agent` that writes both artifacts - the
+      `REQ-HOOK-34` drives the real helper twice against a stub `pr-agent` that writes its artifacts - the
       pattern `REQ-HOOK-32` established. That closes a wiring gap `REQ-HOOK-31` cannot see (it runs the
       counting block standalone, so `emit_summary` never being called would pass it), costs no tokens, and
       runs on every PR.
 - [ ] **One review packet.** Optionally run `preflight review` + `preflight improve` together so a
       coding agent gets the findings *and* concrete suggested diffs in a single round (fewer
-      iterations). The single-review completeness work (chunking, the coverage line) is
+      iterations). The single-review completeness work (the finding cap, the coverage line) is
       done; this is the remaining half - not yet a second report per round.
 - [ ] **`risk_level` is reported but never enforced - decide what it is for.** The gate reads it only to
       print it; the verdict comes from effort/security/`merge_recommendation`/issues. Measured over four
       consecutive reviews of this repo it was `low, low, medium, low` on similar finding counts, while
       `merge_recommendation` never moved off `merge_with_caution` - so it is unstable and does not track
       findings (`risk=low` with two key issues was observed). **Two further reviews (the pin/README
-      change) reported `risk=n/a` outright**, so on this model the field is not merely unstable but
-      sometimes absent - which the `n/a` fallback on the summary line correctly surfaces rather than
-      printing an empty value. That makes gating on it worse than the original concern suggests: enforcement
-      would rest on a field the model may omit. Making it a gate input (e.g. "block only above low risk")
-      would tie enforcement to the flakiest field; the safer shape is an explicit, deterministic policy such
+      change) reported `risk=n/a` outright** - and that later observation is explained by configuration
+      rather than by the model: `require_risk_assessment` is unset, so `risk_level` is not in the schema the
+      model is asked for and the summary line's `n/a` fallback is reporting its absence correctly. The
+      instability above was measured while the key was still set, which is why it was removed.
+
+      **So the question is what to do with a field the bundle does not request**: the gate could not gate on
+      it as things stand, and re-enabling it just to measure again would add back output nothing acts on -
+      the same shape of waste that removed it. The safer shape is an explicit, deterministic policy such
       as `block_on = security,changes_required,issues`, or the existing `PREFLIGHT_GATE_ALLOW_ISSUES=1`
       opt-out. Not yet decided.
 - [ ] **`preflight --since <ref>`** for a pseudo-incremental review - plain-diff mode has no true
@@ -174,9 +180,10 @@ items bear directly on the convergence problem, and one contradicts a choice thi
   large diff - is a structured-output failure at input size. This is the single most relevant line
   upstream ships.
 - **Noise.** The FAQ recommends the **default configuration** for reducing noise, and lists score
-  thresholds and `extra_instructions` as the levers to *add* when feedback is too noisy. This bundle had
-  raised `num_max_findings` 4x above default and added our own `extra_instructions`, i.e. two noise
-  levers turned up - relevant context for the cascade.
+  thresholds and `extra_instructions` as the levers to *add* when feedback is too noisy. This bundle
+  raised the finding cap well above default and added our own `extra_instructions` - noise levers turned
+  up, relevant context for the cascade. Its value is in
+  [`config/preflight.toml.example`](../config/preflight.toml.example), not repeated here.
 - **`reasoning_effort`.** Forwarded only to a model litellm's metadata calls reasoning-capable; add the ID
   to `config.additional_reasoning_effort_models` otherwise, and adding it "surfaces that provider-side
   error instead of the previous silent drop".

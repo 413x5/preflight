@@ -519,8 +519,7 @@ emit_summary() {
   [ -z "${summary_printed:-}" ] || return 0
   [ -f "$out_json" ] || return 0
   local rc=0
-  if [ "$scope" = 'commit' ]; then coverage_scope='0'; else coverage_scope='1'; fi
-  PREFLIGHT_PREV_JSON="$prev_json" PREFLIGHT_SCOPE_IS_BRANCH="$coverage_scope" \
+  PREFLIGHT_PREV_JSON="$prev_json" \
     PREFLIGHT_CONTEXT_NOTE="$context_note" \
     python3 - "$out_json" "$out_md" <<'PY' >&2 2>/dev/null || rc=$?
 import json, os, re, sys
@@ -585,6 +584,14 @@ COVERAGE_RE = re.compile(
     r"<hr>\s*\n\s*[^\n]*\*\*Review coverage:\*\*\s*The following files were not included in this "
     r"review because of the token budget:\s*\n\s*-\s*`",
     re.S)
+# Whether the CONFIGURED model answered, or a fallback did. pr-agent tries `config.model` and only then
+# `fallback_models`, recording the winner in run details - which reach the review as prose, NOT as a
+# field in review.json (checked against v0.47.0: the JSON carries only `review` and `usage`). So this is
+# read from review.md, and the line it reads is the one pr-agent writes for every review, not a shape
+# invented here. It matters because a fallback answer is a different model's judgement presented as the
+# configured one - a run that looked at home in the bundle's own output while the model it was set up
+# for never answered.
+FALLBACK_RE = re.compile(r"^- Models?: .*\((?:includes fallback|fallback)\)", re.M)
 try:
     # errors='replace', not a bare read: a non-UTF-8 review.md would raise UnicodeDecodeError - a
     # ValueError, not an OSError, so the except below would not catch it - and the outer `|| true` would
@@ -598,10 +605,20 @@ except OSError:
 # `</table>` the whole file is searched. This is an AID pointing at the authoritative footer in
 # review.md, not a guarantee.
 tail = md[md.rfind('</table>') + len('</table>'):] if '</table>' in md else md
-# Only the branch scopes can hit this: a pending-commit diff is far below the token budget, so pr-agent
-# never prunes it and there is nothing to announce.
-if os.environ.get('PREFLIGHT_SCOPE_IS_BRANCH') == '1' and COVERAGE_RE.search(tail):
+# Reported for EVERY scope, not only the branch ones. It was once gated on the branch scopes, on the
+# reasoning that a pending-commit diff is far below the token budget - which holds for ordinary changes and
+# fails for a large one (a multi-megabyte generated or untracked file before the first commit). Since the
+# bundle does not chunk, pruning is what pr-agent does to an over-budget diff, so the marker is the only
+# thing that says a commit-scope review covered a slice. Suppressing it there would hide exactly the
+# partial review the marker exists to announce.
+if COVERAGE_RE.search(tail):
     line += " coverage=PARTIAL (token budget left files out - see review.md)"
+# A fallback model answering is not the same review as the configured one answering, and nothing else on
+# this line says which happened - `context=` tells an agent the repository facts reached the model, so
+# which model is not a detail it can assume. Read from the post-table tail for the same reason as coverage:
+# findings render inside the table, so a finding that quotes the run-details block cannot fire this.
+if FALLBACK_RE.search(tail):
+    line += " model=FALLBACK (the configured model did not answer - see review.md)"
 
 # How many findings are NEW since the previous review. Identity is (file, header, content) per
 # pr-agent's own dedupe key, so a different issue in the same file still counts as new. temperature and

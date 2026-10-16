@@ -115,11 +115,13 @@ target something else (a release branch, a fork's trunk); if nothing resolves, `
 rather than guessing a ref that does not exist.
 
 One review is meant to report **everything** it was shown, so the loop converges instead of re-discovering
-one issue at a time. That takes settings in `config/preflight.toml.example`: `num_max_findings` governs what the
-model *reports*, and `enable_large_pr_chunking` governs whether it was shown the whole diff at all - without
-it an oversized diff is pruned to a slice of the tree, and each round "discovers" more. If
-anything still could not be covered, the summary line contains `coverage=PARTIAL` and `review.md` names the
-omitted files; treat that as "there may be more here", not as a clean review.
+one issue at a time. `num_max_findings` in `config/preflight.toml.example` governs what the model *reports*,
+and that file lists every `[pr_reviewer]` knob pr-agent accepts - the bundle's own settings live and the rest
+commented at upstream's value - so the levers are visible without reading pr-agent's source.
+What that setting cannot do is change what the model was *shown*: when a diff exceeds the token budget
+pr-agent reviews it minus the files it pruned, so if anything could not be covered the summary line contains
+`coverage=PARTIAL` and `review.md` names the omitted files. Treat that as "there may be more here", not as a
+clean review, and raise the token budget rather than round-tripping until the files happen to come into view.
 
 Reporting everything is not the same as converging, though: a reviewer cannot tell a deliberate,
 documented trade-off from an oversight, and each round reviews the text the previous round wrote. The
@@ -131,8 +133,11 @@ not the same as unresolved. Full detail in
 ## Teach your coding agents
 
 Paste `AGENTS-review-snippet.md` into the repo's `AGENTS.md` so every agent follows the loop: review → fix all
-findings in one pass → re-review → commit once when the gate is green. The snippet also points at this repo, so
-an agent can look up current guidance as the bundle evolves.
+findings in one pass → re-review → commit once when the gate is green. **Adapt it rather than copying it
+whole** - every section is classified `required` or `setup`, and the `setup` parts (the install and
+hook-adoption recipes) are worth nothing once they have been run. Keep the `required` facts as written,
+because a paraphrase of a fact about the installed helper is a fact that drifts from it. The snippet also
+points at this repo, so an agent can look up current guidance as the bundle evolves.
 
 ## Make it enforced (recommended)
 

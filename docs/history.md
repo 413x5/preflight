@@ -68,9 +68,9 @@ completion tokens, 60-68% of each run's total. The synthetic number had never be
 content, and the pin was removed rather than weakened.
 
 What replaced it is an honest statement of the mechanism instead of a value: pr-agent forwards
-`reasoning_effort` **only** to a model its bundled litellm metadata calls reasoning-capable, `cline-pass/*`
-is not in that table, and the bundle sets neither key - so no effort reaches this endpoint at all, not even
-pr-agent's own `medium` default. A probe of the constructed request confirmed it: adding `reasoning_effort`
+`reasoning_effort` **only** to a model its bundled litellm metadata calls reasoning-capable, the model ids
+in use were not in that table, and the bundle sets neither key - so no effort reached the endpoint at all,
+not even pr-agent's own `medium` default. A probe of the constructed request confirmed it: adding `reasoning_effort`
 produced a byte-identical payload.
 
 The measuring standard got sharper in the process. A reasoning-budget experiment must run **on a real

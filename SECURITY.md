@@ -32,11 +32,24 @@ That framing decides what counts as a vulnerability here, so it is stated plainl
 
 ## Secrets
 
-- The API key lives in `~/.config/preflight/.secrets.toml`, `chmod 600`, and is **never** placed in the
-  shell environment. The repository's configuration layering is the interface for it.
-- Only `config/secrets.toml.example` - with an empty key - is committed. A real key is never committed,
-  including in a fixture, a test, a doc or a commit message.
+- The API key lives in `~/.config/preflight/providers.toml`, `chmod 600`, and is **never** placed in the
+  shell environment. It reaches pr-agent only through the rendered config, which is 600-mode and outside the
+  repository: one file per run, deleted by the run that wrote it.
+- Only the `config/*.toml.example` templates are committed - settings has no credential field, and the
+  providers example carries placeholders, never a real key.
+  A real key is never committed, including in a fixture, a test, a doc or a commit message.
 - If you do find a key committed, treat it as compromised: rotate it first, then report.
+- **The key is never passed to a command, and `install.sh` never takes one.** It is typed into
+  `providers.toml` by the operator, in a file created 600-mode from the moment it exists. It is then read
+  by the renderer and written into a per-run file, `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`, which is
+  600-mode. Two runs never share one, so concurrent runs cannot read each other's credential; each run
+  removes its own on exit, and a copy of the last is kept at `.pragent.settings.toml` for inspection. The
+  default config dir is outside any repository; a config dir
+  inside one is accepted only when the directory itself is gitignored there, because the
+  review's `git add -A` snapshot would otherwise hand the key to the model - including from a backup or an
+  editor copy, which is why the check is the directory and not a list of file names. The renderer refuses
+  that layout and names the unignored files, and the resolver also refuses a key in any shadowed or
+  derived position.
 
 ## Outbound traffic
 

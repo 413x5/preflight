@@ -1,4 +1,13 @@
 .DS_Store
 *.swp
-# never commit a real secrets file (the bundle ships only config/secrets.toml.example)
-.secrets.toml
+# never commit a real model or provider configuration: providers.toml holds an API key, and both are
+# per-machine. The bundle ships only the .example templates. Explicit paths, not a bare `*.toml`, so a
+# future committed .toml under config/ is not silently ignored.
+config/settings.toml
+config/providers.toml
+# The rendered config preflight hands pr-agent: one per run (`.pragent.settings.<pid>.toml`), plus the
+# copy of the last one kept for inspection (`.pragent.settings.toml`). Both live in $PREFLIGHT_HOME,
+# outside any repository - this rule covers the one case either can appear in a checkout: PREFLIGHT_HOME
+# pointed at the repo's own config dir.
+config/.pragent.settings.*.toml
+config/.pragent.settings.toml

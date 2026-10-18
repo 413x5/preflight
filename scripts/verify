@@ -19,11 +19,11 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$here" || exit 1
 
-STAGES="tools syntax install config version gateshapes coverage snippet hooktests selfcheck"
+STAGES="tools syntax install config models envhelp version gateshapes coverage snippet hooktests selfcheck"
 # A group CI can ask for by NAME, so the workflow does not re-list stages: a stage added above is then
 # picked up by CI automatically instead of appearing locally and never running there. The split is by cost
 # - these need no pr-agent and no network - and `GROUP_fast` is checked against STAGES below.
-GROUP_fast="tools syntax install config version gateshapes coverage snippet"
+GROUP_fast="tools syntax install config models envhelp version gateshapes coverage snippet"
 for s in $GROUP_fast; do
   case " $STAGES " in
     *" $s "*) ;;
@@ -48,6 +48,10 @@ Stages, cheapest first:
   install      install.sh deploys into a throwaway prefix and is idempotent
   config       the generated config and the gate template parse, and the
                completeness keys are set and the keys left off are absent
+  models       the model and provider templates are inert, the renderer derives
+               the endpoint, the key and the pin together, and it refuses a
+               chain that spans two providers
+  envhelp      every PREFLIGHT_* the helper reads is documented, and no others
   version      src/VERSION, the CHANGELOG heading and --version agree
   gateshapes   preflight-gate survives the JSON shapes the model really produces
   coverage     the coverage marker matches pr-agent's footer and ignores prose
@@ -133,7 +137,7 @@ stage_syntax() {
   # invisible. The hooks and the tests are POSIX sh - they may run where only sh exists.
   local rc=0 f
   for f in install.sh uninstall.sh \
-           src/preflight src/preflight-pr src/preflight-gate scripts/ensure-link.sh scripts/verify scripts/release
+           src/preflight src/preflight-pr src/preflight-gate scripts/verify scripts/release scripts/settings-render.sh
   do
     bash -n "$f" || { echo "bash syntax: FAIL $f" >&2; rc=1; }
   done
@@ -151,24 +155,89 @@ stage_install() {
   # Exercises install.sh end to end without uv, the network or the real ~/.config. This is also the
   # regression test for the installer itself, which otherwise has no coverage.
   PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" \
-  PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 \
+  PREFLIGHT_SKIP_TOOL_INSTALL=1 \
     ./install.sh || rc=1
   local f
   for f in preflight preflight-pr preflight-gate; do
     [ -x "$tmp/bin/$f" ] || { echo "installer did not install $f" >&2; rc=1; }
   done
-  for f in preflight.toml preflight-hook ensure-link.sh VERSION; do
+  for f in preflight-hook VERSION settings-render.sh settings.toml.example providers.toml.example; do
     [ -f "$tmp/cfg/$f" ] || { echo "installer did not write $f" >&2; rc=1; }
   done
+  # The real config is the USER'S: install.sh knows no endpoint, model or budget, so it must not invent
+  # one. A created settings.toml would send the first review to a guessed host.
+  for f in settings.toml providers.toml; do
+    [ -e "$tmp/cfg/$f" ] && { echo "installer created $f; the configuration is the user's to create" >&2; rc=1; }
+  done
+  # The templates carry a credential location, so neither may be group- or world-readable on install.
+  [ "$(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$tmp/cfg/providers.toml.example")" = "0o600" ] \
+    || { echo "installer wrote providers.toml.example with the wrong mode (want 600)" >&2; rc=1; }
   [ -x "$tmp/cfg/preflight-hook" ] || { echo "preflight-hook is not executable" >&2; rc=1; }
   for f in pre-commit post-commit; do
     [ -x "$tmp/cfg/githooks/$f" ] || { echo "githooks/$f missing" >&2; rc=1; }
   done
-  # install.sh must never clobber an existing secrets file.
-  echo 'key      = "sentinel"' > "$tmp/cfg/.secrets.toml"
+  # A configured install must survive a reinstall untouched: both files the user created are theirs, and
+  # neither may be overwritten by the example of the same name.
+  printf '[selection]\nmain = "sentinel"\n' > "$tmp/cfg/settings.toml"
+  printf '# sentinel-providers\n' > "$tmp/cfg/providers.toml"
+  chmod 600 "$tmp/cfg/providers.toml"
   PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" \
-  PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 ./install.sh >/dev/null || rc=1
-  grep -q sentinel "$tmp/cfg/.secrets.toml" || { echo "installer clobbered .secrets.toml" >&2; rc=1; }
+  PREFLIGHT_SKIP_TOOL_INSTALL=1 ./install.sh >/dev/null || rc=1
+  grep -q sentinel-providers "$tmp/cfg/providers.toml" || { echo "installer clobbered providers.toml" >&2; rc=1; }
+  grep -q sentinel "$tmp/cfg/settings.toml" || { echo "installer clobbered settings.toml" >&2; rc=1; }
+  # An existing providers.toml must not KEEP AN UNSAFE MODE: a file restored from a backup or copied by
+  # hand is exactly when the key is world-readable, and it cannot be clobbered to fix it.
+  chmod 644 "$tmp/cfg/providers.toml"
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" \
+  PREFLIGHT_SKIP_TOOL_INSTALL=1 ./install.sh >/dev/null 2>&1 || rc=1
+  [ "$(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$tmp/cfg/providers.toml")" = "0o600" ] \
+    || { echo "installer left an existing providers.toml world-readable" >&2; rc=1; }
+  grep -q sentinel-providers "$tmp/cfg/providers.toml" \
+    || { echo "the mode fix rewrote providers.toml instead of chmod-ing it" >&2; rc=1; }
+  # The other direction: a mode the operator made STRICTER must be left alone. Without this, a check that
+  # merely chmods 600 unconditionally passes the assertion above.
+  chmod 400 "$tmp/cfg/providers.toml"
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" \
+  PREFLIGHT_SKIP_TOOL_INSTALL=1 ./install.sh >/dev/null 2>&1 || rc=1
+  [ "$(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$tmp/cfg/providers.toml")" = "0o400" ] \
+    || { echo "installer widened a providers.toml the operator had made stricter" >&2; rc=1; }
+  # A pre-0.6 install kept its config in the SAME directory under two other names, so the old-directory
+  # warning cannot fire for it: without this, an upgrading user is told nothing while the run refuses.
+  printf 'x\n' > "$tmp/cfg/preflight.toml"
+  printf 'y\n' > "$tmp/cfg/.secrets.toml"
+  # Captured to a file rather than piped: `say` writes to stderr, and a pipeline would hide whether the
+  # warning came from this run or from anything else.
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+    ./install.sh >"$tmp/mig.out" 2>&1 || rc=1
+  grep -q 'no longer read' "$tmp/mig.out" \
+    || { echo "installer does not warn about a pre-0.6 preflight.toml/.secrets.toml" >&2; rc=1; }
+  rm -f "$tmp/cfg/preflight.toml" "$tmp/cfg/.secrets.toml"
+  # A half-configured dir is a real state, and the NEXT block must offer only the copy that applies: told
+  # to copy the empty-key template over a keyed providers.toml, an operator destroys the credential and
+  # has to type it again. Both directions, because a block that prints NEITHER copy passes the first.
+  rm -f "$tmp/cfg/settings.toml" "$tmp/cfg/providers.toml"
+  printf '# sentinel-key\n' > "$tmp/cfg/providers.toml"
+  chmod 600 "$tmp/cfg/providers.toml"
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+    ./install.sh >"$tmp/half.out" 2>&1 || rc=1
+  grep -q 'cp .*settings.toml.example' "$tmp/half.out" \
+    || { echo "installer does not name the settings.toml copy when only that file is absent" >&2; rc=1; }
+  grep -q 'cp .*providers.toml.example' "$tmp/half.out" \
+    && { echo "installer tells a half-configured user to copy providers.toml.example over their keyed providers.toml" >&2; rc=1; }
+  grep -q sentinel-key "$tmp/cfg/providers.toml" \
+    || { echo "installer rewrote providers.toml while printing the NEXT step" >&2; rc=1; }
+  # The mirror state: a configured settings.toml must not be told to copy the template over itself.
+  cp "$tmp/cfg/settings.toml.example" "$tmp/cfg/settings.toml"
+  rm -f "$tmp/cfg/providers.toml"
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+    ./install.sh >"$tmp/half2.out" 2>&1 || rc=1
+  grep -q 'cp .*providers.toml.example' "$tmp/half2.out" \
+    || { echo "installer does not name the providers.toml copy when only that file is absent" >&2; rc=1; }
+  grep -q 'cp .*settings.toml.example' "$tmp/half2.out" \
+    && { echo "installer tells a configured user to copy settings.toml.example over their settings.toml" >&2; rc=1; }
+  rm -f "$tmp/cfg/settings.toml" "$tmp/cfg/providers.toml"
+
+
   # The pr-agent pin is load-bearing: `preflight` matches the exact wording of pr-agent's own coverage
   # footer, so an unpinned install can silently stop reporting coverage=PARTIAL. Anchor on the
   # `uv tool install` COMMAND at line start - the pin string also appears in the `say` echo above it, so
@@ -186,69 +255,73 @@ stage_config() {
   local tmp rc=0
   tmp="$(mktemp -d)" || return 1
   PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" \
-  PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 ./install.sh >/dev/null || rc=1
-  python3 - "$tmp/cfg/preflight.toml" <<'PY' || rc=1
-import sys, tomllib
-d = tomllib.load(open(sys.argv[1], "rb"))
-cfg = d["config"]
-assert cfg["model"], "no model configured"
-assert cfg["fallback_models"], "no fallback model configured"
-assert d["litellm"]["force_streaming_api_base_substrings"], "no streaming host configured"
-# The completeness key that stays set, asserted here so it cannot be dropped silently: a regression
-# shows up as a loop that will not converge rather than as a failing build. `num_max_findings` is how
-# many findings one review may RETURN.
-rv = d["pr_reviewer"]
+  PREFLIGHT_SKIP_TOOL_INSTALL=1 ./install.sh >/dev/null || rc=1
+  # The configuration is the USER'S to create, so this stage does what the install's NEXT step tells them
+  # to do: copy the installed examples into place. Asserting on the examples directly would skip the step
+  # a real user takes and could pass on a pair that cannot be created this way.
+  cp "$tmp/cfg/settings.toml.example" "$tmp/cfg/settings.toml"
+  ( umask 077; cp "$tmp/cfg/providers.toml.example" "$tmp/cfg/providers.toml" )
+  # The assertions are the same promises as before, moved to where the values now live: the completeness
+  # keys must be SET (a regression shows up as a loop that will not converge, not as a failing build) and
+  # the deliberately-omitted ones must be ABSENT (so none returns without a decision).
+  python3 - "$tmp/cfg/settings.toml" "$tmp/cfg/providers.toml" <<'PY' || rc=1
+import subprocess, sys, tomllib
+settings = tomllib.load(open(sys.argv[1], "rb"))
+providers = tomllib.load(open(sys.argv[2], "rb"))
+
+sel = settings.get("selection") or {}
+assert sel.get("main"), "no profile assigned in [selection]"
+cfg, rv = settings["config"], settings["pr_reviewer"]
+
+# The token budgets are a MODEL property, so they live on the profile - and a budget in [config] would be
+# silently overwritten by the assigned profile, which is why its absence there is asserted too.
+prof_cfg = providers["profiles"][sel["main"]].get("config") or {}
+# The output cap: unset, the endpoint's own ceiling applied and a reasoning model spent it all thinking,
+# returning truncated YAML - so the run silently fell through to the fallback while looking normal.
+assert prof_cfg.get("max_output_tokens", 0) >= 100000, \
+    "max_output_tokens is unset or low again in the reference profile (see docs/measurements.md)"
+assert prof_cfg.get("max_model_tokens", 0) > 0, "max_model_tokens is unset in the reference profile"
+assert prof_cfg.get("custom_model_max_tokens", 0) > 0, \
+    "custom_model_max_tokens is unset in the reference profile"
+for _budget in ("max_output_tokens", "max_model_tokens", "custom_model_max_tokens"):
+    assert _budget not in cfg, \
+        f"{_budget} is in [config] again: the assigned profile's value would overwrite it"
+# The completeness key: how many findings one review may RETURN.
 assert rv["num_max_findings"] >= 10, "num_max_findings is back down to a cascade-sized cap"
-# The completeness keys this bundle DELIBERATELY does not set - chunking, its call bound, and the merge
-# recommendation the gate reads - asserted absent so none returns without a decision. Without chunking
-# an over-budget diff is PRUNED rather than split, which is survivable only because the pruning is
-# reported (pr-agent's coverage footer, repeated as coverage=PARTIAL on the summary line). What that
-# line does and does not guarantee is docs/architecture.md.
+# The keys this bundle deliberately does not set, asserted absent so none returns without a decision.
 assert "enable_large_pr_chunking" not in rv, \
-    "large-PR chunking is on again: an over-budget diff would be split across extra calls (see docs/architecture.md)"
-assert "max_number_of_calls" not in rv, \
-    "the chunking call bound is set again: it does nothing unless enable_large_pr_chunking is on"
+    "large-PR chunking is on again: an over-budget diff would be split across extra calls"
+assert "max_number_of_calls" not in rv, "the chunking call bound is set again"
 assert "require_merge_recommendation" not in rv, \
-    "require_merge_recommendation is on again: the bundle does not ask for that field (see docs/architecture.md)"
-# The OUTPUT cap, asserted so it cannot be dropped back to the endpoint's own ceiling. Unset, the host
-# stopped at 65536 tokens and a reasoning model spent all of it without emitting parseable YAML, so the
-# run silently fell through to `fallback_models` - the configured model never answered while the review
-# looked normal. The measured numbers live in docs/measurements.md; this only holds the key in place.
-assert cfg.get("max_output_tokens", 0) >= 100000, \
-    "max_output_tokens is unset or low again: the endpoint's own ceiling produced truncated, unparseable YAML (see docs/measurements.md)"
-# The two keys this bundle DELIBERATELY does not set, asserted as absent so neither can be reintroduced
-# silently. The bundle used to inject extra_instructions; capturing the literal prompt showed it argued
-# against pr-agent's own text ("prefer not reporting over guessing", "an empty list is acceptable") by
-# telling the model "most real diffs have several", and it was the only sentence in an
-# ~8,000-character prompt pushing toward generating findings. The reasoning_effort pin dated from a
-# synthetic measurement that did not reproduce on real diffs. Re-adding either is a deliberate act that
-# needs a measurement, not a default.
-#
-# `require_risk_assessment` is in the same class: it asks the model for a field the gate only prints,
-# and which measured unstable (`low, low, medium, low` across four reviews while merge_recommendation
-# never moved). See docs/roadmap.md.
+    "require_merge_recommendation is on again: the bundle does not ask for that field"
 assert not rv.get("extra_instructions", "").strip(), \
-    "extra_instructions is set again: it overrides pr-agent's own severity guidance (see docs/roadmap.md)"
-assert not rv.get("require_risk_assessment"), \
-    "require_risk_assessment is on again: the gate does not use risk_level (see docs/roadmap.md)"
-assert "reasoning_effort" not in cfg, \
-    "reasoning_effort is pinned again: pr-agent's own default applies (see docs/roadmap.md)"
-# `additional_reasoning_effort_models` is asserted absent too, though its message is the one place the
-# reasoning behind that is contested: removing it makes reasoning_effort inert here (nothing is sent at
-# all), while re-adding it would send a budget we have not chosen. That is an open decision in
-# docs/roadmap.md, not a settled one - so this assertion records the current choice rather than a principle.
-assert "additional_reasoning_effort_models" not in cfg, \
-    "additional_reasoning_effort_models is set again: see the open decision in docs/roadmap.md"
-assert "pr_code_suggestions" not in d, \
+    "extra_instructions is set again: it overrides pr-agent's own severity guidance"
+assert not rv.get("require_risk_assessment"), "require_risk_assessment is on again"
+assert "reasoning_effort" not in cfg, "reasoning_effort is pinned again"
+assert "additional_reasoning_effort_models" not in cfg, "additional_reasoning_effort_models is set again"
+# The assignment is the only place a model is named.
+assert "model" not in cfg, "[config] names a model; [selection] decides which profile answers"
+assert "fallback_models" not in cfg, "[config] names fallbacks; [selection] owns the chain"
+assert "pr_code_suggestions" not in settings, \
     "pr_code_suggestions is configured again: its chunk size only made the padding nudge louder"
 # The review-context mechanism is deliberately NOT configured here. pr-agent calls
 # `inject_artifact_context()` (cli.py) BEFORE `apply_repo_settings()` loads `--extra_config_url`
 # (pr_agent.py), so an `[artifacts]` section in this file is read too late to matter: `enable`,
 # `target_tools` and `artifact_label` all come from the env/defaults first. The helper sets them through
 # the environment, and REQ-HOOK-40 pins that. A section here would look configured while doing nothing.
-assert "artifacts" not in d, \
+assert "artifacts" not in settings, \
     "an [artifacts] section is back: it is applied AFTER injection, so it cannot take effect (see REQ-HOOK-40)"
-print("config parses:", cfg["model"], "->", cfg["fallback_models"])
+
+# providers.toml: the endpoint, its credential and the profile the assignment names must all exist, or the
+# render refuses - so an install that seeds them wrongly is caught here rather than at the first review.
+main = sel["main"]
+assert main in (providers.get("profiles") or {}), f"no [profiles.{main}] for the assigned profile"
+prof = providers["profiles"][main]
+assert prof.get("provider") in (providers.get("providers") or {}), "the profile names no known provider"
+prov_entry = providers["providers"][prof["provider"]]
+assert prov_entry.get("api_base"), "the provider has no api_base"
+assert "key" in prov_entry, "the provider has no key field"
+print(f"config seeds: {main} -> {prof.get('model')} @ {prov_entry.get('api_base')}")
 PY
   # The gate's policy template. It must PARSE, and it must be INERT: every key is commented out, so an
   # untouched install and no file behave identically and the built-in defaults stay the one source of
@@ -263,6 +336,633 @@ for label, path in (("installed", sys.argv[1]), ("template", sys.argv[2])):
 print("gate policy template parses and is inert (no keys set)")
 PY
   rm -rf "$tmp"
+  return "$rc"
+}
+
+stage_models() {
+  # The renderer turns settings.toml + providers.toml into the ONE config pr-agent is launched with, so a
+  # bug here does not fail loudly: it writes a config that parses, and the review answers on the wrong
+  # endpoint or model. This stage therefore drives the SHIPPED script over fixtures and inspects the
+  # rendered bytes, rather than restating what the rendering should be.
+  #
+  # Two things it cannot do offline, and does not pretend to: run pr-agent (CI never installs it), and
+  # read pr-agent's own provider tables. The table cross-check at the end SKIPS without the package, and
+  # says so, rather than passing quietly - an unverified table is the thing being guarded.
+  local tmp rc=0 rendered_files=''
+  tmp="$(mktemp -d)" || return 1
+  mkdir -p "$tmp/cfg"
+
+  # Fixtures are written as ONE document and split by TOP-LEVEL TABLE: [config] and [pr_reviewer] are
+  # settings.toml; [providers.*] and [profiles.*] are providers.toml, appended to whatever that file
+  # already holds. A case therefore never has to say which file a table belongs to, and adding a profile
+  # cannot silently put it in the wrong one.
+  write_cfg() {
+    python3 - "$tmp/cfg" "$1" <<'PYCFG'
+import pathlib, sys
+
+cfg = pathlib.Path(sys.argv[1])
+blob = sys.argv[2]
+
+chunks, cur = [], []
+for line in blob.splitlines():
+    if line.startswith("[") and line.rstrip().endswith("]"):
+        if cur:
+            chunks.append(cur)
+        cur = [line]
+    else:
+        cur.append(line)
+if cur:
+    chunks.append(cur)
+
+settings, providers = [], []
+for chunk in chunks:
+    top = chunk[0].strip().strip("[]").split(".")[0].strip().strip('"')
+    # settings.toml is every section pr-agent reads PLUS [selection]; providers.toml is
+    # [providers.*] and [profiles.*]. Anything else a fixture writes goes to settings.toml, which is
+    # where pr-agent's own sections live.
+    is_providers = top in ("providers", "profiles")
+    (providers if is_providers else settings).append("\n".join(chunk).strip("\n"))
+
+(cfg / "settings.toml").write_text("\n\n".join(settings).strip() + "\n")
+
+# The PROVIDERS from any previous fixture are kept - a case only states what it is changing - but its
+# PROFILES are dropped, so one case's profiles cannot leak into the next and be silently rendered.
+path = cfg / "providers.toml"
+existing = path.read_text() if path.exists() else ""
+keep, cur = [], []
+for line in existing.splitlines():
+    if line.startswith("[") and line.rstrip().endswith("]"):
+        if cur:
+            keep.append(cur)
+        cur = [line]
+    else:
+        cur.append(line)
+if cur:
+    keep.append(cur)
+kept = [
+    "\n".join(c).strip("\n")
+    for c in keep
+    if c[0].strip().strip("[]").split(".")[0].strip().strip('"') != "profiles"
+]
+out = "\n\n".join([c for c in kept if c] + providers)
+path.write_text(out.strip() + "\n" if out.strip() else "")
+PYCFG
+  }
+
+  # Both shipped templates must PARSE, and each must be a working starting point rather than an empty
+  # reference: settings.toml.example needs a [selection] with a main profile (or copying it leaves a review
+  # with no model), and providers.toml.example needs the provider that profile names. Everything optional
+  # is commented at upstream's value, which is what the key counts below check.
+  #
+  # They are parsed AS SHIPPED: install.sh substitutes nothing, so a `__SOMETHING__` left in a template
+  # would reach the endpoint as that literal string.
+  python3 - config/settings.toml.example config/providers.toml.example <<'PY' || rc=1
+import re, subprocess, sys, tomllib
+
+
+def load(path):
+    return tomllib.loads(open(path, encoding="utf-8").read())
+
+
+settings = load(sys.argv[1])
+providers = load(sys.argv[2])
+
+assert settings["selection"]["main"], "settings.toml.example assigns no profile"
+assert settings["pr_reviewer"]["num_max_findings"] >= 10, "the template lost the finding cap"
+# The output cap is a MODEL property, so the template carries it on the profile - and must not carry it in
+# [config], where the profile would overwrite it and the value would read as configured while doing nothing.
+assert "max_output_tokens" not in settings["config"], \
+    "settings.toml.example sets a budget in [config]; the profile's value would overwrite it"
+
+# The pair must resolve AS SHIPPED: a user copies both files and edits values, so an assignment naming a
+# profile the other file does not define is a review that cannot start on the first run.
+name = settings["selection"]["main"]
+assert name in providers["profiles"], f"providers.toml.example has no [profiles.{name}]"
+prof = providers["profiles"][name]
+assert prof["provider"] in providers["providers"], "the profile names no provider in the template"
+# No `__PLACEHOLDER__` may survive: nothing substitutes one any more, so it would be sent verbatim as the
+# endpoint, the key or the model id.
+for _path in (sys.argv[1], sys.argv[2]):
+    _found = set(re.findall(r"__[A-Z_]+__", open(_path, encoding="utf-8").read()))
+    assert not _found, f"{_path} carries placeholders nothing substitutes: {sorted(_found)}"
+
+# The repository's own config pair must stay untracked: providers.toml holds a real key, and `preflight`
+# snapshots the working tree with `git add -A`, so a rule that quietly disappeared would put the key into a
+# review AND into a commit. Asserted here rather than only described in the CHANGELOG, because the diff a
+# reviewer sees does not include an unchanged .gitignore - which is how this was twice reported as missing.
+for _ignored in ("config/settings.toml", "config/providers.toml"):
+    if subprocess.run(["git", "check-ignore", "-q", _ignored]).returncode != 0:
+        raise SystemExit(f"{_ignored} is not gitignored: it would be staged by the review snapshot")
+
+# COVERAGE, not a count: every [pr_reviewer] key must appear in the template, either live or commented,
+# because a key the template never mentions is one nobody discovers. The upstream comparison lives in
+# tests/run.sh REQ-HOOK-29, which runs where pr-agent is installed; this stage only has to prove the
+# template still documents the surface and still SETS the bundle's own knobs.
+import re
+body = re.split(r"(?m)^\[pr_reviewer\]\s*$",
+                open(sys.argv[1], encoding="utf-8").read(), maxsplit=1)[-1]
+declared = set(re.findall(r"(?m)^#\s*([a-z_][a-z0-9_]*)\s*=", body))
+live = set(settings.get("pr_reviewer", {}))
+documented = declared | live
+# The bundle's own knobs must be live, not merely mentioned.
+assert {"num_max_findings", "review_heading"} <= live, "the template no longer SETS the bundle's knobs"
+assert len(documented) >= 28, f"only {len(documented)} [pr_reviewer] keys documented"
+print(f"templates parse as shipped and document {len(documented)} [pr_reviewer] keys")
+PY
+
+  # ---- a rendered assignment: the endpoint, the key and the pin come from the provider entry ----
+  cat > "$tmp/cfg/providers.toml" <<'TOML'
+[providers.alpha]
+api_base = "https://alpha.example.com/v1"
+key      = "key-one"
+stream   = true
+
+[providers.work]
+api_base = "https://llm.internal.corp/v1"
+key      = "key-two"
+TOML
+  # The general section is stated ONCE at the top level; the per-model settings ride on the profile that
+  # is assigned. Both halves are the shape this asserts - and `[settings]` is the FILE name now, so a
+  # table of that name here would be the mistake rather than the feature.
+  write_cfg "$(cat <<'TOML'
+[selection]
+main = "alpha-main"
+fallback = ["alpha-small"]
+
+[pr_reviewer]
+num_max_findings = 10
+review_heading = "From the top level"
+
+[profiles.alpha-main]
+provider = "alpha"
+model = "example-large"
+
+[profiles.alpha-main.config]
+max_output_tokens = 384000
+
+[profiles.alpha-small]
+provider = "alpha"
+model = "example-small"
+TOML
+)"
+  # ONE invocation. The path comes back through stdout rather than a variable (a sourced function runs in
+  # a subshell here), and every rendered file this stage creates is removed by the `for rendered in` loop
+  # at the end - a stray one would be a 600-mode file holding a key, which is the very property this stage
+  # checks for.
+  if ! bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
+       _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" >"$tmp/path" 2>"$tmp/err"; then
+    echo "renderer refused a valid assignment:" >&2; sed 's/^/    /' "$tmp/err" >&2; rc=1
+  fi
+  rendered="$(cat "$tmp/path")"
+  rendered_files="$rendered_files $rendered"
+  if [ -z "$rendered" ] || [ ! -f "$rendered" ]; then
+    echo "the renderer reported no config for a valid assignment" >&2; rc=1
+  else
+    python3 - "$rendered" <<'PY' || rc=1
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+cfg, lt = d["config"], d["litellm"]
+assert cfg["model"] == "example-large", cfg["model"]
+assert cfg["fallback_models"] == ["example-small"], cfg["fallback_models"]
+# The knobs came from the TOP-LEVEL [pr_reviewer], not from any profile: that independence is the point,
+# because pr-agent applies them per run and a copy per profile drifts.
+assert d["pr_reviewer"]["num_max_findings"] == 10, d["pr_reviewer"]
+assert d["pr_reviewer"]["review_heading"] == "From the top level", d["pr_reviewer"]
+# The endpoint and the credential come from the provider the profile named, not from a shared section
+# - which is what makes a second OpenAI-compatible endpoint possible at all.
+assert d["openai"]["api_base"] == "https://alpha.example.com/v1", d["openai"]
+assert d["openai"]["key"] == "key-one", d["openai"]
+# The pin is derived from the same entry, so it cannot disagree with the endpoint above.
+assert lt["custom_llm_provider"] == "openai", lt
+# stream = true on this provider scopes the workaround to this provider's own host.
+assert lt["force_streaming_custom_llm_provider"] == "openai", lt
+assert lt["force_streaming_api_base_substrings"] == ["alpha.example.com"], lt
+# settings.toml's own [config] values survive the render: it IS the config now, so a value it carries
+# must reach pr-agent rather than be replaced by the render.
+assert d["config"]["max_output_tokens"] >= 100000, d["config"]
+print("a rendered assignment carries the endpoint, the key and the derived pin")
+PY
+    # A file that will hold a credential must not be readable by anyone else.
+    [ "$(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$rendered")" = "0o600" ] \
+      || { echo "the rendered config is not 600-mode" >&2; rc=1; }
+    rm -f "$rendered"
+  fi
+
+
+  # ---- a provider's own [litellm]: merged for the run, with the derived three refused ----
+  cat >> "$tmp/cfg/providers.toml" <<'TOML'
+
+[providers.alpha.litellm]
+callback_timeout_seconds = 5
+turn_off_message_logging = true
+cache_control_injection_points = [{ location = "message", role = "system" }]
+TOML
+  bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null 2>&1; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
+    _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" >"$tmp/pathL" 2>/dev/null
+  renderedL="$(cat "$tmp/pathL")"
+  rendered_files="$rendered_files $renderedL"
+  python3 - "$renderedL" <<'PY' || rc=1
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+lt = d["litellm"]
+# The provider's own settings reach the run...
+assert lt["callback_timeout_seconds"] == 5, lt
+assert lt["turn_off_message_logging"] is True, lt
+assert lt["cache_control_injection_points"] == [{"location": "message", "role": "system"}], lt
+# ...and the DERIVED three stay the provider's, so the [litellm] table cannot shadow the pin.
+assert lt["custom_llm_provider"] == "openai", lt
+assert lt["force_streaming_custom_llm_provider"] == "openai", lt
+assert lt["force_streaming_api_base_substrings"] == ["alpha.example.com"], lt
+print("a provider's own [litellm] merges, and cannot shadow the derived keys")
+PY
+  rm -f "$renderedL"
+
+  # A provider whose api_base carries userinfo must still arm the streaming workaround: the gate compares
+  # the derived substring against the REQUEST url, so `user@host` (which appears in no request) would make
+  # it silently never fire.
+  # ONE document: the provider AND the profile. Writing providers.toml separately would replace the
+  # profiles write_cfg just put there, and the assignment would resolve to nothing.
+  write_cfg "$(cat <<'TOML'
+[selection]
+main = "a"
+
+[providers.u]
+api_base = "https://someone@beta.example.com/v1"
+key = "k"
+stream = true
+
+[profiles.a]
+provider = "u"
+model = "m"
+TOML
+)"
+  bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null 2>&1; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
+    _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" >"$tmp/pathU" 2>/dev/null
+  renderedU="$(cat "$tmp/pathU")"
+  rendered_files="$rendered_files $renderedU"
+  python3 - "$renderedU" <<'PY' || rc=1
+import sys, tomllib
+lt = tomllib.load(open(sys.argv[1], "rb"))["litellm"]
+subs = lt["force_streaming_api_base_substrings"]
+assert subs == ["beta.example.com"], f"the derived host kept the userinfo: {subs}"
+print("a host with userinfo derives the host the request actually uses")
+PY
+  rm -f "$renderedU"
+
+  # ---- a world-readable providers.toml: tightened with a warning, and never left exposed ----
+  # install.sh tightens at install time, which does not cover the file created by hand or restored from a
+  # backup - the case its own comment names. The resolver is what runs on every review, so the guarantee
+  # has to hold there.
+  chmod 644 "$tmp/cfg/providers.toml"
+  bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
+    _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" >"$tmp/pathM" 2>"$tmp/errM"
+  renderedM="$(cat "$tmp/pathM")"; rendered_files="$rendered_files $renderedM"
+  [ -n "$renderedM" ] || { echo "a 644 providers.toml stopped the render instead of being tightened" >&2; rc=1; }
+  [ "$(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$tmp/cfg/providers.toml")" = "0o600" ] \
+    || { echo "the resolver rendered a key from a providers.toml it left world-readable" >&2; rc=1; }
+  grep -q 'readable by other users' "$tmp/errM" \
+    || { echo "the resolver tightened providers.toml silently; a silent chmod hides who could read it" >&2; rc=1; }
+  rm -f "$renderedM"
+
+  # ---- switching providers: the second endpoint, with its own key, and no inherited streaming ----
+  write_cfg '[selection]
+main = "work-main"
+fallback = ["work-small"]
+
+[profiles.work-main]
+provider = "work"
+model = "their-model-id"
+
+[profiles.work-small]
+provider = "work"
+model = "their-small"
+'
+  bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null 2>&1; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
+    _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" >"$tmp/path2" 2>/dev/null
+  rendered2="$(cat "$tmp/path2")"
+  rendered_files="$rendered_files $rendered2"
+  python3 - "$rendered2" <<'PY' || rc=1
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+# A bare model id is sent as written: the pin decides the transport, so the id needs no provider prefix.
+assert d["config"]["model"] == "their-model-id", d["config"]
+assert d["config"]["fallback_models"] == ["their-small"], d["config"]
+assert d["openai"]["api_base"] == "https://llm.internal.corp/v1", d["openai"]
+assert d["openai"]["key"] == "key-two", d["openai"]
+assert d["litellm"]["custom_llm_provider"] == "openai", d["litellm"]
+# A provider that does not stream must not inherit the workaround: an empty provider name cannot equal
+# the pin, and an empty substring list cannot match any host.
+assert d["litellm"]["force_streaming_custom_llm_provider"] == "", d["litellm"]
+assert d["litellm"]["force_streaming_api_base_substrings"] == [], d["litellm"]
+print("switching providers changes the endpoint, the key and the streaming scope together")
+PY
+  rm -f "$rendered2"
+
+  # ---- a non-openai transport: the section pr-agent reads for it, and its own key name ----
+  cat > "$tmp/cfg/providers.toml" <<'TOML'
+[providers.anth]
+transport = "anthropic"
+key       = "key-three"
+TOML
+  write_cfg "$(cat <<'TOML'
+[selection]
+main = "anth"
+[profiles.anth]
+provider = "anth"
+model = "example-model"
+TOML
+)"
+  bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null 2>&1; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
+    _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" >"$tmp/path3" 2>/dev/null
+  rendered3="$(cat "$tmp/path3")"
+  rendered_files="$rendered_files $rendered3"
+  python3 - "$rendered3" <<'PY' || rc=1
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+# The transport decides the section AND the pin, so a provider whose endpoint lives in the environment
+# is expressible without inventing a section pr-agent would never read.
+assert d["litellm"]["custom_llm_provider"] == "anthropic", d["litellm"]
+assert d["anthropic"]["key"] == "key-three", d["anthropic"]
+assert "api_base" not in d.get("anthropic", {}), d["anthropic"]
+print("a key-only transport renders its own section and pins to it")
+PY
+  rm -f "$rendered3"
+
+  # ---- refusals: each one a case that would otherwise misroute silently ----
+  check_refusal() {
+    local label="$1" expect="$2"
+    shift 2
+    write_cfg "$(printf '%s\n' "$*")"
+    if bash -c '. "$1"; __preflight_render_settings "$2"' _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" \
+         >"$tmp/out" 2>"$tmp/err"; then
+      echo "the renderer accepted $label (expected a refusal)" >&2; rc=1; return
+    fi
+    local got="$?"
+    grep -q "$expect" "$tmp/err" || {
+      echo "the refusal for $label did not name it:" >&2; sed 's/^/    /' "$tmp/err" >&2; rc=1; }
+  }
+  cat > "$tmp/cfg/providers.toml" <<'TOML'
+[providers.one]
+api_base = "https://one.example/v1"
+key      = "k1"
+[providers.two]
+api_base = "https://two.example/v1"
+key      = "k2"
+TOML
+  check_refusal "a chain spanning two providers" "ONE endpoint per run" \
+    '[selection]
+main = "a"
+fallback = ["b"]
+[profiles.a]
+provider = "one"
+model = "m1"
+[profiles.b]
+provider = "two"
+model = "m2"'
+  check_refusal "a provider defined nowhere" "no \[providers.typo\] table defines" \
+    '[selection]
+main = "a"
+[profiles.a]
+provider = "typo"
+model = "m1"'
+  cat > "$tmp/cfg/providers.toml" <<'TOML'
+[providers.x]
+transport = "made-up"
+key = "k"
+TOML
+  check_refusal "an unknown transport" "not one pr-agent can route" \
+    '[selection]
+main = "a"
+[profiles.a]
+provider = "x"
+model = "m1"'
+  cat > "$tmp/cfg/providers.toml" <<'TOML'
+[providers.x]
+transport = "anthropic"
+api_base = "https://proxy.example/v1"
+key = "k"
+TOML
+  check_refusal "an api_base on a transport that cannot carry one" "reads no endpoint for transport" \
+    '[selection]
+main = "a"
+[profiles.a]
+provider = "x"
+model = "m1"'
+  cat > "$tmp/cfg/providers.toml" <<'TOML'
+[providers.x]
+api_base = "https://one.example/v1"
+key = "k1"
+TOML
+  # A pin inside a provider's [litellm] is the one key that would silently misroute, so it is refused.
+  # The providers.toml is written whole here, not appended: a stale [providers.x.litellm] from this case
+  # would otherwise be inherited by every later fixture, which keeps providers across cases.
+  cat > "$tmp/cfg/providers.toml" <<'TOML'
+[providers.x]
+transport = "openrouter"
+api_base = "https://one.example/v1"
+key = "k1"
+[providers.x.litellm]
+custom_llm_provider = "openai"
+[profiles.a]
+provider = "x"
+model = "m1"
+TOML
+  printf '[selection]\nmain = "a"\n' > "$tmp/cfg/settings.toml"
+  if bash -c '. "$1"; __preflight_render_settings "$2"' _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" \
+       >"$tmp/d.out" 2>"$tmp/d.err"; then
+    echo "the renderer accepted a derived key inside a provider's [litellm] (expected a refusal)" >&2; rc=1
+  else
+    grep -q "which preflight derives" "$tmp/d.err" || {
+      echo "the refusal for a derived key inside a provider's [litellm] did not name it:" >&2
+      sed 's/^/    /' "$tmp/d.err" >&2; rc=1; }
+  fi
+  # A providers.toml with no profiles is refused two ways, and the difference is what matters to the
+  # operator: when the file is ABSENT the refusal has to print the command that creates it, and when it is
+  # PRESENT it must not - copying the empty-key template over a file that holds a key would destroy the
+  # credential. Both are asserted, because getting one right by breaking the other is the easy mistake.
+  printf '' > "$tmp/cfg/providers.toml"
+  if bash -c '. "$1"; __preflight_render_settings "$2"' _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" \
+       >"$tmp/e.out" 2>"$tmp/e.err"; then
+    echo "the renderer accepted a providers.toml with no profiles (expected a refusal)" >&2; rc=1
+  else
+    grep -q "add the \[profiles" "$tmp/e.err" || {
+      echo "the refusal for an existing providers.toml with no profiles did not say to add the tables:" >&2
+      sed 's/^/    /' "$tmp/e.err" >&2; rc=1; }
+    ! grep -q "cp .*providers.toml.example" "$tmp/e.err" || {
+      echo "the refusal told the operator to copy over an existing providers.toml, destroying its key:" >&2
+      sed 's/^/    /' "$tmp/e.err" >&2; rc=1; }
+  fi
+  rm -f "$tmp/cfg/providers.toml"
+  if bash -c '. "$1"; __preflight_render_settings "$2"' _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" \
+       >"$tmp/e2.out" 2>"$tmp/e2.err"; then
+    echo "the renderer accepted an absent providers.toml (expected a refusal)" >&2; rc=1
+  else
+    grep -q "cp .*providers.toml.example.*providers.toml" "$tmp/e2.err" || {
+      echo "the refusal for an absent providers.toml did not print the copy command:" >&2
+      sed 's/^/    /' "$tmp/e2.err" >&2; rc=1; }
+  fi
+
+  # and restore a provider table for the cases that follow
+  cat > "$tmp/cfg/providers.toml" <<'TOML'
+[providers.x]
+api_base = "https://one.example/v1"
+key = "k1"
+TOML
+  # A profile-level [pr_reviewer] is refused with where it belongs, because the knobs are run-wide.
+  check_refusal "review knobs on a profile" "move the table to the top level" \
+    '[selection]
+main = "a"
+[profiles.a]
+provider = "x"
+model = "m1"
+[profiles.a.pr_reviewer]
+num_max_findings = 3'
+  # Budgets on a fallback-only profile are WARNED about rather than refused: they describe that model and
+  # apply the moment it is assigned as main, so refusing them would also block keeping a profile fully
+  # described. What must not happen is silence, since pr-agent would then use the assigned model's values.
+  write_cfg '[selection]
+main = "a"
+fallback = ["b"]
+[profiles.a]
+provider = "x"
+model = "m1"
+[profiles.b]
+provider = "x"
+model = "m2"
+[profiles.b.config]
+max_output_tokens = 1000'
+  # The path comes back through stdout so the file can be removed: a render that succeeds here creates a
+  # 600-mode config holding the fixture key, and the cleanup loop at the end of the stage only knows about
+  # the files it was told about.
+  if bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
+       _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" \
+       >"$tmp/warn.path" 2>"$tmp/warn.err"; then
+    rendered_files="$rendered_files $(cat "$tmp/warn.path")"
+    grep -q "one config per run" "$tmp/warn.err" \
+      || { echo "a fallback profile's settings were dropped without a warning:" >&2; sed 's/^/    /' "$tmp/warn.err" >&2; rc=1; }
+  else
+    echo "budgets on a fallback-only profile were refused; they should warn and resolve" >&2
+    sed 's/^/    /' "$tmp/warn.err" >&2; rc=1
+  fi
+
+  # ---- the transport table must match the pr-agent that is actually installed ----
+  #
+  # Without the package this SKIPS rather than passing quietly: an unverified table is the thing being
+  # guarded, so a green tick from a run that could not check it would be the false result this gate
+  # exists to prevent. This is the only place the table is cross-checked - the hook suite does not
+  # repeat it, because it would skip on exactly the same machines.
+  local sp py=""
+  sp="$(ls -d "$HOME"/.local/share/uv/tools/pr-agent/lib/*/site-packages/pr_agent 2>/dev/null | head -n1)"
+  [ -n "$sp" ] && py="$HOME/.local/share/uv/tools/pr-agent/bin/python3"
+  [ -x "$py" ] || py="$HOME/.local/share/uv/tools/pr-agent/bin/python"
+  if [ -z "$sp" ] || [ ! -x "$py" ]; then
+    echo "transport table vs pr-agent: SKIPPED (pr-agent not installed)"
+  else
+    "$py" - "$PWD/scripts/settings-render.sh" <<'PY' || rc=1
+import ast, re, sys
+from pr_agent.algo.ai_handlers.litellm_ai_handler import PROVIDER_SETTING_PATHS
+
+src = open(sys.argv[1], encoding="utf-8").read()
+body = re.search(r"^TRANSPORTS = \{(.*?)^\}", src, re.S | re.M)
+assert body, "the renderer no longer defines a TRANSPORTS table; update this guard"
+ours = ast.literal_eval("{" + body.group(1) + "}")
+
+# pr-agent's own tables, as the ground truth for which section a transport's endpoint and key are read
+# from. A transport missing here is one the renderer would have to refuse, and a name that moved is a
+# request redirected to the wrong section.
+theirs = {}
+for provider, paths in PROVIDER_SETTING_PATHS.items():
+    sections = {path.split(".")[0].lower() for path in paths.values()}
+    assert len(sections) == 1, f"{provider} spans sections {sections}; the renderer assumes one"
+    # Taken from the `api_key` ENTRY's value, never from whichever value comes first: a provider with both
+    # an `api_base` and a credential would otherwise yield `api_base` for some of them, and a release that
+    # reordered the dict would turn every endpoint transport into a silent mismatch. The value names the
+    # settings key pr-agent reads (`GOOGLE_AI_STUDIO.GEMINI_API_KEY` -> `gemini_api_key`).
+    assert "api_key" in paths, f"{provider} declares no api_key entry: {sorted(paths)}"
+    key_name = paths["api_key"].split(".")[-1].lower()
+    theirs[provider] = (sections.pop(), key_name, "api_base" in " ".join(paths))
+
+# `openai` is the generic compatible transport, handled by the handler rather than by that table.
+theirs["openai"] = ("openai", "key", True)
+
+missing = sorted(set(theirs) - set(ours))
+extra = sorted(set(ours) - set(theirs))
+wrong = sorted(t for t in set(theirs) & set(ours) if tuple(ours[t]) != tuple(theirs[t]))
+assert not missing, f"the transport table is missing {missing}: a provider that works would be refused"
+assert not extra, f"the transport table names {extra}, which pr-agent does not route"
+assert not wrong, "these transports disagree with pr-agent: " + ", ".join(
+    f"{t}: renderer={tuple(ours[t])} pr-agent={theirs[t]}" for t in wrong)
+print(f"transport table matches pr-agent ({len(ours)} transports)")
+PY
+  fi
+
+  # Every rendered file this stage created, removed here rather than at each assertion: they hold the
+  # fixture's key, and a stage that leaves one behind contradicts the cleanup property it checks. The
+  # per-assertion `rm -f`s stay because later assertions read the paths, but this is the guarantee.
+  local f
+  for f in $rendered_files; do [ -n "$f" ] && rm -f "$f"; done
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+stage_envhelp() {
+  # `preflight --help` is the only place a user discovers the environment variables, so a var the helper
+  # reads but the help never mentions is one nobody finds - and a var the help names but nothing reads is
+  # advice that does nothing. Both directions are checked, against the code itself rather than a list.
+  local rc=0
+  python3 - src/preflight <<'PY' || rc=1
+import re, sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+
+usage = re.search(r"cat <<'EOF'\n(.*?)\nEOF", src, re.S)
+if not usage:
+    sys.exit("cannot find the usage heredoc in src/preflight; update this guard")
+helped = set(re.findall(r"PREFLIGHT_[A-Z_]+", usage.group(1)))
+
+# Every PREFLIGHT_* the file READS, across the whole script.
+read = set(re.findall(r"\$\{?(PREFLIGHT_[A-Z_]+)", src))
+
+# INTERNAL names are the helper-to-helper channel, not settings - they must NOT be advertised.
+INTERNAL = {"PREFLIGHT_RENDERED_CONFIG"}
+# Read by a DIFFERENT helper in the bundle, and documented here because `preflight --help` is the bundle's
+# one help page - the hook has no `--help` of its own. Checked against that file so the claim stays true.
+DELEGATED = {"PREFLIGHT_SKIP": "src/preflight-hook"}
+should_be_helped = read - INTERNAL
+missing = sorted(should_be_helped - helped)
+advertised_but_unread = sorted(helped - read - set(DELEGATED))
+# Each delegated name must really be read by the helper it is attributed to, or the exemption is a lie.
+for name, owner in DELEGATED.items():
+    try:
+        owner_src = open(owner, encoding="utf-8").read()
+    except OSError:
+        sys.exit(f"cannot read {owner} to verify {name}")
+    if name not in owner_src:
+        sys.exit(f"{name} is documented as {owner}'s, but {owner} does not read it")
+if missing:
+    print("src/preflight reads these and --help never mentions them: " + ", ".join(missing))
+if advertised_but_unread:
+    print("--help names these but src/preflight never reads them: " + ", ".join(advertised_but_unread))
+if missing or advertised_but_unread:
+    sys.exit(2)
+if INTERNAL & helped:
+    sys.exit("internal variable advertised as a setting: " + ", ".join(sorted(INTERNAL & helped)))
+
+# The help also points at README sections by name, and a renamed heading leaves a signpost to nothing -
+# which a reader follows once and then stops trusting the help for. Checked against the headings rather
+# than against a list, so renaming a section and its reference together stays free.
+import os
+readme = os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])), "..", "README.md")
+headings = set()
+for line in open(readme, encoding="utf-8", errors="replace"):
+    if line.startswith("#"):
+        headings.add(line.lstrip("#").strip())
+cited = set(re.findall(r'README "([^"]+)"', usage.group(1)))
+dangling = sorted(c for c in cited if c not in headings)
+if dangling:
+    sys.exit("help cites README sections that do not exist: " + ", ".join(dangling))
+print(f"help documents all {len(should_be_helped)} settings the helper reads, and no others")
+PY
   return "$rc"
 }
 
@@ -558,6 +1258,8 @@ run tools        stage_tools
 run syntax       stage_syntax
 run install      stage_install
 run config       stage_config
+run models       stage_models
+run envhelp      stage_envhelp
 run version      stage_version
 run gateshapes   stage_gateshapes
 run coverage     stage_coverage

@@ -7,7 +7,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Changed
+
+- **`preflight.toml` and `.secrets.toml` are gone; `settings.toml` + `providers.toml` are the whole
+  configuration.** Three files had grown into one another: the shipped `preflight.toml` was both the
+  renderer's merge base and the fallback config for an install that had not adopted profiles, and
+  `.secrets.toml` existed only to feed the single `[openai]` section that a second endpoint could not share.
+  Now there are two, with one job each:
+
+  - `settings.toml` — what the review does. `[selection]` names the profiles to use; every other section is
+    a pr-agent section, passed through unchanged, so a key this bundle does not list still works.
+  - `providers.toml` — the endpoints and their keys (600-mode), and the `[profiles.*]` tables that use them.
+
+  The render starts from a copy of `settings.toml` and adds the model, the endpoint and the three
+  `[litellm]` keys derived from the provider, so settings.toml *is* the config rather than a subset of one.
+  `[selection]` exists because `[config]` is now pr-agent's own section: `main`/`fallback` name PROFILES,
+  which is not a pr-agent key and would otherwise be written into `[config]` and read as settings pr-agent
+  does not have.
+
+  A missing `settings.toml` is now a refusal that names both files, not a silent fall back to
+  `preflight.toml` — there is no second config, so a run without a model must fail closed. `ensure-link.sh`
+  goes with the symlink it maintained: the rendered config carries the credential, so the package's
+  `settings/` directory is never written to.
+
+  The templates are regenerated as full references: `settings.toml.example` lists every `[pr_reviewer]` key
+  pr-agent declares (live where the bundle sets it, commented at upstream's value otherwise) and
+  `providers.toml.example` every provider key, transport and profile-level setting. **`install.sh` installs
+  those example files and nothing else** - it does not create `settings.toml` or `providers.toml`, because
+  it knows no endpoint, model id or budget and a file it wrote could only be a guess. The user copies the
+  pair into place (the install states the two commands) and edits it. Every install-time variable that
+  seeded a config value is removed with the file it configured (`PREFLIGHT_API_BASE`, `PREFLIGHT_KEY`,
+  `PREFLIGHT_MODEL`, `PREFLIGHT_FALLBACK_MODELS`, `PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS`,
+  `PREFLIGHT_MAX_MODEL_TOKENS`, `PREFLIGHT_FORCE_STREAMING_HOST`): a variable that quietly stops working
+  once the file exists is worse than a file you edit, and a value baked in at install time is a value
+  someone has to find and correct. The remaining variables configure the install itself.
+
+  Nothing in the shipped templates names an endpoint, a model or a host: they carry obvious placeholders
+  (`https://api.example.com/v1`, `your-model-id`, example budgets), and the configuration is a step the
+  user completes after installing. The gate's fixtures and the test suite name their own fictional
+  providers too, so no real endpoint's name reaches an assertion the suite would then be written around.
+
+### Added
+
+- **`PREFLIGHT_PROGRESS_EVERY`: the review says it is still going.** The wait for a review's artifact
+  (phase 1, `PREFLIGHT_REVIEW_WAIT`) printed nothing between the run starting and the artifact appearing,
+  so a wedged endpoint and a review that was simply thinking were the same thing on screen: silence, for up
+  to the hour the bound allows. A run that has written nothing now notes on stderr how long it has been
+  waiting, at an interval this knob sets (default 30s; `0` disables it). stderr only, because stdout carries
+  the summary a caller parses. This came out of a real run that hung for eighteen minutes against a local
+  proxy whose non-streaming reply never parsed - the note would have said which phase it was in within
+  half a minute.
+- **A gate stage for the environment variables.** `preflight --help` is the only place a user discovers
+  them, so `envhelp` checks both directions against the code: every `PREFLIGHT_*` the helper reads must be
+  in `--help`, no `--help` entry may be unread, and an internal variable (the renderer-to-helper channel)
+  must not be advertised as a setting. A delegated name — `PREFLIGHT_SKIP`, read by the hook and documented
+  in the bundle's one help page — is exempted only if the file it is attributed to actually reads it.
+  Mutation-checked: removing `PREFLIGHT_DIR` from `--help` fails it, and advertising the internal variable
+  fails it. The check also caught two real defects in this change: `PREFLIGHT_HOME`'s help still described
+  the removed secrets relink, and `PREFLIGHT_CONTEXT_FILE` was documented nowhere.
+
+- **Named model configurations, each with its own endpoint and credential, resolved into one rendered
+  config per run.** `$PREFLIGHT_HOME/settings.toml` saves several configurations and assigns one to the main
+  slot and others to the fallback chain, by name. Each profile names its endpoint by a **provider** — an
+  entry in the new `$PREFLIGHT_HOME/providers.toml` (600-mode) holding that endpoint's `api_base`, `key`
+  and optional `transport` — so the model id needs no provider prefix and two OpenAI-compatible endpoints
+  no longer compete for the single `[openai]` section in `.secrets.toml`. Switching endpoints is one line:
+  `[selection] main = "<profile>"`.
+
+  Before each run, `scripts/settings-render.sh` renders those files into **one** config — 600-mode, at
+  `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`, one file per run — and that file is what
+  `--extra_config_url` points at. The pid is what makes concurrent runs safe: they cannot read each
+  other's endpoint or key. Each run removes its own, and a copy of the last is left at
+  `.pragent.settings.toml` so a run stays inspectable. Rendering rather than the environment is what makes the transport
+  **pin** and the endpoint one entry: a pin that disagrees with the endpoint is resolved *silently* by
+  LiteLLM, so the request goes to the pinned provider's host carrying that provider's key, with no error.
+  The rendered file replaces `preflight.toml` rather than merging with it, so it carries every setting that
+  file holds.
+
+  pr-agent holds one endpoint per process, so a fallback chain that spans two providers is **refused by
+  name** rather than answered by whichever one is pinned, and so is a `provider` that no `[providers.*]`
+  table defines — which would otherwise reach pr-agent's own default host while carrying a key chosen for
+  another endpoint. A
+  transport that cannot carry an endpoint from a config file refuses an `api_base` rather than writing a
+  setting nothing reads. `stream = true` on a provider scopes the streaming workaround to that provider's
+  own host; every other provider gets an empty pair, so it cannot be inherited.
+
+  Neither file is created by `install.sh`; a run with no `settings.toml` is refused with the two copy
+  commands rather than defaulting to anything, and the renderer refuses an empty credential rather than
+  calling the endpoint without one. A `settings.toml` that assigns no profile is a refusal too, not a
+  fallback: with `preflight.toml` gone there is no second config, so a run with no model must fail
+  closed. Mechanism:
+  [`docs/architecture.md`](docs/architecture.md). REQ-HOOK-44 and REQ-HOOK-45 guard it, and every mutation
+  in their rows of [`tests/README.md`](tests/README.md) was applied, watched failing the case, and reverted.
+
+  The rendered file is written to `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`: 600-mode, one file per
+  run, removed by the run that wrote it. Two earlier designs were rejected. A `mktemp` file made
+  cleanup's correctness depend on the caller (a `set -e` context, a subshell that lost the variable), and
+  left the operator no way to inspect what pr-agent was actually handed. A single fixed path removed the
+  indirection but made concurrent runs share one file, so a run could read another's model, endpoint and
+  key. Per-pid paths keep both properties: no run can see another's render, and each run owns exactly the
+  file it deletes. A copy of the last render is left at the fixed `.pragent.settings.toml` so a run stays
+  inspectable; it is rewritten atomically and 600-mode.
+  A `PREFLIGHT_HOME` inside the repository under review is the case neither design makes safe on its own:
+  the review's own `git add -A` would stage the file and hand the key to the model. The renderer therefore
+  refuses that layout unless the config directory itself is gitignored there - a directory rule, not a list
+  of file names, since a backup or an editor copy of `providers.toml` carries the same key.
+
+  The name is load-bearing rather than cosmetic: pr-agent's settings loader **skips** every file that is
+  not `*.toml`, with a warning and no error, so a correctly-populated config under another name is
+  accepted as `--extra_config_url` and then ignored - the run answers on pr-agent's own defaults while
+  everything looks normal. A guard in the resolver and an assertion in REQ-HOOK-44 check the suffix.
+
+  A real `settings.toml`/`providers.toml` pair is **gitignored** in this repository, by explicit path in
+  `.gitignore` (`config/settings.toml`, `config/providers.toml`, added by this change - see that file's
+  diff): `providers.toml` holds an API key, and both are per-machine. The committed artifacts stay the
+  `.example` templates, so the review's own `git add -A` snapshot cannot pick up a credential. The `models`
+  stage runs `git check-ignore` on both paths, so a rule that disappeared fails the gate rather than
+  relying on this paragraph.
 
 ## [0.5.0] - 2026-10-16
 
@@ -151,8 +267,8 @@ _(nothing yet)_
 
 - **A review now says when a fallback model answered, and the output cap that caused it is set.** Both
   come from one diagnosis, made on a real run: a review of this repository reported `issues=0`, ran far
-  longer and cost far more tokens than a review normally does, and had in fact been answered by
-  `glm-5.3-flash` rather than the configured `deepseek-v4.1-flash`. The primary model had not timed out - it
+  longer and cost far more tokens than a review normally does, and had in fact been answered by the
+  fallback model rather than the configured primary one. The primary model had not timed out - it
   generated for minutes and returned the endpoint's output ceiling as truncated YAML. pr-agent could not
   parse that, treated it as a failed attempt, and fell through to `fallback_models`. The figures are in
   [`docs/measurements.md`](docs/measurements.md), which owns them.
@@ -396,7 +512,7 @@ _(nothing yet)_
   rest was hidden reasoning, invisible in the artifacts, so a slow review read as a slow provider.
   `files/preflight.toml` sets `[config] reasoning_effort` together with the
   `[config] additional_reasoning_effort_models` entry required for it to arrive: pr-agent forwards the
-  setting only to a model litellm's metadata calls reasoning-capable, and `cline-pass/*` is not in that
+  setting only to a model litellm's metadata calls reasoning-capable, and the model in use was not in that
   table - the same gap that forces `custom_model_max_tokens` - so without the second key the value was
   read, logged as the default, and silently dropped. Measured interleaved on one diff: mean **~18.6s /
   ~4,051 completion tokens** unforwarded against **~9.2s / ~1,689** with `low` forwarded. Measure any
@@ -665,10 +781,9 @@ _(nothing yet)_
 - `ROADMAP.md` referenced a `github-action.example.yml` staged for Layer 3 that has never existed in any
   commit.
 
-- `config.fallback_models` no longer points at a model the ClinePass endpoint cannot route. The
-  upstream default (`["gpt-5.6-terra"]`) is a bare id, which the endpoint rejects (ids must be
-  `provider/model`), so a failed primary model retried against a dead one; it is now
-  `["openai/cline-pass/glm-5.3-flash"]`.
+- `config.fallback_models` no longer points at a model the configured endpoint could not route. The
+  upstream default is a bare id, which the endpoint rejected (ids must be `provider/model`), so a failed
+  primary model retried against a dead one; the bundle pinned an id the endpoint served instead.
 
 ### Changed
 
@@ -732,13 +847,13 @@ _(nothing yet)_
   - **Breaking.** Any repo whose `AGENTS.md` carries the old snippet calls `pral`, which no longer
     exists - re-paste `AGENTS-review-snippet.md`. The secrets file is *moved*, not regenerated (a
     fresh install would create an empty key). `uninstall.sh` cleans up the old names.
-- **Decoupled the bundle from ClinePass.** It now documents and supports any OpenAI-compatible
-  endpoint, with ClinePass as the built-in default rather than the premise. `install.sh` gains
+- **Decoupled the bundle from a single built-in endpoint.** It now documents and supports any
+  OpenAI-compatible endpoint, with one as the built-in default rather than the premise. `install.sh` gains
   `PREFLIGHT_MODEL`, `PREFLIGHT_FALLBACK_MODELS`, `PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS`,
   `PREFLIGHT_MAX_MODEL_TOKENS`, and `PREFLIGHT_FORCE_STREAMING_HOST`.
-- The ClinePass force-streaming workaround is now keyed on the `api.cline.bot` literal instead of
-  whatever `api_base` is configured. Previously a non-ClinePass endpoint silently inherited a
-  ClinePass-specific quirk; now the block is inert unless the endpoint really is ClinePass.
+- The force-streaming workaround is now keyed on a host literal instead of whatever `api_base` is
+  configured. Previously an endpoint that needed no workaround silently inherited one; now the block is
+  inert unless the endpoint's host really matches.
 - `AGENTS-review-snippet.md` now points at this bundle's repository, so an agent working in another
   repo can read current guidance (README, ROADMAP, design, troubleshooting, changelog) as the bundle
   evolves.
@@ -762,7 +877,7 @@ _(nothing yet)_
 
 ## [0.1.0] - 2026-10-07
 
-Initial release: a deployable, machine-local PR-Agent review setup for the ClinePass endpoint.
+Initial release: a deployable, machine-local PR-Agent review setup for one OpenAI-compatible endpoint.
 
 > The command/file/env names below are the ones this version shipped with; they were renamed in the
 > `[Unreleased]` entry above.
@@ -781,7 +896,7 @@ Initial release: a deployable, machine-local PR-Agent review setup for the Cline
   `.pr-agent/review.json`. `PRAL_SCOPE=head` limits it to committed content.
 - `files/pral-gate` - machine-checkable gate over `review.json` (exit `0`/`1`/`2`/`3`).
 - `files/ensure-link.sh` - re-links the secrets file after `uv tool upgrade` recreates the venv.
-- `files/pr-agent.toml` - the ClinePass model, the 1M-token budget, the LiteLLM **force-streaming**
+- `files/pr-agent.toml` - the pinned model, a 1M-token budget, the LiteLLM **force-streaming**
   workaround, `num_max_findings = 20`, and the risk/merge signals.
 - `files/secrets.toml.example` - the secrets template (no real key).
 - `AGENTS-review-snippet.md` - the per-repo instruction block for `AGENTS.md`.

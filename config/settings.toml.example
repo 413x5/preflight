@@ -1,0 +1,97 @@
+# What the REVIEW does. GITIGNORED - copy this file to settings.toml and edit that one. install.sh installs
+# this reference and never creates settings.toml itself.
+#
+# Two files feed the config pr-agent is handed: THIS one (the review's own settings) and providers.toml
+# (which models exist, and where each is reached). There is no other config.
+#
+# This is a REFERENCE, not your config: copy it to settings.toml and edit that. install.sh installs this
+# file only; it never creates settings.toml, because it knows none of the values in it.
+#
+# providers.toml.example carries placeholder values for the endpoint, the key and the model id, and every
+# one of them is yours to replace - the resolver refuses an empty credential, but `api.example.com` and
+# `your-model-id` are ordinary strings, so a review that pastes only a key would be sent to that placeholder
+# host and model.
+#
+# [selection] is the one section preflight invents - it names the PROFILES to use, by name. Every other
+# section is a pr-agent section, passed through unchanged, so any key pr-agent documents works even if this
+# file does not list it.
+#
+# WHAT IS NOT HERE, AND WHY:
+#
+#   model, fallback_models   [selection] decides which profile answers. A second place to name the model
+#                            is a second answer.
+#   token/temperature/       properties of a MODEL - two models have different windows and habits, which
+#   thinking settings        is what profiles exist for. They go in providers.toml, under
+#                            [profiles.<name>.config], beside the model they describe.
+#   git_provider, publish_*  hosted-PR settings. `preflight review` runs plain-diff mode from your working
+#   reaction_*, ignore_pr_*  tree and posts nothing, so these do nothing here. (preflight-pr does post;
+#                            its keys are pr-agent's own and documented there.)
+#
+# Profile names are QUOTED wherever they appear, here and in providers.toml: a bare TOML key cannot contain
+# a dot. `[profiles.v4.1-flash]` would split into a table `v4` with a child `1-flash`.
+
+[selection]
+# The name of a [profiles.<name>] table in providers.toml - rename this and that table together.
+main = "mine"
+# fallback = ["mine-backup"]
+
+# ---------------------------------------------------------------------------- [config]
+
+[config]
+# Only settings that are the SAME for every model belong here. The token budgets are not: a budget is a
+# property of the model's context window, so it goes in providers.toml under
+# [profiles.<name>.config], beside the model it describes. A budget set HERE applies to every model in the
+# run, so switching profiles leaves it in force - and one the assigned profile also sets is refused rather
+# than overwritten, because the profile's value would leave this one looking set and doing nothing.
+# Show the model, token counts and time in review.md.
+output_run_details = true
+# How this repository's own instructions reach the reviewer.
+# repo_context_files = ["AGENTS.md"]
+# repo_context_from_default_branch = true
+# repo_context_max_lines = 500
+# repo_context_sibling_repos = []
+# repo_context_max_sibling_files = 5
+# Report the run's cost in review.md (needs a model LiteLLM can price).
+# output_run_cost = false
+# Languages to skip when looking for something to review.
+# ignore_language_framework = []
+
+# ---------------------------------------------------------------------------- [pr_reviewer]
+# The review's knobs. pr-agent applies these to the WHOLE run - one num_max_findings, one heading - so they
+# are not a property of a model and do not belong in a profile.
+[pr_reviewer]
+# The heading a review renders under, so it can be told apart from any other markdown in the repository -
+# or from another tool's comment on the same change. Upstream's default says nothing about which tool
+# produced it.
+review_heading = "Preflight - PR Reviewer Guide"
+# Upstream is 3, which makes an agent fix only 3 findings and can discover 3 more on the next run - the
+# cascade that turns a two-round loop into an unbounded one.
+num_max_findings = 10
+# require_score_review = false
+# require_tests_review = true
+# require_estimate_effort_to_review = true
+# require_can_be_split_review = false
+# require_security_review = true
+# require_estimate_contribution_time_cost = false
+# require_todo_scan = false
+# require_ticket_analysis_review = true
+# require_risk_assessment = false  # the gate only prints risk_level, and it measured unstable
+# require_merge_recommendation = false  # the bundle does not ask for it, so the gate reports merge=n/a
+# require_priority_files = false
+# publish_output_no_suggestions = true
+# publish_error_details = false
+# persistent_comment = true
+# persistent_finding_state = true
+# inline_key_issues = false
+# extra_instructions = ""  # left empty deliberately: text here overrides pr-agent's own severity guidance
+# final_update_message = true
+# enable_review_labels_security = true
+# enable_review_labels_effort = true
+# require_all_thresholds_for_incremental_review = false
+# minimal_commits_for_incremental_review = 0
+# minimal_minutes_for_incremental_review = 0
+# enable_intro_text = true
+# enable_help_text = false
+# enable_review_coverage_footer = true
+# enable_large_pr_chunking = false  # the bundle reports partial coverage instead of chunking
+# max_number_of_calls = 3  # does nothing unless chunking is on

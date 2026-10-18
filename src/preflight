@@ -30,15 +30,15 @@
 # destroy the last one. A run that failed, or that finished without writing anything, has no entry:
 # every entry is a run whose output can be read. Nothing prunes them; delete a directory to drop a run.
 #
-# The model/endpoint come from ~/.config/preflight/preflight.toml (any OpenAI-compatible endpoint;
-# ClinePass is only the default). Plain-diff mode: prints to stdout and writes the files above.
+# The model and endpoint come from ~/.config/preflight/settings.toml + providers.toml (any
+# OpenAI-compatible endpoint). Plain-diff mode: prints to stdout and writes the files above.
 # Never modifies your index/HEAD/history, and never posts to GitHub.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 
 # PREFLIGHT_HOME is honoured here exactly as install.sh defines it. Defining it once matters: the
-# version lookup, the secrets relink, the hook helper and the review config URL all use it, and if only
+# version lookup, the rendered config and the hook helper all use it, and if only
 # some honoured the override they could read different directories.
 cfgdir="${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}"
 
@@ -91,17 +91,26 @@ Environment:
                        worktree= the whole branch vs the default branch; enforced by the hook
                        head    = committed changes only; cannot be enforced by the hook
   PREFLIGHT_DIR        artifact dir (default .preflight)
-  PREFLIGHT_HOME       config dir (default ~/.config/preflight) - the toml, the
-                       secrets relink and the hook helper are all read from here
+  PREFLIGHT_HOME       config dir (default ~/.config/preflight) - settings.toml,
+                       providers.toml and the hook helper are all read from here
+  PREFLIGHT_CONTEXT_FILE  file whose "Code review" section is sent as reviewer context
+                       (default AGENTS.md; a repo-local file, relative to the repo root)
   PREFLIGHT_SKIP=1     (hook only) bypass the commit check once
   PREFLIGHT_REVIEW_WAIT   seconds to wait for a review to produce its artifact (default 3600)
+  PREFLIGHT_PROGRESS_EVERY seconds between "still running" notes on stderr while no review has been
+                          written yet (default 30; 0 disables them); a stuck endpoint otherwise looks
+                          identical to a slow one until the wait expires
   PREFLIGHT_SHUTDOWN_WAIT seconds to wait for pr-agent to EXIT after the artifact exists
                           (default 120); on expiry it is stopped and the run still succeeds,
                           because the review is already complete and preflight-gate decides
                           the verdict. See docs/runbooks/troubleshooting.md ("never exits").
 
-Config:  <dir>/preflight.toml, where <dir> is PREFLIGHT_HOME or ~/.config/preflight
-         (any OpenAI-compatible endpoint; see README "Using another provider")
+Config:  <dir>/settings.toml + <dir>/providers.toml, where <dir> is PREFLIGHT_HOME or
+         ~/.config/preflight
+         (any OpenAI-compatible endpoint; see README "Using a different endpoint")
+         <dir>/settings.toml names model configurations; <dir>/providers.toml holds the
+         endpoints and keys they name. When one is assigned, `preflight` renders both
+         into the config pr-agent reads. See README "More than one endpoint".
 Loop:    preflight review && preflight-gate   (exit 0 = pass)
          preflight-gate --help                for the gate's exits and options
 Docs:    https://github.com/413x5/preflight
@@ -111,16 +120,36 @@ EOF
 cmd="review"
 if [ "$#" -gt 0 ]; then cmd="$1"; shift; fi
 
-# Answered before anything touches git or the config (including ensure-link.sh below), so
+# Answered before anything touches git or the config below, so
 # `preflight --help` works outside a repository and does not depend on the config being readable.
 case "$cmd" in
   -h|--help|help)          usage; exit 0 ;;
   -V|--version|version)    printf 'preflight %s\n' "$(bundle_version)"; exit 0 ;;
 esac
 
-if [ -f "${cfgdir}/ensure-link.sh" ]; then
-  . "${cfgdir}/ensure-link.sh"
-fi
+# The model configuration. Sourced from beside the script first (a checkout or vendored copy), then from
+# cfgdir, the two places install.sh puts it. Without the helper nothing can be rendered, so the run is
+# refused rather than left to pr-agent's own defaults - the same silent-wrong-model failure the resolver
+# refuses when it cannot parse the file at all.
+__preflight_load_settings_render() {
+  local cand
+  for cand in "$here/settings-render.sh" "$here/../scripts/settings-render.sh" "${cfgdir}/settings-render.sh"; do
+    if [ -f "$cand" ]; then
+      . "$cand"
+      return 0
+    fi
+  done
+  if [ -f "${cfgdir}/settings.toml" ]; then
+    printf 'preflight: %s is present, but settings-render.sh was not found (looked beside this script and in %s)\n' \
+      "${cfgdir}/settings.toml" "$cfgdir" >&2
+    printf 'preflight: refusing to review with a model configuration that was not applied\n' >&2
+  else
+    printf 'preflight: neither settings-render.sh nor %s was found (looked beside this script and in %s)\n' \
+      "${cfgdir}/settings.toml" "$cfgdir" >&2
+    printf 'preflight: install.sh writes both; re-run it, or point PREFLIGHT_HOME at an install that has them\n' >&2
+  fi
+  return 2
+}
 
 # Reject an unknown command BEFORE resolving the base or touching git: otherwise a typo prints a
 # base-resolution line and possibly a fetch first, which buries the one line that matters.
@@ -235,6 +264,10 @@ run_started=''
 run_ok=''
 run_stopped=''
 run_verdict=''
+# The rendered model configuration's path, set once the render succeeds. Initialised here with the rest so
+# every reference is defined under `set -u`, including on exit paths that never reach the render; cleanup()
+# is what deletes the file, so it holds the key for exactly the length of the run.
+rendered_cfg=''
 
 # The run history. One directory per run under `runs/`, so the fixed top-level paths can stay "the
 # latest run" for the commit hook and preflight-gate while the previous run survives the `rm -f` that
@@ -344,9 +377,31 @@ PY
 cleanup() {
   if [ -n "$idxf" ]; then rm -f "$idxf"; fi
   if [ -n "$prev_json" ]; then rm -f "$prev_json"; fi
+  # An abnormal exit (an arithmetic error under `set -e`, a signal) would otherwise leave pr-agent
+  # running. It holds the caller's stdout open, so `x="$(preflight review)"` blocks for the model call
+  # even though this script is long gone - the failure looks like a hang in the wrong process.
+  if [ -n "${pr_pid:-}" ] && kill -0 "$pr_pid" 2>/dev/null; then
+    kill -TERM "$pr_pid" 2>/dev/null || true
+    hold=0
+    while kill -0 "$pr_pid" 2>/dev/null && [ "$hold" -lt 5 ]; do sleep 1; hold=$((hold + 1)); done
+    kill -KILL "$pr_pid" 2>/dev/null || true
+  fi
+  # The rendered config is PER RUN (`.pragent.settings.<pid>.toml`), so this run owns it and removes it:
+  # leaving it would accumulate one credential-bearing file per run, and nothing else would ever delete it.
+  # The copy at the fixed name is the only one that survives, which is what it is for.
+  if [ -n "${rendered_cfg:-}" ]; then rm -f "$rendered_cfg"; fi
   archive_run
 }
 trap cleanup EXIT
+
+# BEFORE the snapshot below, not only at the render. Staging runs `git add -A` on the reviewed tree, so a
+# config dir inside this repository whose credential files are not ignored there would be hashed into
+# .git/objects - where it stays, reachable by `git cat-file`, long after the render refuses the run. The
+# renderer checks again (it is the only place that knows the render's own name), so a caller that skips
+# this still refuses; this is here so the refusal comes before anything is written.
+__preflight_load_settings_render || exit $?
+__preflight_refuse_in_repo_config "$cfgdir" || exit $?
+
 if [ "$scope" = 'head' ]; then
   diff_ref="${base}...HEAD"
 else
@@ -360,7 +415,7 @@ else
   hook_tree="$tree"
   if [ "$scope" = 'commit' ]; then
     # `diff HEAD` alone sees only TRACKED changes, so a new file would never be reviewed while still
-    # being in reviewed_tree - and the hook, which compares against that tree, would then accept the
+    # being in reviewed_tree - and the hook, which compares against it, would then accept the
     # unreviewed file. Diffing against the tree is what makes "everything a commit would contain" true.
     diff_ref="$tree"
     diff_base='HEAD'
@@ -372,6 +427,15 @@ else
   fi
 fi
 
+# Rendered AFTER the working-tree snapshot above, so the file it writes is never in the diff the review is
+# handed. The in-repo guard already ran before that snapshot; the renderer runs it again over the render's
+# own name, which only it knows.
+# A missing settings.toml means there is no model and no review, and the renderer prints that refusal: it
+# is the one place that knows which of the two files is absent, so the wording cannot drift between here
+# and the sibling helper.
+__preflight_render_settings "$cfgdir" || exit $?
+rendered_cfg="$PREFLIGHT_RENDERED_CONFIG"
+
 case "$cmd" in
   review|review_pr)     out_md="$dir/review.md";      out_json="$dir/review.json" ;;
   describe|describe_pr) out_md="$dir/description.md"; out_json='' ;;
@@ -382,7 +446,10 @@ esac
 
 mkdir -p "$dir"
 begin_run
-cfg="file://${cfgdir}/preflight.toml"
+# The config pr-agent reads: ALWAYS the rendered file. settings.toml and providers.toml are the only
+# sources, so there is no second config to fall back to - `__preflight_render_settings` refuses when it
+# cannot produce one, and that refusal stops the run before here.
+cfg="$rendered_cfg"
 if [ "$scope" = 'commit' ]; then
   echo "preflight: ${cmd} (scope=commit) — pending change since HEAD -> ${dir}/" >&2
 else
@@ -482,7 +549,7 @@ print(mode)
 PY
     )"; then
       export ARTIFACT_PATH="$dir/context.md"
-      # Through the ENVIRONMENT, not preflight.toml: pr-agent calls inject_artifact_context()
+      # Through the ENVIRONMENT, not settings.toml: pr-agent calls inject_artifact_context()
       # before apply_repo_settings() loads --extra_config_url, so an [artifacts] section in that
       # file is read too late and a label there is never applied - the prompt would read
       # "CI Artifact: context.md", which misdescribes a local pre-commit run.
@@ -682,10 +749,26 @@ if [ -n "$out_json" ]; then
   # Phase 1: the review. `kill -0` tests liveness without reaping, so the exit status survives.
   waited=0
   review_limit="${PREFLIGHT_REVIEW_WAIT:-3600}"
+  # Anything but a plain number means the default: `[` would otherwise report an error on every
+  # iteration and scroll a working review off the screen. The step is its own variable and is read as
+  # base 10, because arithmetic reads `5m` as an invalid number, `abc` as 0, and `08` as octal.
+  step="${PREFLIGHT_PROGRESS_EVERY:-30}"
+  case "$step" in
+    ''|*[!0-9]*) step=30 ;;
+  esac
+  step=$((10#$step))
+  next_note="$step"
   while { [ ! -f "$out_json" ] || [ ! -f "$out_md" ]; } \
         && kill -0 "$pr_pid" 2>/dev/null && [ "$waited" -lt "$review_limit" ]; do
     sleep 1
     waited=$((waited + 1))
+    # An hour-long silence cannot be told apart from a wedged run: the operator sees no output either way,
+    # and the only way to find out is to wait for the bound. This says WHICH phase it is in and how long it
+    # has been there, so a stuck endpoint reads as one. stderr only - stdout is the summary the loop parses.
+    if [ "$next_note" -gt 0 ] && [ "$waited" -ge "$next_note" ]; then
+      printf 'preflight: pr-agent is still running (%ss, no review written yet)\n' "$waited" >&2
+      next_note=$((next_note + step))
+    fi
   done
 
   emit_summary
@@ -720,6 +803,8 @@ if [ -n "$out_json" ]; then
 
   pr_status=0
   wait "$pr_pid" 2>/dev/null || pr_status=$?
+  # The child is reaped, so its pid is free to be reused: cleanup() must not signal whoever gets it next.
+  pr_pid=''
 
   # A process WE stopped after a complete review is not a failure - `preflight-gate` decides the verdict
   # on the artifact. Anything else (including a stopped run that wrote nothing) keeps its own status, so a
@@ -739,7 +824,12 @@ else
   git diff ${diff_base:+"$diff_base"} "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
     --output "$out_md" "$cmd" "$@" &
   pr_pid=$!
-  wait "$pr_pid" 2>/dev/null || exit $?
+  rc=0
+  wait "$pr_pid" 2>/dev/null || rc=$?
+  # Reaped: the pid is free to be reused, so cleanup() must not signal whoever gets it next. Cleared
+  # before the exit, because that exit is the other path cleanup() runs on.
+  pr_pid=''
+  [ "$rc" = 0 ] || exit "$rc"
   run_ok=1
 fi
 echo "preflight: wrote ${out_md}${out_json:+ and ${out_json}}" >&2

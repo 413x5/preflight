@@ -1,56 +1,56 @@
 # Troubleshooting
 
-Symptoms we actually hit, and the fix. Most of these apply to any OpenAI-compatible endpoint; the
-ones that are ClinePass-specific are labelled.
+Symptoms we actually hit, and the fix. Every one applies to any OpenAI-compatible endpoint unless the
+heading says otherwise.
 
 ## `preflight review` fails with a 401 / authentication error
 
-The key is missing or in the wrong place. It belongs in `~/.config/preflight/.secrets.toml` under
-`[openai]`, as `key = "..."` (the setting is **`key`**, not `api_key`). The section is `[openai]`
-because that is the OpenAI-compatible transport, not because the provider must be OpenAI:
+The key is missing, or under the wrong provider. It belongs in `~/.config/preflight/providers.toml`, in
+the `[providers.<name>]` entry the assigned profile names, as `key = "..."` (the setting is **`key`, not
+`api_key`**):
 
 ```toml
-[openai]
-api_base = "https://api.cline.bot/api/v1"   # your endpoint
-key      = "..."
+[providers.mine]
+api_base = "https://api.example.com/v1"   # your endpoint
+key      = "..."                          # this file is chmod 600
+
+[profiles.mine]
+provider = "mine"                         # and settings.toml must name this profile
+model    = "your-model-id"
 ```
 
-Then confirm the symlink exists in the package `settings/` dir (`preflight-pr --help` re-links it).
+Then check that `settings.toml`'s `[selection] main` names a profile that actually exists <!-- doc-path-ok: [selection] is preflight's own table, not a pr-agent section --> — `preflight`
+refuses a provider no `[providers.*]` table defines, and a profile the assignment does not resolve, so a
+typo is reported by name instead of surfacing here as an authentication error.
 
-## Using a different provider (not ClinePass)
+The config pr-agent receives is rendered from `settings.toml` + `providers.toml` for each run, so a key is
+never "somewhere else" — the one in the named provider's entry is the one that is sent. There is no other
+file to look in.
 
-Re-run `install.sh` with overrides — no hand-editing needed. See the README table for the full list:
+## Using a different provider
 
-```sh
-PREFLIGHT_API_BASE=https://api.openai.com/v1 \
-PREFLIGHT_KEY=sk-... \
-PREFLIGHT_MODEL=gpt-4o \
-PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS=0 \
-PREFLIGHT_MAX_MODEL_TOKENS=0 \
-  ./install.sh
-```
+Configuration is not an install-time variable: edit `~/.config/preflight/providers.toml` and point
+`settings.toml`'s assignment (`selection.main`) at the profile you want. Neither config file is created by
+`install.sh`, so re-running it never rewrites a configured install.
 
-The two token knobs are the ones that bite: `0` means "let LiteLLM resolve the context window", which
-is what you want for a model LiteLLM already knows (otherwise you override its real window with a
-guess). The ClinePass streaming workaround keys on the request host, so it goes inert automatically —
-you do not need to delete it.
+The two token keys are the ones that bite. `custom_model_max_tokens` is what pr-agent measures the prompt
+against when LiteLLM cannot resolve the model id - leave it unset for such an id and the run fails rather
+than reviewing a clamped diff. `max_model_tokens` clamps the diff, and `max_output_tokens` caps the reply.
+`0` on the first two means "let LiteLLM resolve the context window", which is what you want for a model it
+already knows; the output cap is worth setting explicitly for any reasoning model.
 
-## `preflight review` fails with "Failed to generate prediction with gpt-5.6-terra" (ClinePass)
+The streaming workaround is opt-in per provider (`stream = true`), and its substring is derived from the
+same provider's `api_base`, so switching endpoints switches it off automatically - there is nothing to
+delete.
 
-That is the **fallback** model. The upstream default fallback is the bare OpenAI id
-`gpt-5.6-terra`, which an endpoint can reject outright - ids must be in `provider/model`
-form, so a bare id fails with `400 invalid model format. Expected format: modelType/model` (the
-endpoint serves this model as `openai/gpt-5.6-terra`). The config here pins a working fallback
-instead:
+## `preflight review` fails with a model id the endpoint rejects
 
-```toml
-[config]
-fallback_models = ["openai/cline-pass/glm-5.3-flash"]
-```
-
-Set it to your own model, or to `[]` to disable fallback (a primary-model failure then fails hard
-rather than silently retrying). The id must be in the endpoint's `provider/model` form; `cline-pass/...`
-works too, while the `openai/` prefix above routes through LiteLLM's OpenAI-compatible transport.
+The **fallback** model can be the culprit even when the primary one looks fine. An endpoint may reject a
+bare OpenAI-style id outright - ids must be in `provider/model` form - with
+`400 invalid model format. Expected format: modelType/model`. Each `[profiles.<name>]` names the id in
+the form the endpoint serves; set the assignment's `fallback` list to profiles that name a working model on the same
+provider, or to `[]` to disable the fallback chain (a primary-model failure then fails hard rather than
+silently retrying).
 
 ## The review reports few issues per round and the loop will not converge (the "cascade")
 
@@ -58,7 +58,7 @@ Fixing only one of these leaves the loop slow.
 
 **1. A cap on how many findings are returned.** `pr_reviewer.num_max_findings` defaults to a handful, so each
 run reports that many findings, the agent fixes them and re-runs to find as many again. It is raised here
-(see [`../../config/preflight.toml.example`](../../config/preflight.toml.example) for the value). That setting
+(see [`../../config/settings.toml.example`](../../config/settings.toml.example) for the value). That setting
 does not change what the model is *shown* - raise it and a review still only covers the content the model
 received.
 
@@ -255,11 +255,6 @@ The helper could not find `src/VERSION` next to itself or in the config dir (`PR
 `~/.config/preflight`). Re-run the bundle's `install.sh`. The version is used to answer "is this machine's
 bundle current?", so if it matters, re-install rather than guessing from file mtimes.
 
-## `preflight-pr` / `preflight` print "relinked secrets" on every run
-
-Normal after a `uv tool upgrade` (the venv, and the symlink, are recreated). It is a one-time message
-per upgrade; if it happens every run, the symlink target is being deleted - check
-`~/.config/preflight/.secrets.toml` exists.
 
 ## `preflight review` prints nothing more and never exits
 
@@ -299,7 +294,7 @@ itself the reason the fix above is a bound rather than a diagnosis.
 **The levers, in order of usefulness:**
 
 1. **Bring the reasoning output down.** The hang correlates with completion volume. `[config]
-   reasoning_effort` is the lever, but note it is currently inert: `config/preflight.toml.example` leaves it unset
+   reasoning_effort` is the lever, but note it is currently inert: `config/settings.toml.example` leaves it unset
    AND unregistered, so no effort reaches the endpoint at all (the section below explains both).
 2. **`PREFLIGHT_SHUTDOWN_WAIT`** (env, default 120) bounds only the tail *after* the artifact exists. It
    is a safety net, not a fix, and it deliberately never bounds the review itself: a timeout that cut off
@@ -310,6 +305,39 @@ itself the reason the fix above is a bound rather than a diagnosis.
    silently ignored, so an operator who "sets" the wrong one keeps hanging with no feedback. Lowering it
    has **not** been confirmed to stop the hang; treat it as a lever to test, not a known fix. The model
    *request* is bounded separately by `config.ai_timeout` (default 120s), which does not cover this wait.
+
+## `preflight review` keeps printing "still running" and never writes a review
+
+**Symptom.** stderr repeats the note below at `PREFLIGHT_PROGRESS_EVERY` intervals (default 30s), and
+`.preflight/review.json` never appears:
+
+```
+preflight: pr-agent is still running (120s, no review written yet)
+```
+
+**What the note means.** The note is on stderr at the *review* phase - before any artifact exists - so it
+is saying the model call itself has not come back. That is different from the shutdown note in the section
+above, which fires only *after* the review is complete and is harmless. A run that prints this for minutes
+is not slow, it is waiting on something.
+
+**The usual cause is the endpoint, not preflight.** Check it directly, before the wait expires: ask the
+endpoint for one short completion, using the model id and the credential from `providers.toml`. What to
+look for is below. How to send it is not this document's subject, and `SECURITY.md` states the trust model
+that governs the credential.
+
+- **A proxy that only answers when the request streams** is the common one: a non-streaming request
+  returns a 5xx (an empty body, `empty response content`, or `no choices`) while the same request with
+  `"stream": true` succeeds. Set `stream = true` on that provider in `providers.toml` - the renderer scopes
+  the workaround to that provider's own host, and it is a knob the operator sets, never one the bundle
+  infers from the URL. The example file documents the key.
+- **`503 no subscriptions are configured for this model`** and similar are the proxy's own account state
+  for that model id: nothing in preflight can fix it, and the model id in the profile must be one the
+  endpoint reports as available.
+- **A model id the endpoint rejects** is the section at the top of this file.
+
+**Do not raise `PREFLIGHT_REVIEW_WAIT` to make this go away.** That bound is an hour by default; the note
+exists so the run announces itself while it waits, not so the wait can grow. `PREFLIGHT_PROGRESS_EVERY`
+controls only how often it speaks - set it to `0` to silence it, or leave it alone.
 
 ## `preflight review` is slow, and the output looks tiny for it
 

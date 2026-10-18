@@ -4,7 +4,65 @@ set -euo pipefail
 # The same config dir `preflight` and install.sh use, PREFLIGHT_HOME included, so both helpers read
 # one tree. ${HOME:-} because this runs under `set -u`.
 cfgdir="${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}"
-if [ -f "${cfgdir}/ensure-link.sh" ]; then
-  . "${cfgdir}/ensure-link.sh"
+here="$(cd "$(dirname "$0")" && pwd)"
+
+# The model configuration, resolved exactly as `preflight` resolves it - shared helper, same lookup
+# order - so the two cannot disagree about which model answers. settings.toml and providers.toml are the
+# ONLY sources now, so both must be present: there is no second config to fall back to.
+# The rendered config is per run ($PREFLIGHT_HOME/.pragent.settings.<pid>.toml); this process removes its
+# own from the EXIT trap. The copy left at .pragent.settings.toml is for inspection and is not removed.
+rendered_cfg=''
+cleanup_pr() {
+  # An abnormal exit (a signal) would otherwise leave pr-agent running. It holds the caller's stdout
+  # open, so `x="$(preflight-pr ...)"` blocks for the model call even though this script is gone - the
+  # failure looks like a hang in the wrong process.
+  if [ -n "${pr_pid:-}" ] && kill -0 "$pr_pid" 2>/dev/null; then
+    kill -TERM "$pr_pid" 2>/dev/null || true
+    hold=0
+    while kill -0 "$pr_pid" 2>/dev/null && [ "$hold" -lt 5 ]; do sleep 1; hold=$((hold + 1)); done
+    kill -KILL "$pr_pid" 2>/dev/null || true
+  fi
+  if [ -n "${rendered_cfg:-}" ]; then rm -f "$rendered_cfg"; fi
+  return 0
+}
+trap cleanup_pr EXIT
+
+# `--help` and `--version` are answered by pr-agent itself and need no config, so they must not be gated
+# behind one - a machine that has not installed yet can still ask what the command does.
+for _arg in "$@"; do
+  case "$_arg" in
+    -h|--help|-V|--version) exec pr-agent "$@" ;;
+  esac
+done
+
+mprof=''
+for cand in "$here/settings-render.sh" "$here/../scripts/settings-render.sh" "${cfgdir}/settings-render.sh"; do
+  if [ -f "$cand" ]; then mprof="$cand"; break; fi
+done
+if [ -z "$mprof" ]; then
+  if [ -f "${cfgdir}/settings.toml" ]; then
+    printf 'preflight-pr: %s is present, but settings-render.sh was not found (looked beside this script and in %s)\n' \
+      "${cfgdir}/settings.toml" "$cfgdir" >&2
+    printf 'preflight-pr: refusing to review with a model configuration that was not applied\n' >&2
+  else
+    printf 'preflight-pr: neither settings-render.sh nor %s was found (looked beside this script and in %s)\n' \
+      "${cfgdir}/settings.toml" "$cfgdir" >&2
+    printf 'preflight-pr: install.sh writes both; re-run it, or point PREFLIGHT_HOME at an install that has them\n' >&2
+  fi
+  exit 2
 fi
-exec pr-agent --extra_config_url "file://${cfgdir}/preflight.toml" "$@"
+. "$mprof"
+__preflight_render_settings "$cfgdir" || exit $?
+rendered_cfg="$PREFLIGHT_RENDERED_CONFIG"
+
+# pr-agent is run as a child rather than `exec`d, so this process stays alive to reap it and to remove the
+# per-run rendered config from its EXIT trap. `<&0` is explicit because job control is off in a
+# non-interactive shell, which makes bash redirect a backgrounded command's stdin from /dev/null - so
+# without it the child sees EOF where `exec` used to pass the caller's stdin straight through.
+rc=0
+pr-agent --extra_config_url "$rendered_cfg" "$@" <&0 &
+pr_pid=$!
+wait "$pr_pid" || rc=$?
+# Reaped: the pid is free to be reused, so cleanup_pr must not signal whoever gets it next.
+pr_pid=''
+exit "$rc"

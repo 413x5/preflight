@@ -1,8 +1,8 @@
 # Contributing
 
 This repo is a **portable bundle**: `install.sh` plus the files under `src/` are the source of truth for
-the machine-local PR-Agent setup. Keep it portable, and keep it provider-agnostic - ClinePass is a default,
-not an assumption.
+the machine-local PR-Agent setup. Keep it portable and keep it provider-agnostic: no endpoint, model id or
+host is named in the code, and the configuration happens after the install.
 
 ## Setup
 
@@ -10,10 +10,17 @@ not an assumption.
 git clone https://github.com/413x5/preflight ~/preflight
 cd ~/preflight
 ./install.sh
-$EDITOR ~/.config/preflight/.secrets.toml      # paste the API key between the quotes
+
+# the install ships references only - create your config from them, then edit it
+cp ~/.config/preflight/settings.toml.example  ~/.config/preflight/settings.toml
+( umask 077; cp ~/.config/preflight/providers.toml.example ~/.config/preflight/providers.toml )
+$EDITOR ~/.config/preflight/providers.toml     # endpoint, API key and model id
+$EDITOR ~/.config/preflight/settings.toml      # [selection] main = that profile's name
 ```
 
-Non-interactive: `PREFLIGHT_KEY=... ./install.sh`. Requirements are in [`README.md`](README.md).
+Requirements are in [`README.md`](README.md). There is no variable that seeds an endpoint or a model, and
+`install.sh` creates neither config file: it knows no endpoint, model id or budget, so a file it wrote could
+only be a guess.
 
 `install.sh` is testable without touching your real setup - point it at throwaway directories and skip the
 parts that need `uv` or the network:
@@ -21,7 +28,7 @@ parts that need `uv` or the network:
 ```sh
 T="$(mktemp -d)"
 PREFLIGHT_HOME="$T/cfg" PREFLIGHT_BIN_DIR="$T/bin" \
-PREFLIGHT_SKIP_TOOL_INSTALL=1 PREFLIGHT_SKIP_PACKAGE_LINK=1 \
+PREFLIGHT_SKIP_TOOL_INSTALL=1 \
   ./install.sh
 ls "$T/bin"        # preflight  preflight-pr  preflight-gate
 rm -rf "$T"
@@ -35,12 +42,12 @@ whoever works on the code next, human or agent, and it is deliberately the only 
 
 Rules worth repeating here because they are the ones most easily broken by accident:
 
-- **No secrets, ever.** Only `config/secrets.toml.example` (with an empty key) is committed.
+- **No secrets, ever.** Only the `config/*.toml.example` templates are committed, with placeholder keys.
 - **No machine-specific paths.** Everything derives from `$HOME` or the documented env vars.
-- **Provider-agnostic.** Anything specific to one endpoint belongs in `config/preflight.toml.example` as an
-  overridable default, documented as provider-specific in both the file and `docs/architecture.md`.
+- **Provider-agnostic.** No endpoint, model id or host belongs in the code or the tests. The templates
+  carry placeholders, and a user sets the real values in `providers.toml` after installing.
 - **Idempotent installs.** `install.sh` must be safe to re-run and must never clobber an existing
-  `~/.config/preflight/.secrets.toml`.
+  `~/.config/preflight/providers.toml`.
 - **`pr-agent` means only the upstream tool.** This bundle is `preflight`; do not reintroduce
   `pra`/`pral`/`pral-gate` or a `pr-agent`-named config file.
 

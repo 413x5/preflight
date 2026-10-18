@@ -42,6 +42,29 @@ work="$(mktemp -d)"
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
 
+# settings.toml is the ONLY config source now (there is no preflight.toml to fall back to), so a case that
+# points PREFLIGHT_HOME at a bare directory would stop at "settings.toml was not found" rather than
+# exercising what it means to. Seed every config dir the suite uses with a working pair, once, here - a
+# case that wants a different pair writes over these.
+#
+# The provider and profile are named "main" and the model is deliberately one no endpoint serves: these
+# cases drive a stubbed `pr-agent`, so nothing calls out, and the values never matter beyond resolving.
+seed_cfg() {
+  local cfg="$1"
+  mkdir -p "$cfg"
+  printf '[selection]\nmain = "main"\n\n[config]\nmax_output_tokens = 384000\ncustom_model_max_tokens = 1000000\nmax_model_tokens = 616000\n\n[pr_reviewer]\nreview_heading = "Preflight - PR Reviewer Guide"\nnum_max_findings = 10\n' > "$cfg/settings.toml"
+  printf '[providers.main]\napi_base = "https://example.invalid/v1"\nkey = "test-key"\n\n[profiles.main]\nprovider = "main"\nmodel = "test-model"\n' > "$cfg/providers.toml"
+  # 600-mode, like a configured install: `printf` inherits the suite's umask (typically 0644), and every
+  # render would then take the loose-mode path - chmod-ing the fixture and adding its warning to each run's
+  # stderr. The warning has its own case; the default path must be the clean one.
+  chmod 600 "$cfg/providers.toml"
+  cp "$repo_root/scripts/settings-render.sh" "$cfg/settings-render.sh"
+}
+for _d in ctx fallback history partial-scope scope shutdown untracked verdict wiring; do
+  seed_cfg "$work/${_d}-cfg"
+done
+unset _d
+
 # The fixtures make real commits, so they need an identity. Set it in the environment rather than
 # relying on the machine's git config: a CI runner has none by default, and the suite must not depend
 # on how the machine is set up. This also keeps the tests from touching the user's config.
@@ -780,7 +803,7 @@ PY
 
   # Part 2: the keys the bundle sets must be in the table pr-agent actually reads them from, and the
   # example file's commented list must still match the pr-agent that is installed.
-  if python3 - "$sp/settings/configuration.toml" "$repo_root/config/preflight.toml.example" "$repo_root" <<'PY'
+  if python3 - "$sp/settings/configuration.toml" "$repo_root/config/settings.toml.example" "$repo_root" <<'PY'
 import re, sys, tomllib
 
 defaults_path, ours_path, repo_root = sys.argv[1:4]
@@ -819,7 +842,7 @@ if wrong:
 ours = tomllib.load(open(ours_path, "rb"))
 missing = [k for k in sorted(wanted) if k not in ours.get(wanted[k], {})]
 if missing:
-    print("config/preflight.toml.example does not set these: "
+    print("config/settings.toml.example does not set these: "
           + ", ".join(f"{k} under [{wanted[k]}]" for k in missing))
     sys.exit(3)
 
@@ -841,8 +864,11 @@ for line in open(defaults_path, encoding="utf-8", errors="replace"):
 upstream = tomllib.load(open(defaults_path, "rb"))["pr_reviewer"]
 
 # Only this section, so a later one's keys cannot satisfy the comparison by coincidence.
-body = open(ours_path, encoding="utf-8", errors="replace").read().split("[pr_reviewer]", 1)[1]
-body = re.split(r"(?m)^\[", body, 1)[0]
+# The REAL header - a line that is exactly `[pr_reviewer]` - not the first mention of that text. A
+# comment banner naming the section (an `# ---- [pr_reviewer]` divider) satisfies a naive split, which
+# leaves an empty body and reports every key as unlisted.
+body = re.split(r"(?m)^\[pr_reviewer\]\s*$", open(ours_path, encoding="utf-8", errors="replace").read(), maxsplit=1)[1]
+body = re.split(r"(?m)^\[", body, maxsplit=1)[0]
 live = tomllib.load(open(ours_path, "rb")).get("pr_reviewer", {})
 commented = {}
 for line in body.splitlines():
@@ -1176,9 +1202,8 @@ FAKE
     return
   }
 
-  # A config dir with no ensure-link.sh or preflight.toml: this case is about the summary line, and the
-  # gate is still resolved from the helper's own directory and run afterwards, writing the sidecar
-  # regardless of its verdict.
+  # This case is about the summary line. The gate is resolved from the helper's own directory and run
+  # afterwards, writing the sidecar regardless of its verdict.
   run_once() {
     ( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$work/wiring-cfg" \
         bash "$repo_root/src/preflight" review ) 2>&1
@@ -1535,14 +1560,14 @@ APPEND
 
   # A single model that lost to the fallback, and the plural form pr-agent emits when more than one model
   # contributed (the chunking path, which marks it `(includes fallback)` instead).
-  check fallback-answered FALLBACK '- Model: openai/cline-pass/glm-5.3-flash (fallback)
+  check fallback-answered FALLBACK '- Model: example-small (fallback)
 - Tokens: 1 / 2 / 3
 - AI calls: 1'
   check multi-with-fallback FALLBACK '- Models: a, b (includes fallback)
 - Tokens: 1 / 2 / 3'
   # The other direction: the configured model answered, so the line must stay quiet. Without these the
   # marker could fire unconditionally and every assertion above would still pass.
-  check primary-answered absent '- Model: openai/cline-pass/deepseek-v4.1-flash
+  check primary-answered absent '- Model: example-large
 - Tokens: 1 / 2 / 3
 - AI calls: 1'
   check multi-no-fallback absent '- Models: a, b
@@ -1574,7 +1599,14 @@ case_bounded_shutdown() {
   d="$work/shutdown"; fake="$work/shutdown-bin"; slow="$work/shutdown-slow"
   cfg="$work/shutdown-cfg"; fpid="$work/shutdown-fake.pid"
   mkdir -p "$d/.githooks" "$fake" "$slow" "$cfg"
-  cp "$repo_root/config/preflight.toml.example" "$cfg/preflight.toml"
+  PREFLIGHT_HOME="$cfg" PREFLIGHT_BIN_DIR="$cfg/.bin" \
+    PREFLIGHT_SKIP_TOOL_INSTALL=1 "$repo_root/install.sh" >/dev/null 2>&1
+  cp "$cfg/settings.toml.example" "$cfg/settings.toml"
+  cp "$cfg/providers.toml.example" "$cfg/providers.toml"
+  # The one value the reference cannot carry for the user: its key is empty, and the resolver refuses an
+  # empty credential - so the copy is completed exactly as the NEXT line tells a user to.
+  sed -i.bak 's/^key = ""/key = "test-key"/' "$cfg/providers.toml" && rm -f "$cfg/providers.toml.bak"
+  chmod 600 "$cfg/providers.toml"
 
   # Writes both artifacts, then hangs. `exec` makes this PID the sleeper, so stopping it stops the sleep.
   cat > "$fake/pr-agent" <<'FAKE'
@@ -1946,10 +1978,25 @@ PY
   # PREFLIGHT_DIR read-only instead, which was vacuous in two ways: `mkdir -p "$run_dir"` still succeeds
   # under an already-created writable `runs/`, and the stub cannot write its artifact at all, so the case
   # exited through the "nothing to archive" path and the write-failure branch was never reached.
+  # A python3 that fails ONLY when asked to write the record. A blanket `exit 1` no longer reaches this
+  # branch: the model configuration is rendered with python3 first, so a broken interpreter refuses the run
+  # before there is anything to archive - which is correct, and a different failure from this one.
   agent_ok
   local badpy="$work/history-badpy"
   mkdir -p "$badpy"
-  printf '#!/bin/sh\nexit 1\n' > "$badpy/python3"
+  # The shim fails only on the ARCHIVE write and delegates everything else to the real interpreter, by
+  # absolute path: `env -u PATH python3` cannot find it, which would break the render instead of the
+  # archive and test the wrong branch.
+  _real_py="$(command -v python3)"
+  cat > "$badpy/python3" <<BADPY
+#!/bin/sh
+for a in "\$@"; do
+  case "\$a" in *run.json) exit 1 ;; esac
+done
+# The real interpreter, resolved at TEST time and substituted in, so the shim works on any machine rather
+# than only the one it was written on. `command -v` inside the shim would find itself.
+exec $_real_py "\$@"
+BADPY
   chmod +x "$badpy/python3"
   out="$( cd "$d" && PATH="$badpy:$fake:$PATH" PREFLIGHT_HOME="$cfg" FAKE_SEQ="$work/history-seq" \
             bash "$repo_root/src/preflight" describe 2>&1 )" || true
@@ -2463,8 +2510,9 @@ MD
   [ -n "$apath" ] || problems="$problems
         | no ARTIFACT_PATH was exported, so the repository context never reached the reviewer"
   # The label is asserted because it must arrive through the ENVIRONMENT: an [artifacts] section in
-  # preflight.toml is read (by apply_repo_settings) AFTER injection, so a label set there is never
-  # applied and the prompt header silently falls back to the filename.
+  # The config is loaded (by apply_repo_settings) AFTER injection, so a label set there is never applied
+  # and the prompt header silently falls back to the filename - which is why the helper sets it through
+  # the environment instead.
   case "$got" in *"ARTIFACT_LABEL=Repository context (from AGENTS.md)"*) ;;
     *) problems="$problems
         | the artifact label was not exported, so the prompt header misdescribes a local run as CI" ;; esac
@@ -2637,6 +2685,1091 @@ MD
 "; fi
 }
 
+# ---------------------------------------------------------------------------- named model configurations
+
+# These drive the SHIPPED renderer through the SHIPPED helper, with a stub `pr-agent` that records the
+# config URL it was handed and takes a copy of that file. Offline and key-free, like the rest of the
+# suite.
+#
+# The copy is the point: the rendered file is kept at $PREFLIGHT_HOME/.pragent.settings.toml and the next
+# run overwrites it, so "what did THIS launch actually read?" is only answerable from a copy taken during
+# the run. Every assertion is made against that copy rather than against the renderer's own output, so a
+# renderer that reports one thing and writes another is caught.
+
+model_stub() {
+  # $2 is the value of --extra_config_url: the config this run was pointed at.
+  local fake="$1"
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$2" > "$PREFLIGHT_CFG_OUT"
+cp "$2" "$PREFLIGHT_CFG_COPY" 2>/dev/null
+cat > /dev/null
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent"
+}
+
+model_repo() {
+  local d="$1"
+  mkdir -p "$d"
+  ( cd "$d" \
+      && git init -q -b main . \
+      && printf 'a\n' > f.txt \
+      && git add -A \
+      && git -c commit.gpgsign=false commit -q --no-verify -m init \
+      && printf 'b\n' >> f.txt ) >/dev/null 2>&1
+}
+
+# A config dir as install.sh leaves it, plus the step its NEXT line tells the user to take: create both
+# files from the installed examples. Run through the real installer rather than copying the repo's
+# templates, so a case cannot pass against a config shape an install would never produce - and the examples
+# are the ones the install actually wrote.
+model_cfg_dir() {
+  local cfg="$1"
+  mkdir -p "$cfg"
+  PREFLIGHT_HOME="$cfg" PREFLIGHT_BIN_DIR="$cfg/.bin" \
+  PREFLIGHT_SKIP_TOOL_INSTALL=1 "$repo_root/install.sh" >/dev/null 2>&1
+  cp "$cfg/settings.toml.example" "$cfg/settings.toml"
+  cp "$cfg/providers.toml.example" "$cfg/providers.toml"
+  # The one value the reference cannot carry for the user: its key is empty, and the resolver refuses an
+  # empty credential - so the copy is completed exactly as the NEXT line tells a user to.
+  sed -i.bak 's/^key = ""/key = "test-key"/' "$cfg/providers.toml" && rm -f "$cfg/providers.toml.bak"
+  chmod 600 "$cfg/providers.toml"
+}
+
+# Write a fixture as ONE document and split it by TOP-LEVEL TABLE: [config] and [pr_reviewer] go to
+# settings.toml, [providers.*] and [profiles.*] to providers.toml. A case then never has to say which file
+# a table belongs to, and a profile cannot silently land in the wrong one. The PROVIDERS already in
+# providers.toml are kept (a case only states what it is changing); its PROFILES are replaced, so one
+# case's profiles cannot leak into the next.
+model_cfg_write() {
+  local cfg="$1"
+  python3 - "$cfg" "$2" <<'PYCFG'
+import pathlib, sys
+
+cfg = pathlib.Path(sys.argv[1])
+chunks, cur = [], []
+for line in sys.argv[2].splitlines():
+    if line.startswith("[") and line.rstrip().endswith("]"):
+        if cur:
+            chunks.append(cur)
+        cur = [line]
+    else:
+        cur.append(line)
+if cur:
+    chunks.append(cur)
+
+settings, providers = [], []
+for chunk in chunks:
+    top = chunk[0].strip().strip("[]").split(".")[0].strip().strip('"')
+    # settings.toml is every section pr-agent reads PLUS [selection]; providers.toml is
+    # [providers.*] and [profiles.*]. Anything else a fixture writes goes to settings.toml, which is
+    # where pr-agent's own sections live.
+    is_providers = top in ("providers", "profiles")
+    (providers if is_providers else settings).append("\n".join(chunk).strip("\n"))
+
+(cfg / "settings.toml").write_text("\n\n".join(settings).strip() + "\n")
+
+path = cfg / "providers.toml"
+existing = path.read_text() if path.exists() else ""
+keep, cur = [], []
+for line in existing.splitlines():
+    if line.startswith("[") and line.rstrip().endswith("]"):
+        if cur:
+            keep.append(cur)
+        cur = [line]
+    else:
+        cur.append(line)
+if cur:
+    keep.append(cur)
+kept = ["\n".join(c).strip("\n") for c in keep
+        if c[0].strip().strip("[]").split(".")[0].strip().strip('"') != "profiles"]
+out = "\n\n".join([c for c in kept if c] + providers)
+path.write_text(out.strip() + "\n" if out.strip() else "")
+PYCFG
+}
+
+case_model_configuration() {
+  local d="$work/models" cfg="$work/models-cfg" fake="$work/models-bin"
+  local repo_dir
+  mkdir -p "$fake"
+  model_repo "$d"
+  repo_dir="$(cd "$d" && pwd -P)"
+  model_cfg_dir "$cfg"
+  model_stub "$fake"
+
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.alpha]
+api_base = "https://alpha.example.com/v1"
+key      = "key-one"
+stream   = true
+
+[providers.work]
+transport = "openrouter"
+api_base  = "https://llm.internal.corp/v1"
+key       = "key-two"
+TOML
+
+  # Two endpoints are configured and the SECOND is the one in use, deliberately: a renderer that ignored
+  # the provider entry would leave the first provider's host and key in place, which is exactly the
+  # silent misroute this feature exists to make impossible.
+  #
+  # The second provider's transport is `openrouter` rather than the default `openai`, and that is also
+  # deliberate: the default transport is `openai`, so a renderer that hard-coded the default instead of
+  # reading the provider would look correct on an `openai` provider. A different transport is what makes
+  # "the pin is derived from the provider" falsifiable.
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "work-main"
+fallback = ["work-small"]
+
+# Run-wide, independent of which profile is assigned.
+[pr_reviewer]
+num_max_findings = 10
+review_heading = "From settings.toml"
+
+[config]
+max_output_tokens = 384000
+
+[profiles.work-main]
+provider = "work"
+model = "their-model-id"
+
+[profiles.work-small]
+provider = "work"
+model = "their-small"
+TOML
+)"
+
+  local problems="" rc url copy out
+  run_models() {
+    rc=0
+    ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" \
+        PREFLIGHT_CFG_OUT="$work/models.url" PREFLIGHT_CFG_COPY="$work/models.copy" \
+        PREFLIGHT_HOME="$cfg" bash "$repo_root/src/preflight" review ) >"$work/models.out" 2>&1 || rc=$?
+    url="$(cat "$work/models.url" 2>/dev/null)"
+    copy="$work/models.copy"
+    rm -f "$work/models.url"
+  }
+
+  run_models
+  [ "$rc" = 0 ] || problems="$problems
+        | a run with a valid assignment failed (exit $rc): $(cat "$work/models.out")"
+  case "$url" in
+    # The launched config must be the RENDERED file: it is the only source now, so an empty URL means the
+    # run never got a config at all and would answer on pr-agent's own defaults.
+    "") problems="$problems
+        | pr-agent was not handed a rendered config (got nothing)" ;;
+    # And it must be a name pr-agent will actually LOAD. Its settings loader skips every file that is not
+    # `*.toml` - with a warning, not an error - so a correctly-named-by-content file at a bare `mktemp`
+    # path is accepted as `--extra_config_url` and then ignored, and the run answers on pr-agent's own
+    # defaults. That is why this asserts the SUFFIX rather than only the content.
+    *.toml) ;;
+    *) problems="$problems
+        | the rendered config is named ${url##*/}, which pr-agent will skip: its loader reads only *.toml" ;;
+  esac
+  if [ ! -s "$copy" ]; then
+    problems="$problems
+        | the run wrote no config for pr-agent to read (output: $(cat "$work/models.out"))"
+  else
+    # The heredoc is written to a FILE and run, not embedded in a command substitution: on macOS bash 3.2
+    # an apostrophe anywhere in such a body is a mis-parse (AGENTS.md), turning a message edit into a
+    # syntax error far from the cause. This file had that fixed once - keeping the shape keeps it fixed.
+    cat > "$work/models-check.py" <<'PY'
+import os, sys, tomllib
+path = sys.argv[1]
+d = tomllib.load(open(path, "rb"))
+bad = []
+if d["config"]["model"] != "their-model-id":
+    bad.append(f"model={d['config']['model']!r} (want the named provider id)")
+if d["config"]["fallback_models"] != ["their-small"]:
+    bad.append(f"fallback_models={d['config']['fallback_models']!r}")
+if d["openrouter"]["api_base"] != "https://llm.internal.corp/v1":
+    bad.append(f"api_base={d['openrouter']['api_base']!r} - the other provider would answer")
+if d["openrouter"]["key"] != "key-two":
+    bad.append("the credential is not the named provider")
+# The pin must come from the provider entry. The default transport is `openai`, so this provider uses
+# `openrouter` and the two cannot be confused - a renderer that hard-coded the default, or skipped the
+# pin, would leave the request addressed to the wrong provider transport.
+if d["litellm"]["custom_llm_provider"] != "openrouter":
+    bad.append(f"pin={d['litellm']['custom_llm_provider']!r} (want the provider transport)")
+# This provider does not stream, so no streaming pair may survive from settings.toml: the gate fires on a
+# provider name AND an api_base substring, so a stale pair is one that a host the user never connected to
+# streaming happens to match.
+if d["litellm"]["force_streaming_custom_llm_provider"] != "":
+    bad.append("an inherited streaming provider survived the render")
+if d["litellm"]["force_streaming_api_base_substrings"] != []:
+    bad.append("an inherited streaming host survived the render")
+# settings.toml IS the config, so anything it carries must reach the render rather than be replaced by it.
+# These two are the ones whose loss changes review behaviour.
+if d["config"].get("max_output_tokens", 0) < 100000:
+    bad.append("the profile max_output_tokens was dropped by the render")
+if not d["pr_reviewer"].get("review_heading", ""):
+    bad.append("the settings.toml review_heading was dropped by the render")
+if d["pr_reviewer"]["num_max_findings"] != 10:
+    bad.append(f"the profile num_max_findings did not apply: {d['pr_reviewer']['num_max_findings']!r}")
+mode = os.stat(path).st_mode & 0o777
+if mode != 0o600:
+    bad.append(f"the rendered config is {oct(mode)}, not 0o600, and it holds a key")
+print("; ".join(bad))
+sys.exit(1 if bad else 0)
+PY
+    out="$(python3 "$work/models-check.py" "$copy")" || problems="$problems
+        | the rendered config is not right: $out"
+
+    # The per-run file's mode is checked on the stub's copy (above), because the helper deletes its own
+    # render on exit. What this asserts is that deletion: a credential-bearing file per run, never
+    # accumulated, and a stale render that a later run could be handed.
+    case "$url" in
+      "$cfg"/.pragent.settings.*.toml) ;;
+      *) problems="$problems
+        | pr-agent was handed $url, not a per-run file in $cfg" ;;
+    esac
+    if [ -e "$url" ]; then
+      problems="$problems
+        | the run left its per-run rendered config behind: $url"
+    fi
+  fi
+  rm -f "$copy"
+
+  # The inspectable copy is what survives a run, by design. What must hold for it: it is 600-mode, it is
+  # outside the repository, and the NEXT run rewrites it rather than reusing it.
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$2" > "$PREFLIGHT_CFG_OUT"
+exit 3
+FAKE
+  chmod +x "$fake/pr-agent"
+  run_models
+  [ "$rc" = 3 ] || problems="$problems
+        | a failing pr-agent no longer reports its own exit status (got $rc)"
+  _fixed="$cfg/.pragent.settings.toml"
+  if [ ! -f "$_fixed" ]; then
+    problems="$problems
+        | the inspectable copy of the last render is missing ($_fixed)"
+  else
+    [ "$(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$_fixed")" = "0o600" ] \
+      || problems="$problems
+        | the inspectable copy is not 600-mode: $(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$_fixed")"
+    case "$(cd "$cfg" && pwd -P)/" in
+      "$repo_dir"/*) problems="$problems
+        | the rendered config lives inside the repository, so a review could stage its own key" ;;
+    esac
+  fi
+  # A SECOND run must overwrite the first's bytes, not append or reuse them.
+  before_sum="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$_fixed" 2>/dev/null)"
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "work-main"
+
+[profiles.work-main]
+provider = "work"
+model = "a-different-model"
+TOML
+)"
+  run_models >/dev/null 2>&1
+  after_sum="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$_fixed" 2>/dev/null)"
+  [ -n "$before_sum" ] && [ "$before_sum" = "$after_sum" ] && problems="$problems
+        | the rendered config was NOT rewritten for the next run - a stale endpoint and model would be reused"
+  model_stub "$fake"
+
+  # The rendered file holds the provider's key, and the review snapshots the working tree with `git add -A`
+  # BEFORE rendering - so with a config dir inside a repository the PREVIOUS run's file is what gets
+  # staged. That is reachable now the path is fixed where a `mktemp` path made it impossible, so the
+  # renderer refuses it. Both directions are asserted: a repo that ignores the path works, one that does
+  # not refuses and says what to add.
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "work-main"
+
+[profiles.work-main]
+provider = "work"
+model = "their-model-id"
+TOML
+)"
+  _home_in_repo="$d/home-in-repo"
+  mkdir -p "$_home_in_repo"
+  cp "$cfg/settings.toml" "$cfg/providers.toml" "$cfg/settings-render.sh" "$_home_in_repo/"
+  # The refusal must come BEFORE the working-tree snapshot. That snapshot is `git add -A`, which writes
+  # the blob - so an unignored providers.toml would land in .git/objects even though the run refuses, and
+  # `git cat-file` would hand the key back afterwards. Counted, not assumed: objects are enumerated before
+  # and after, and the key's blob must not be among the new ones.
+  _objs_before="$work/models.objs.before"; _objs_after="$work/models.objs.after"
+  git -C "$d" cat-file --batch-all-objects --batch-check > "$_objs_before" 2>/dev/null
+  rc=0
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" PREFLIGHT_CFG_OUT="$work/models.tmpdir.url" \
+      PREFLIGHT_HOME="$_home_in_repo" bash "$repo_root/src/preflight" review ) >"$work/models.tmpdir.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || problems="$problems
+        | a PREFLIGHT_HOME inside a repository, not ignoring the rendered path, was accepted - the key would be staged"
+  # The key from providers.toml, by content: a blob whose body carries it is the credential in the object
+  # store, whichever path it was staged under.
+  _keyblob="$(git -C "$d" cat-file --batch-all-objects --batch-check > "$_objs_after" 2>/dev/null; \
+              comm -13 "$_objs_before" "$_objs_after" | awk '$2 == "blob" {print $1}' | \
+              while read -r _o; do
+                git -C "$d" cat-file blob "$_o" 2>/dev/null | grep -qF 'key-two' && echo "$_o" && break
+              done)"
+  [ -z "$_keyblob" ] || problems="$problems
+        | the refusal came AFTER the working-tree snapshot: the key reached .git/objects as blob $_keyblob"
+  case "$(cat "$work/models.tmpdir.out")" in
+    *"are not ignored there"*) ;;
+    *) problems="$problems
+        | the refusal for a config dir inside a repository did not name the cause: $(cat "$work/models.tmpdir.out")" ;;
+  esac
+  # The remedy must name the DIRECTORY: an enumeration of known names can never cover a
+  # `providers.toml.bak` or an editor copy, which the same snapshot stages. It must also be RELATIVE,
+  # because a gitignore pattern is matched from the repo root and an absolute one can never be pasted in.
+  case "$(cat "$work/models.tmpdir.out")" in
+    *"(home-in-repo/)"*) ;;
+    *) problems="$problems
+        | the refusal did not print the config directory as a repo-relative rule: $(grep -i 'not ignored' "$work/models.tmpdir.out")" ;;
+  esac
+  # Ignoring ONLY the render is not enough: providers.toml sits beside it and holds the same key, so the
+  # remedy the refusal prints has to cover both, and a half-ignored config dir must still be refused.
+  printf 'home-in-repo/.pragent.settings.*.toml\n' > "$d/.gitignore"
+  rc=0
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" PREFLIGHT_CFG_OUT="$work/models.tmpdir.url" \
+      PREFLIGHT_HOME="$_home_in_repo" bash "$repo_root/src/preflight" review ) >"$work/models.tmpdir.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || problems="$problems
+        | ignoring only the rendered path was accepted, but providers.toml holds the same key and would be staged"
+  case "$(cat "$work/models.tmpdir.out")" in
+    *"home-in-repo/providers.toml"*) ;;
+    *) problems="$problems
+        | the refusal did not name providers.toml as unignored: $(grep -i 'not ignored' "$work/models.tmpdir.out" | head -2)" ;;
+  esac
+  # EVERY file in the dir counts, not the four names a list would hold: a backup of providers.toml holds
+  # the same key, and `git add -A` stages it under a name no enumeration can predict.
+  printf 'home-in-repo/.pragent.settings.*.toml\nhome-in-repo/.pragent.settings.toml\nhome-in-repo/providers.toml\nhome-in-repo/settings.toml\n' > "$d/.gitignore"
+  printf 'key = "key-two"\n' > "$_home_in_repo/providers.toml.bak"
+  rc=0
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" PREFLIGHT_CFG_OUT="$work/models.tmpdir.url" \
+      PREFLIGHT_HOME="$_home_in_repo" bash "$repo_root/src/preflight" review ) >"$work/models.tmpdir.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || problems="$problems
+        | an unignored providers.toml.bak was accepted, but it holds the key and the snapshot stages it"
+  case "$(cat "$work/models.tmpdir.out")" in
+    *"home-in-repo/providers.toml.bak"*) ;;
+    *) problems="$problems
+        | the refusal did not name the unignored backup: $(grep -i 'not ignored' "$work/models.tmpdir.out" | head -2)" ;;
+  esac
+  rm -f "$_home_in_repo/providers.toml.bak"
+  # But a config dir in a DIFFERENT git repository is not this run's hazard: the reviewed repo's snapshot
+  # never sees it, so it must render. Scoping the guard to the repo under review is what prevents an
+  # unrelated `$HOME`-as-checkout from blocking every review on the machine.
+  # OUTSIDE `$d`: a nested git repository inside the fixture would break that fixture's own snapshot.
+  _other_repo="$work/other-repo"
+  rm -rf "$_other_repo"; mkdir -p "$_other_repo"
+  cp "$cfg/settings.toml" "$cfg/providers.toml" "$cfg/settings-render.sh" "$_other_repo/"
+  ( cd "$_other_repo" && git init -q . ) 2>/dev/null
+  ( cd "$d" && bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null' _ \
+      "$repo_root/scripts/settings-render.sh" "$_other_repo" ) >"$work/models.other.out" 2>&1 \
+    || problems="$problems
+        | a config dir in an UNRELATED repository blocked the review: $(tail -2 "$work/models.other.out")"
+
+  # The same layout, with the whole directory ignored - the remedy the refusal prints: it must render.
+  printf 'home-in-repo/\n' > "$d/.gitignore"
+  rc=0
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" PREFLIGHT_CFG_OUT="$work/models.tmpdir.url" \
+      PREFLIGHT_HOME="$_home_in_repo" bash "$repo_root/src/preflight" review ) >"$work/models.tmpdir.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | a config dir inside a repository, with both files ignored, was still refused (exit $rc): $(cat "$work/models.tmpdir.out")"
+  [ "$(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$_home_in_repo/.pragent.settings.toml" 2>/dev/null)" = "0o600" ] \
+    || problems="$problems
+        | the rendered config is not 600-mode when PREFLIGHT_HOME is inside a repository"
+  rm -f "$d/.gitignore"
+  rm -rf "$d/home-in-repo" "$work/models.tmpdir.copy" "$work/models.tmpdir.url"
+  model_stub "$fake"
+
+  # A file that assigns NOTHING means there is no model, and there is no second config to fall back to -
+  # so the run must refuse and say why, rather than review on pr-agent's own defaults. Rendering nothing
+  # and rendering an empty file are also different outcomes, and the second would look configured.
+  printf '[pr_reviewer]\nnum_max_findings = 10\n' > "$cfg/settings.toml"
+  run_models
+  [ "$rc" = 2 ] || problems="$problems
+        | a settings.toml assigning no profile exited $rc, not 2 (it must refuse: there is no model)"
+
+  # The SAME state reached through the shell fast path rather than the parser: a file whose every line is
+  # blank or a comment. That path used to `return 0` - leaving the rendered path empty so the caller
+  # launched pr-agent with no config - when preflight.toml could still supply a model. With no fallback it
+  # must refuse too, or the review silently answers on pr-agent's own defaults.
+  printf '# every key is commented out\n#\n' > "$cfg/settings.toml"
+  run_models
+  [ "$rc" = 2 ] || problems="$problems
+        | an all-comments settings.toml exited $rc, not 2 (it must refuse, not fall through to defaults)"
+  case "$(cat "$work/models.out")" in
+    *"assigns no model profile"*) ;;
+    *) problems="$problems
+        | the refusal for an all-comments settings.toml did not name the cause: $(cat "$work/models.out")" ;;
+  esac
+  case "$(cat "$work/models.out")" in
+    *"assigns no profile"*|*"no 'main'"*|*"[selection]"*) ;;
+    *) problems="$problems
+        | the refusal for an unassigned settings.toml did not name the cause: $(cat "$work/models.out")" ;;
+  esac
+
+  # Profiles DEFINED but none assigned - the state "I wrote my models but have not picked one". The
+  # settings.toml is written explicitly rather than through model_cfg_write, which leaves a previous
+  # case's file in place when the fixture names no settings section at all.
+  printf '[pr_reviewer]\nnum_max_findings = 10\n' > "$cfg/settings.toml"
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.work]
+api_base = "https://llm.internal.corp/v1"
+key = "key-two"
+
+[profiles.decided-later]
+provider = "work"
+model = "their-model-id"
+TOML
+  run_models
+  [ "$rc" = 2 ] || problems="$problems
+        | a profiles-only settings.toml exited $rc, not 2: with no fallback config an unassigned file has no model"
+  case "$(cat "$work/models.out")" in
+    *"assigns no model profile"*) ;;
+    *) problems="$problems
+        | the refusal for a profiles-only settings.toml did not name the cause: $(cat "$work/models.out")" ;;
+  esac
+
+  printf '[selection]\nmain = "work-main"\n' > "$cfg/settings.toml"
+  printf '[providers.work]\napi_base = "https://llm.internal.corp/v1"\nkey = "key-two"\n\n[profiles.work-main]\nprovider = "work"\nmodel = "their-model-id"\n' \
+    > "$cfg/providers.toml"
+  chmod 600 "$cfg/providers.toml"
+  # TWO RUNS NEVER SHARE A FILE. (Placed here, with its own valid pair: every assertion above this point
+  # leaves a deliberately-invalid config behind, which would make a render refuse and prove nothing.) The rendered path carries the run's pid, so concurrent runs cannot read
+  # each other's model, endpoint and KEY - the race a single fixed path had, which a lock only papered
+  # over. Asserted on two renders run back to back in separate processes.
+  _a="$(bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null 2>&1; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"' \
+        _ "$repo_root/scripts/settings-render.sh" "$cfg" 2>/dev/null)" || _a=''
+  _b="$(bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null 2>&1; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"' \
+        _ "$repo_root/scripts/settings-render.sh" "$cfg" 2>/dev/null)" || _b=''
+  if [ -z "$_a" ] || [ -z "$_b" ]; then
+    problems="$problems
+        | a render produced no path, so the per-run isolation could not be checked"
+  else
+    [ "$_a" != "$_b" ] || problems="$problems
+        | two runs rendered to the SAME path ($_a), so one could read the other's endpoint and key"
+    [ "$(dirname "$_a")" = "$cfg" ] || problems="$problems
+        | a run rendered outside the config dir: $_a"
+    rm -f "$_a" "$_b"
+  fi
+  # The LAST render is also copied to a fixed name, so a run stays inspectable after its own file is gone.
+  if [ ! -f "$cfg/.pragent.settings.toml" ]; then
+    problems="$problems
+        | no fixed-name copy of the last render was left for inspection"
+  else
+    [ "$(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$cfg/.pragent.settings.toml")" = "0o600" ] \
+      || problems="$problems
+        | the inspectable copy is not 600-mode, and it holds the key"
+  fi
+
+  # A FALLBACK LIST IS NOT A MODEL CHOICE. With `main` absent or empty, promoting the first fallback to
+  # the primary would review on a profile the user meant only as a backup - and the summary line would not
+  # report a fallback, because the resolver had already made it the primary. The refusal message used to
+  # say "there is nothing to review with" while the code did exactly the opposite.
+  # providers.toml written directly: model_cfg_write replaces the profiles, and this case needs the
+  # profile the fallback names to EXIST, so the refusal can only be about `main`.
+  printf '[selection]\nfallback = ["backup"]\n' > "$cfg/settings.toml"
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.work]
+api_base = "https://llm.internal.corp/v1"
+key = "key-two"
+
+[profiles.backup]
+provider = "work"
+model = "their-model-id"
+TOML
+  run_models
+  [ "$rc" = 2 ] || problems="$problems
+        | a settings.toml with only a fallback list exited $rc, not 2 (a fallback is not a main model)"
+  case "$(cat "$work/models.out")" in
+    *"fallback chain is not a main model"*) ;;
+    *) problems="$problems
+        | the refusal for a fallback-only assignment did not say a fallback is not a main model: $(cat "$work/models.out")" ;;
+  esac
+
+  if [ -z "$problems" ]; then ok "a named model configuration is rendered, scoped and cleaned up" "REQ-HOOK-44"
+  else bad "a named model configuration is rendered, scoped and cleaned up" "REQ-HOOK-44" \
+        "the rendered 600-mode config is what pr-agent reads; the provider's own host and key apply; cleanup holds on failure" \
+        "see below" "$problems
+"; fi
+}
+
+case_model_configuration_refusals() {
+  local d="$work/models-refuse" cfg="$work/models-refuse-cfg" fake="$work/models-refuse-bin"
+  mkdir -p "$fake"
+  model_repo "$d"
+  model_cfg_dir "$cfg"
+  model_stub "$fake"
+
+  local problems=""
+  # Each refusal has to NAME its cause, because the failure it prevents is silent: a chain spanning two
+  # providers is answered by whichever one is pinned - a different host, with that provider's key - and
+  # pr-agent reports nothing.
+  try_refuse() {
+    local label="$1" expect="$2" rc=0 out
+    rm -f "$work/refuse.url"
+    ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" PREFLIGHT_CFG_OUT="$work/refuse.url" \
+        PREFLIGHT_HOME="$cfg" bash "$repo_root/src/preflight" review ) >"$work/refuse.out" 2>&1 || rc=$?
+    out="$(cat "$work/refuse.out")"
+    if [ "$rc" = 0 ]; then
+      problems="$problems
+        | $label was accepted (exit 0): $out"
+      return
+    fi
+    case "$out" in
+      *"$expect"*) ;;
+      *) problems="$problems
+        | the refusal for $label did not name it (want: $expect): $out" ;;
+    esac
+    # A refusal must not reach pr-agent: a review that ran anyway would have answered on the wrong model,
+    # and the sidecar it wrote would authorize a commit on that basis.
+    if [ -e "$work/refuse.url" ]; then
+      problems="$problems
+        | $label refused, but pr-agent ran anyway"
+    fi
+  }
+
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.one]
+api_base = "https://one.example/v1"
+key      = "k1"
+[providers.two]
+api_base = "https://two.example/v1"
+key      = "k2"
+TOML
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "a"
+fallback = ["b"]
+[profiles.a]
+provider = "one"
+model = "m1"
+[profiles.b]
+provider = "two"
+model = "m2"
+TOML
+)"
+  try_refuse "a chain that spans two providers" "ONE endpoint per run"
+
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "a"
+[profiles.a]
+provider = "typo"
+model = "m1"
+TOML
+)"
+  try_refuse "a provider defined nowhere" "no [providers.typo] table defines"
+
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "a"
+[profiles.a]
+model = "m1"
+TOML
+)"
+  try_refuse "a profile naming no provider" "has no 'provider'"
+
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "a"
+[profiles.a]
+provider = "one"
+model = "m1"
+[profiles.a.litellm]
+custom_llm_provider = "openai"
+TOML
+)"
+  try_refuse "a profile-level litellm section" "[profiles.a.litellm]"
+
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.x]
+transport = "made-up"
+key = "k"
+TOML
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "a"
+[profiles.a]
+provider = "x"
+model = "m1"
+TOML
+)"
+  try_refuse "a transport pr-agent cannot route" "not one pr-agent can route"
+
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.x]
+transport = "anthropic"
+api_base = "https://proxy.example/v1"
+key = "k"
+TOML
+  # The profile has to be restated: writing providers.toml above replaced the profiles the previous case
+  # put there. That is deliberate - a case states the whole file it is testing, not a patch of the last.
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "a"
+[profiles.a]
+provider = "x"
+model = "m1"
+TOML
+)"
+  try_refuse "an api_base on a transport that reads none" "reads no endpoint for transport"
+
+  # A CREDENTIAL under an endpoint section OTHER than the one being written. It would be copied into the
+  # rendered file verbatim and sent - and settings.toml is never mode-checked, so the copy would also be
+  # the one left world-readable. This is what a leftover `.secrets.toml` migration looks like.
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.x]
+api_base = "https://one.example/v1"
+key = "k1"
+TOML
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "a"
+
+[openrouter]
+key = "a-leftover-key"
+
+[profiles.a]
+provider = "x"
+model = "m1"
+TOML
+)"
+  try_refuse "a credential in another endpoint section" "belongs in providers.toml"
+
+  # The OTHER spelling, under the section this run writes. `entry["key_name"]` covers only the transport's
+  # own name, so `[openai] api_key` would be copied into the rendered file unrefused - the same hole in
+  # the other direction.
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.x]
+api_base = "https://one.example/v1"
+key = "k1"
+TOML
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "a"
+
+[openai]
+api_key = "a-leftover-key"
+
+[profiles.a]
+provider = "x"
+model = "m1"
+TOML
+)"
+  try_refuse "a credential under the chosen section's other spelling" "which the provider supplies"
+
+  # A transport-specific credential NAME. The set is derived from the transport table rather than
+  # hard-coded, because `gemini` uses `gemini_api_key` - a listed ("key", "api_key") left that unrefused.
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.x]
+api_base = "https://one.example/v1"
+key = "k1"
+TOML
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "a"
+
+[google_ai_studio]
+gemini_api_key = "a-leftover-key"
+
+[profiles.a]
+provider = "x"
+model = "m1"
+TOML
+)"
+  try_refuse "a transport-specific credential name" "belongs in providers.toml"
+
+  # A whole `[providers.*]` (or `[profiles.*]`) block pasted into the wrong file. Its `key` would be copied
+  # into the rendered config and left in a settings.toml nothing mode-checks - a shadowed position.
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.x]
+api_base = "https://one.example/v1"
+key = "k1"
+TOML
+  # Written explicitly: `model_cfg_write` splits by table name, so it would put `[profiles.a]` in
+  # settings.toml too and a DIFFERENT refusal would fire first - proving nothing about the stray table.
+  printf '[selection]\nmain = "a"\n\n[providers.stray]\nkey = "sk-leaked"\n' > "$cfg/settings.toml"
+  printf '[providers.x]\napi_base = "https://one.example/v1"\nkey = "k1"\n\n[profiles.a]\nprovider = "x"\nmodel = "m1"\n' \
+    > "$cfg/providers.toml"
+  try_refuse "a providers table in settings.toml" "belongs in providers.toml"
+
+  # A file that assigns a model while the resolver is missing must refuse rather than review on some
+  # other model. This is the upgrade path where the templates arrived without the helper, so
+  # the helper has to be unreachable from EVERY lookup the helper performs - including the checkout it
+  # would find beside the script in this very test. A lone copy of the helper, with no scripts/ beside
+  # it, is what that install looks like.
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.x]
+api_base = "https://one.example/v1"
+key = "k1"
+TOML
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "a"
+[profiles.a]
+provider = "x"
+model = "m1"
+TOML
+)"
+  mkdir -p "$work/upgrade/bin"
+  cp "$repo_root/src/preflight" "$work/upgrade/bin/preflight"
+  mkdir -p "$work/upgrade/cfg"
+  cp "$cfg/settings.toml" "$cfg/providers.toml" "$work/upgrade/cfg/"
+  rm -f "$work/refuse.url"
+  rc=0
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" PREFLIGHT_CFG_OUT="$work/refuse.url" \
+      PREFLIGHT_HOME="$work/upgrade/cfg" bash "$work/upgrade/bin/preflight" review ) \
+      >"$work/refuse.out" 2>&1 || rc=$?
+  out="$(cat "$work/refuse.out")"
+  if [ "$rc" = 0 ]; then
+    problems="$problems
+        | an assignment with no resolver installed was accepted (exit 0): $out"
+  else
+    case "$out" in
+      *"settings-render.sh was not found"*) ;;
+      *) problems="$problems
+        | the refusal for a missing resolver did not name it: $out" ;;
+    esac
+    [ -e "$work/refuse.url" ] && problems="$problems
+        | a missing resolver refused, but pr-agent ran anyway"
+  fi
+
+  # The other half of that message: no resolver AND no settings.toml, which is the bare-clone or wrong
+  # `PREFLIGHT_HOME` case. The refusal must name what is actually missing instead of reporting the file
+  # as present, because "settings.toml is present" sends the operator to inspect a file that is not there.
+  _empty="$work/empty-cfg"
+  rm -rf "$_empty"; mkdir -p "$_empty"
+  rc=0
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" PREFLIGHT_CFG_OUT="$work/refuse.url" \
+      PREFLIGHT_HOME="$_empty" bash "$work/upgrade/bin/preflight" review ) >"$work/refuse.out" 2>&1 || rc=$?
+  out="$(cat "$work/refuse.out")"
+  [ "$rc" != 0 ] || problems="$problems
+        | a config dir with neither settings.toml nor a resolver was accepted (exit 0): $out"
+  case "$out" in
+    *"is present"*) problems="$problems
+        | the refusal reported a settings.toml that does not exist as present: $out" ;;
+  esac
+  case "$out" in
+    *"neither settings-render.sh nor"*) ;;
+    *) problems="$problems
+        | the refusal for an empty config dir did not name both missing files: $out" ;;
+  esac
+
+  # The half-configured state, which is the one a message can destroy: settings.toml absent while a KEYED
+  # providers.toml is already there. The advice must not tell the operator to copy the empty-key template
+  # over it, so the providers.toml line is offered only when that file is absent too.
+  _half="$work/half-cfg"
+  rm -rf "$_half"; mkdir -p "$_half"
+  cat > "$_half/providers.toml" <<'TOML'
+[providers.x]
+api_base = "https://one.example/v1"
+key = "my-real-key"
+[profiles.a]
+provider = "x"
+model = "m1"
+TOML
+  rc=0
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" PREFLIGHT_CFG_OUT="$work/refuse.url" \
+      PREFLIGHT_HOME="$_half" bash "$repo_root/src/preflight" review ) >"$work/half.out" 2>&1 || rc=$?
+  out="$(cat "$work/half.out")"
+  [ "$rc" != 0 ] || problems="$problems
+        | a config dir with no settings.toml was accepted (exit 0): $out"
+  case "$out" in
+    *"settings.toml.example"*) ;;
+    *) problems="$problems
+        | the refusal for a missing settings.toml did not print the command that creates it: $out" ;;
+  esac
+  case "$out" in
+    *"providers.toml.example"*) problems="$problems
+        | a keyed providers.toml was told to copy the empty-key template over itself: $out" ;;
+  esac
+  grep -q 'my-real-key' "$_half/providers.toml" || problems="$problems
+        | the refusal modified providers.toml, which holds the key"
+
+  # A derived key in settings.toml's OWN [litellm] is refused, not silently overwritten: the value would
+  # read as configured while the render replaced it - and a pin that disagreed with the endpoint is
+  # resolved by LiteLLM silently, to the wrong host.
+  cat > "$cfg/providers.toml" <<'TOML'
+[providers.x]
+api_base = "https://one.example/v1"
+key = "k1"
+[profiles.a]
+provider = "x"
+model = "m1"
+TOML
+  printf '[selection]\nmain = "a"\n\n[litellm]\ncustom_llm_provider = "openrouter"\n' > "$cfg/settings.toml"
+  rm -f "$work/refuse.url"
+  rc=0
+  ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" PREFLIGHT_CFG_OUT="$work/refuse.url" \
+      PREFLIGHT_HOME="$cfg" bash "$repo_root/src/preflight" review ) >"$work/refuse.out" 2>&1 || rc=$?
+  if [ "$rc" = 0 ]; then
+    problems="$problems
+        | a derived litellm key in settings.toml was accepted (exit 0), so it would be silently ignored"
+  else
+    case "$(cat "$work/refuse.out")" in
+      *"which preflight derives"*) ;;
+      *) problems="$problems
+        | the refusal for a derived litellm key did not name it: $(cat "$work/refuse.out")" ;;
+    esac
+  fi
+
+
+  if [ -z "$problems" ]; then ok "a configuration that cannot be applied is refused by name" "REQ-HOOK-45"
+  else bad "a configuration that cannot be applied is refused by name" "REQ-HOOK-45" \
+        "every refusal names its cause and no review runs" "see below" "$problems
+"; fi
+}
+
+# ---------------------------------------------------------------------------- preflight-pr cleanup
+
+# `preflight-pr` launches pr-agent as a child so its own EXIT trap can remove the per-run rendered config.
+# That trap is the only thing that deletes it for this helper, so an undefined function or a dropped
+# `rm` there leaks one credential-bearing file per run while the suite stays green - the renderer's own
+# cases never drive `preflight-pr`. This drives it against a stub, offline.
+case_pr_rendered_config_removed() {
+  local cfg="$work/pr-cfg" fake="$work/pr-bin" d="$work/pr-repo"
+  local rc out problems='' url
+  mkdir -p "$fake" "$cfg"
+  model_stub "$fake"
+  model_repo "$d"
+  model_cfg_write "$cfg" 'not used'
+  printf '[selection]\nmain = "a"\n[pr_reviewer]\nnum_max_findings = 10\n' > "$cfg/settings.toml"
+  printf '[providers.x]\napi_base = "https://one.example/v1"\nkey = "k1"\n\n[profiles.a]\nprovider = "x"\nmodel = "m1"\n' \
+    > "$cfg/providers.toml"
+  chmod 600 "$cfg/settings.toml" "$cfg/providers.toml"
+
+  # A stub whose run FAILS after recording the URL: the failing path is the one that also has to remove
+  # the file, and a trap that ran the removal only on success would leak exactly here.
+  # The stub also reads its stdin: `preflight-pr` backgrounds pr-agent to be able to reap it, and bash
+  # redirects a backgrounded command's stdin from /dev/null unless told otherwise - so a wrapper that
+  # silently stops passing stdin through looks identical to one that never received any.
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$2" > "$PREFLIGHT_CFG_OUT"
+read -r _piped <&0
+printf '%s\n' "$_piped" > "$PREFLIGHT_STDIN_OUT"
+exit 3
+FAKE
+  chmod +x "$fake/pr-agent"
+  rm -f "$work/pr.stdin"
+
+  printf 'piped-input\n' | ( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_CFG_OUT="$work/pr.url" \
+      PREFLIGHT_STDIN_OUT="$work/pr.stdin" PREFLIGHT_HOME="$cfg" \
+      bash "$repo_root/src/preflight-pr" ) >"$work/pr.out" 2>&1 || rc=$?
+  url="$(cat "$work/pr.url" 2>/dev/null)"
+  case "$(cat "$work/pr.stdin" 2>/dev/null)" in
+    piped-input) ;;
+    *) problems="$problems
+        | pr-agent did not receive the caller's stdin through preflight-pr" ;;
+  esac
+
+  case "$url" in
+    "$cfg"/.pragent.settings.*.toml) ;;
+    *) problems="$problems
+        | preflight-pr was handed ${url:-nothing}, not a per-run file in $cfg" ;;
+  esac
+  # The exit status must be pr-agent's, not a trap failure's: a trap calling a function that does not
+  # exist reports 127 and hides the reason the run actually failed.
+  [ "$rc" = 3 ] || problems="$problems
+        | preflight-pr reported $rc, not pr-agent's 3 (a failing cleanup masks the real status)"
+  case "$(cat "$work/pr.out")" in
+    *"command not found"*) problems="$problems
+        | preflight-pr's EXIT trap called something that does not exist: $(cat "$work/pr.out")" ;;
+  esac
+  if [ -n "$url" ] && [ -e "$url" ]; then
+    problems="$problems
+        | preflight-pr left its per-run rendered config behind: $url (it holds the key)"
+  fi
+  [ -f "$cfg/.pragent.settings.toml" ] || problems="$problems
+        | preflight-pr left no inspectable copy of the render"
+  # One file per run, 600-mode: the copy holds the key, so a wider mode defeats the point of the run's
+  # own file being 600-mode.
+  [ "$(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' \
+        "$cfg/.pragent.settings.toml" 2>/dev/null)" = "0o600" ] || problems="$problems
+        | the inspectable copy is not 600-mode, and it holds the key"
+
+  if [ -z "$problems" ]; then ok "preflight-pr removes its per-run rendered config" "REQ-HOOK-46"
+  else bad "preflight-pr removes its per-run rendered config" "REQ-HOOK-46" \
+        "the run deletes what it rendered and reports pr-agent's status" "see below" "$problems
+"; fi
+}
+
+case_pr_abnormal_exit_reaps_child() {
+  local cfg="$work/prreap-cfg" fake="$work/prreap-bin" d="$work/prreap-repo"
+  local pidf="$work/prreap.pid" problems=''
+  mkdir -p "$fake" "$cfg"
+  model_repo "$d"
+  printf '[selection]\nmain = "a"\n' > "$cfg/settings.toml"
+  printf '[providers.x]\napi_base = "https://one.example/v1"\nkey = "k1"\n\n[profiles.a]\nprovider = "x"\nmodel = "m1"\n' \
+    > "$cfg/providers.toml"
+  chmod 600 "$cfg/settings.toml" "$cfg/providers.toml"
+
+  # Same failure as REQ-HOOK-48, in the sibling helper: a pr-agent left running holds the caller's stdout
+  # pipe open, so `x="$(preflight-pr ...)"` blocks on the model call after the helper is gone. The stub
+  # reports its OWN pid and `exec` makes the sleep BE that process, so the case watches the exact child
+  # rather than searching for it by name.
+  printf '#!/bin/sh\nprintf "%%s\\n" "$$" > "$PREFLIGHT_REAP_PIDFILE"\nexec sleep 300\n' > "$fake/pr-agent"
+  chmod +x "$fake/pr-agent"
+
+  ( cd "$d" && exec env PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" PREFLIGHT_REAP_PIDFILE="$pidf" \
+      bash "$repo_root/src/preflight-pr" >/dev/null 2>&1 ) &
+  local pf=$! waited=0 child=''
+  while [ "$waited" -lt 15 ] && [ ! -s "$pidf" ]; do
+    sleep 1; waited=$((waited + 1))
+  done
+  [ -s "$pidf" ] && child="$(cat "$pidf")"
+
+  if [ -z "$child" ]; then
+    problems="$problems
+        | the child never started, so this case proved nothing"
+    kill -TERM "$pf" 2>/dev/null || true
+    wait "$pf" 2>/dev/null || true
+  else
+    kill -TERM "$pf" 2>/dev/null || true
+    wait "$pf" 2>/dev/null || true
+    local tries=0 alive=1
+    while [ "$tries" -lt 10 ]; do
+      if kill -0 "$child" 2>/dev/null; then tries=$((tries + 1)); sleep 1; else alive=0; break; fi
+    done
+    if [ "$alive" = 1 ]; then
+      problems="$problems
+        | a PR review killed mid-flight left its pr-agent running, which holds the caller's output pipe open"
+      kill -9 "$child" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$pidf"
+
+  if [ -z "$problems" ]; then ok "an abnormally ended PR run does not leave pr-agent behind" "REQ-HOOK-49"
+  else bad "an abnormally ended PR run does not leave pr-agent behind" "REQ-HOOK-49" \
+        "the child is reaped when preflight-pr dies" "see below" "$problems
+"; fi
+}
+
+case_review_progress_note() {
+  local cfg="$work/note-cfg" fake="$work/note-bin" d="$work/note-repo" w="$work/note-work"
+  local rc out problems='' hung silent junk fired survived
+  mkdir -p "$fake" "$cfg" "$w"
+  model_stub "$fake"
+  model_repo "$d"
+  model_cfg_write "$cfg" 'not used'
+  printf '[selection]\nmain = "a"\n[pr_reviewer]\nnum_max_findings = 10\n' > "$cfg/settings.toml"
+  printf '[providers.x]\napi_base = "https://one.example/v1"\nkey = "k1"\n\n[profiles.a]\nprovider = "x"\nmodel = "m1"\n' \
+    > "$cfg/providers.toml"
+  chmod 600 "$cfg/settings.toml" "$cfg/providers.toml"
+  printf '#!/bin/sh\nexit 0\n' > "$fake/preflight-gate"; chmod +x "$fake/preflight-gate"
+
+  # A pr-agent that never finishes and never writes an artifact is indistinguishable from a slow review
+  # unless the helper says which phase it is in. The failure this guards is not the hang itself: it is
+  # that an operator cannot tell a wedged endpoint from a working run until the wait expires.
+  printf '#!/bin/sh\nexec sleep 600\n' > "$fake/pr-agent"; chmod +x "$fake/pr-agent"
+  out="$( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" PREFLIGHT_REVIEW_WAIT=5 \
+            PREFLIGHT_PROGRESS_EVERY=2 PREFLIGHT_SHUTDOWN_WAIT=1 \
+            bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
+  hung="$(printf '%s\n' "$out" | grep -c 'still running')"
+
+  # ... and the note must not fire when the artifact arrives first, or every normal review is noisy.
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+printf '{}' > .preflight/review.json
+printf 'done' > .preflight/review.md
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent"
+  out="$( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" PREFLIGHT_REVIEW_WAIT=5 \
+            PREFLIGHT_PROGRESS_EVERY=2 PREFLIGHT_SHUTDOWN_WAIT=1 \
+            bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
+  silent="$(printf '%s\n' "$out" | grep -c 'still running')"
+
+  # A typo in the interval must not turn the wait loop into a stream of shell errors: that noise is what
+  # would hide the very note the two runs above exist to surface.
+  printf '#!/bin/sh\nexec sleep 600\n' > "$fake/pr-agent"; chmod +x "$fake/pr-agent"
+  # `08` is the value that matters, and the wait has to be long enough to let it fire: the note is
+  # printed, then the interval is incremented, and arithmetic reads a leading zero as octal, where `08`
+  # is not a number. A value like `5m` is sanitized back to the default and never reaches the increment.
+  out="$( cd "$d" && PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" PREFLIGHT_REVIEW_WAIT=10 \
+            PREFLIGHT_PROGRESS_EVERY=08 PREFLIGHT_SHUTDOWN_WAIT=1 \
+            bash "$repo_root/src/preflight" review 2>&1 )" || rc=$?
+  junk="$(printf '%s\n' "$out" | grep -c 'integer expression expected\|value too great for base')"
+  # More than one note at a 1s interval would mean the interval never advanced.
+  fired="$(printf '%s\n' "$out" | grep -c 'still running')"
+  survived=1
+  case "$out" in *'stopping it'*) ;; *) survived=0 ;; esac
+
+  [ "$hung" -ge 1 ] || problems="$problems
+        | a review that wrote nothing for 5s printed no 'still running' note, so a wedged endpoint is
+        | indistinguishable from a slow one until the wait expires"
+  [ "$silent" = 0 ] || problems="$problems
+        | the note fired $silent time(s) on a run whose artifact arrived immediately"
+  [ "$junk" = 0 ] || problems="$problems
+        | a non-numeric PREFLIGHT_PROGRESS_EVERY printed $junk shell error(s) instead of falling back to the
+        | default interval"
+  [ "$survived" = 1 ] || problems="$problems
+        | a non-numeric PREFLIGHT_PROGRESS_EVERY killed the run instead of being ignored"
+  [ "$fired" -le 1 ] || problems="$problems
+        | the interval stopped advancing under a leading-zero value: the note fired $fired time(s)"
+
+  if [ -z "$problems" ]; then ok "a review that writes nothing says so while it waits" "REQ-HOOK-47"
+  else bad "a review that writes nothing says so while it waits" "REQ-HOOK-47" \
+        "a silent phase and a slow one read differently" "see below" "$problems
+"; fi
+}
+
+case_abnormal_exit_reaps_child() {
+  local cfg="$work/reap-cfg" fake="$work/reap-bin" d="$work/reap-repo" pidf="$work/reap.pid" problems=''
+  mkdir -p "$fake" "$cfg"
+  model_repo "$d"
+  printf '[selection]\nmain = "a"\n' > "$cfg/settings.toml"
+  printf '[providers.x]\napi_base = "https://one.example/v1"\nkey = "k1"\n\n[profiles.a]\nprovider = "x"\nmodel = "m1"\n' \
+    > "$cfg/providers.toml"
+  chmod 600 "$cfg/settings.toml" "$cfg/providers.toml"
+  printf '#!/bin/sh\nexit 0\n' > "$fake/preflight-gate"; chmod +x "$fake/preflight-gate"
+
+  # A child that outlives this script keeps the caller's stdout pipe open, so `x="$(preflight review)"`
+  # blocks on the model call after the script itself is gone: the failure is reported against the wrong
+  # process, and as a hang rather than an error.
+  #
+  # The stub reports its OWN pid, and `exec` makes the long sleep BE that process, so the case watches the
+  # exact child rather than searching for it by name - a pattern match picks up any other run's stub, and
+  # the name is not in the argv `sleep` exposes anyway.
+  printf '#!/bin/sh\nprintf "%%s\\n" "$$" > "$PREFLIGHT_REAP_PIDFILE"\nexec sleep 300\n' > "$fake/pr-agent"
+  chmod +x "$fake/pr-agent"
+  rm -f "$pidf"
+
+  # `exec` in the subshell is what makes `$!` the helper itself rather than a wrapper around it: `kill`
+  # must reach the script, or its EXIT trap never runs and the case fails for a reason the fix cannot see.
+  ( cd "$d" && exec env PATH="$fake:$PATH" PREFLIGHT_HOME="$cfg" PREFLIGHT_REAP_PIDFILE="$pidf" \
+      PREFLIGHT_REVIEW_WAIT=300 PREFLIGHT_PROGRESS_EVERY=600 \
+      bash "$repo_root/src/preflight" review >/dev/null 2>&1 ) &
+  local pf=$! waited=0 child=''
+  while [ "$waited" -lt 15 ] && [ ! -s "$pidf" ]; do
+    sleep 1; waited=$((waited + 1))
+  done
+  [ -s "$pidf" ] && child="$(cat "$pidf")"
+
+  if [ -z "$child" ]; then
+    problems="$problems
+        | the child never started, so this case proved nothing"
+    kill -TERM "$pf" 2>/dev/null || true
+    wait "$pf" 2>/dev/null || true
+  else
+    kill -TERM "$pf" 2>/dev/null || true
+    wait "$pf" 2>/dev/null || true
+    local tries=0 alive=1
+    while [ "$tries" -lt 10 ]; do
+      if kill -0 "$child" 2>/dev/null; then tries=$((tries + 1)); sleep 1; else alive=0; break; fi
+    done
+    if [ "$alive" = 1 ]; then
+      problems="$problems
+        | a review killed mid-flight left its pr-agent running, which holds the caller's output pipe open"
+      kill -9 "$child" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$pidf"
+
+  if [ -z "$problems" ]; then ok "an abnormally ended run does not leave pr-agent behind" "REQ-HOOK-48"
+  else bad "an abnormally ended run does not leave pr-agent behind" "REQ-HOOK-48" \
+        "the child is reaped when the helper dies" "see below" "$problems
+"; fi
+}
+
 # ---------------------------------------------------------------------------- live end-to-end
 # Needs the installed helpers and an API key, so it is skipped when either is absent.
 
@@ -2644,9 +3777,25 @@ case_e2e_real_review() {
   if ! command -v preflight >/dev/null 2>&1; then
     skip "a real review then commit passes end to end" "REQ-HOOK-23" "preflight not on PATH"; return
   fi
-  if [ ! -f "${PREFLIGHT_HOME:-$HOME/.config/preflight}/.secrets.toml" ]; then
-    skip "a real review then commit passes end to end" "REQ-HOOK-23" "no configured key"; return
+  # The live case needs a configured endpoint, which means the two config files exist and hold a key.
+  _live_cfg="${PREFLIGHT_HOME:-$HOME/.config/preflight}"
+  if [ ! -f "$_live_cfg/settings.toml" ] || [ ! -f "$_live_cfg/providers.toml" ]; then
+    skip "a real review then commit passes end to end" "REQ-HOOK-23" "no settings.toml/providers.toml"; return
   fi
+  # Ask the RESOLVER, not a grep: it validates every provider in the file, so a second provider left at
+  # `key = ""` passes a grep for the first one's key and then refuses the render - which would report a
+  # failure instead of a skip, for a reason that has nothing to do with what this case tests.
+  #
+  # Neither rendered file is left behind: the renderer writes the inspectable `.pragent.settings.toml` AND a
+  # per-run `.pragent.settings.<pid>.toml`, and only a caller's EXIT trap removes the second. It holds the
+  # real key, so the path is captured and removed here rather than left to the next run to rewrite.
+  if ! _probe_cfg="$( ( . "$repo_root/scripts/settings-render.sh" \
+         && __preflight_render_settings "$_live_cfg" >/dev/null 2>&1 \
+         && printf '%s' "$PREFLIGHT_RENDERED_CONFIG" ) 2>/dev/null )" \
+     || [ -z "$_probe_cfg" ]; then
+    skip "a real review then commit passes end to end" "REQ-HOOK-23" "the config is not reviewable"; return
+  fi
+  rm -f "$_probe_cfg"
   local d; d="$(new_repo e2e)"
   reset_case "$d"
   printf '\n\ndef sub(a, b):\n    return a - b\n' >> "$d/util.py"
@@ -2720,7 +3869,8 @@ REQ-HOOK-13 REQ-HOOK-16 REQ-HOOK-17 REQ-HOOK-18 REQ-HOOK-19 REQ-HOOK-21 REQ-HOOK
 insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOOK-15 REQ-HOOK-20
 REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31
 REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36 REQ-HOOK-37 REQ-HOOK-38
-REQ-HOOK-39 REQ-HOOK-40 REQ-HOOK-41 REQ-HOOK-42 REQ-HOOK-43'
+REQ-HOOK-39 REQ-HOOK-40 REQ-HOOK-41 REQ-HOOK-42 REQ-HOOK-43
+REQ-HOOK-44 REQ-HOOK-45 REQ-HOOK-46 REQ-HOOK-47 REQ-HOOK-48 REQ-HOOK-49'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -2857,7 +4007,13 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_bundle_hooks_executable \
     case_gate_doc_advisory \
     case_gate_config \
-    case_review_context
+    case_review_context \
+    case_model_configuration \
+    case_model_configuration_refusals \
+    case_pr_rendered_config_removed \
+    case_review_progress_note \
+    case_abnormal_exit_reaps_child \
+    case_pr_abnormal_exit_reaps_child
   say ""
 fi
 

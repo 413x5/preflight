@@ -120,7 +120,8 @@ Read [`docs/architecture.md`](docs/architecture.md) (the containment section) an
   argument. `--name-only` without `-z` *quotes* awkward names, and a quoted name is not a path.
 - **The bypasses are load-bearing knowledge.** Unreviewed deletions, renames, symlink typechanges,
   `git rm --cached`, git-quoted path names and gitlink removals have each been a real escape at some point.
-  `tests/README.md` maps every one to the case that guards it - do not weaken those cases.
+  `tests/README.md` maps every one to the case that guards it - do not weaken those cases. A new escape is
+  a new question, not only a new case: ask which other operations reach the same gap.
 
 ### If you change the hook's behaviour, prove it
 
@@ -150,7 +151,9 @@ The directions are different properties:
 Direction 1 alone is not enough. The session that added the run history ran mutations of direction 1
 - all correct, each one watched failing - while assertions in that same new case could not fail, and
 the suite was green throughout (the classified counts are in [`docs/measurements.md`](docs/measurements.md)).
-Run direction 2 on the assertion you just wrote, *before* trusting it.
+Run direction 2 on the assertion you just wrote, *before* trusting it - and on the others in the same case,
+because they share a fixture and a branch, so one of them being unable to fail is evidence about its
+neighbours.
 
 The shapes, each of which passed a green `./scripts/verify` in this repository:
 
@@ -438,6 +441,8 @@ audience, and a fact belongs in the one that audience reads:
 that holds it. Measured cost of not doing this: the `reasoning_effort` forwarding rule ended up stated in
 full in several files, and the copies disagreed - some still claimed "pr-agent's `medium` default
 applies" after a probe showed no effort is sent at all. The rule is what makes a fact cheap to correct.
+The exception is a habit an agent must hold *while editing*: that one is stated where the editing
+happens rather than only where the rule is filed, because a link is read after the change, not during it.
 
 **Settle the behaviour before you describe it.** A document states what the code *does*, never what it is
 meant to do. Prose written ahead of its code is a guess about behaviour the code has not yet settled, and
@@ -452,9 +457,9 @@ new wording.
 
 ## Keep each round's change small, or the loop will not converge
 
-This repo's own loop is the thing being built, so it is worth knowing how it fails to end. There are three
-ways, and the first two are already handled: what the model reports, what it was shown, and - this one -
-**how much you change between rounds.**
+This repo's own loop is the thing being built, so it is worth knowing how it fails to end; the ones handled
+above are what the model reports and what it was shown, and the ones handled here are **how much you change
+between rounds** and a round that **fixes the instance and leaves the rule.**
 
 A round reports one defect. Fix the code: usually a few lines. The temptation is to also rewrite the
 comments around it, add a docs paragraph, add a changelog bullet, and add a row to the mutation table.
@@ -468,7 +473,9 @@ findings were almost entirely about the writing - the figures are in
 So:
 
 - **Change the code the finding requires, and little else.** Do not rewrite comments, docs or the changelog
-  unless the finding is *about* those files.
+  unless the finding is *about* those files. That bounds the *prose*, not the fix: reaching the rule behind
+  the finding (below) is often a larger diff than satisfying the finding as written, and it is the smaller
+  change over the loop it ends.
 - **Do not add a sentence saying you fixed something.** The diff is the record. A comment narrating a fix
   duplicates the diff and can only be checked against it, which spends a round to learn nothing.
 - **Code files carry current invariants only.** History and design rationale go to `CHANGELOG.md` and
@@ -486,6 +493,17 @@ So:
 - **The mutation-table rule is not a formality.** Every row in `tests/README.md` must have been *run*: apply
   the mutation, watch the case fail, revert, watch it pass. A row claiming coverage that no case provides is
   worse than no row, because it retires the requirement without testing it.
+- **Answer the class, not the instance.** Satisfying a finding as written is how the same finding returns
+  wearing a different name: the reviewer reports what it saw, so the rest of the class is next round's
+  work, at a full review apiece. A finding is one member of a class the code did not exclude, so before
+  editing, ask **what class is this, and what would make every member of it impossible**. A completeness
+  finding (_you check these, but more exist_) is the commonest member and is never closed by adding the
+  next item: replace the set with the property that makes a set unnecessary - the directory rather than
+  the files in it, the content rather than the marker, the parent rather than the spellings. A finite list
+  is legitimate only when it is _closed_ and asserted against its source, so the check fails when the
+  source grows. **Two rounds on one class is the signal; the third is a course you were already told to
+  change.** The in-repo config guard is the worked example: each round named the file the reviewer had
+  spotted and the class survived, and only the directory predicate ended it.
 
 Test before submitting: would a reviewer find more *claims* to check in this diff than *code*? If yes, cut
 until it does not.
@@ -505,6 +523,9 @@ until it does not.
   trust-boundary reasoning is in `docs/architecture.md`.
 - **`AGENTS.md` and `AGENTS-review-snippet.md` have different audiences:** the first is for agents
   changing this repo, the second is the block pasted into a consuming repo.
+- **The "answer the class, not the instance" rule is stated in both `AGENTS.md` and `PLAYBOOK.md` §3 by
+  design.** An agent must hold that habit *while editing*, so it cannot live one link away; `PLAYBOOK.md`
+  is the publication form for repositories that have no `AGENTS.md`.
 - **One fact lives in one file, chosen by audience** - the table under "Each fact lives in exactly one
   file" names which file each kind of fact belongs to.
 - **`docs/roadmap.md` holds to-dos only**, and finished items are deleted from it into `CHANGELOG.md`. A `[x]`

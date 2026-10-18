@@ -90,6 +90,15 @@ formality.
     looked at"_, not _"the change is clean."_ The reviewer must **say so plainly**: that its coverage was
     partial. It does not act on the shortfall itself — what to do about it is the maintainer's decision
     (§13).
+- **Answer the class, not the instance.** A finding is one member of a class the code did not exclude, and
+  a patch that closes only what the reviewer saw leaves the rest for the next round — at a full review
+  apiece. Before editing, ask **what class is this, and what would make every member of it impossible**. A
+  completeness finding (_you check these, but more exist_) is the commonest member and is never closed by
+  adding the next item: replace the set with the property that makes a set unnecessary — the directory
+  rather than the files in it, the content rather than the marker, the parent rather than the spellings. A
+  finite list is legitimate only when it is _closed_ and asserted against its source, so the check fails
+  when the source grows. **Two rounds on one class is the signal; the third is a course you were already
+  told to change.**
 - **Tell the reviewer what is deliberate.** An automated reviewer cannot tell a documented trade-off from an
   oversight, so it will report a deliberate decision as a finding. Give it a short, facts-only context
   block — "this is intentional and here is why" — that is sent _alone_ with the review. Keep that block

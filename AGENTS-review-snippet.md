@@ -112,7 +112,8 @@ Every round is a full model call that re-reads the whole diff, so these habits a
   the branch scopes it fetches the remote before diffing, so it never compares against a stale local
   default branch.
 - **The helpers are machine-local, not part of the repository.** They live in `~/.local/bin` and are driven
-  by `~/.config/preflight/preflight.toml`, and work against any OpenAI-compatible endpoint. If they are
+  by `~/.config/preflight/settings.toml` + `providers.toml`, and work against any OpenAI-compatible
+  endpoint. If they are
   missing, install them with the bundle's `install.sh`. Other commands: `preflight describe`,
   `preflight improve`, `preflight ask "<question>"`.
 

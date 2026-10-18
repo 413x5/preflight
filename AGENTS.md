@@ -19,10 +19,12 @@ with pull requests. CI (`.github/workflows/ci.yml`) runs on every pull request a
 
 ## The one rule that matters most
 
-**ClinePass is a default, not an assumption.** Any OpenAI-compatible endpoint must work. Never hard-code a
-provider into a mechanism: anything endpoint-specific - a model id, a streaming quirk, a token window -
-belongs in `config/preflight.toml.example` as an overridable default, and must be documented as provider-specific in
-the file itself and in `docs/architecture.md`. The CI and the tests must never require a paid key or the network.
+**No endpoint is a default, and none is named in the code.** Any OpenAI-compatible endpoint must work, and
+none of it is known to this repository: the endpoint, the model id and the credential are set in
+`$PREFLIGHT_HOME/providers.toml` *after* the install. Never hard-code a provider, a model id, a host or a
+token window into a mechanism or a test. The shipped templates carry obvious placeholders
+(`https://api.example.com/v1`, `your-model-id`), and a test fixture names its own provider so no real
+endpoint's name reaches the assertions. The CI and the tests must never require a paid key or the network.
 
 ## One review must report everything, and the loop must be able to end
 
@@ -44,7 +46,7 @@ the outside - fix one and the loop is still slow.
    keeps raising concerns already answered, at a full model call per round. `preflight` reports
    `new=N/M` on the summary line for exactly this reason, and `new=0` is the stopping signal.
 
-`config/preflight.toml.example` sets the completeness key it keeps, and the `config` stage asserts that and
+`config/settings.toml.example` sets the completeness key it keeps, and the `config` stage asserts that and
 the absence of the keys left off (so adding one means adding its assertion too). Do not weaken any of it to save tokens:
 a partial review is what turns a two-round loop into an unbounded one, and silent partial coverage has the
 same shape as the other failures this repo guards against - an inability to check that is indistinguishable
@@ -71,9 +73,8 @@ can never miss anything".
 | `src/preflight-hook` | The commit-time verifier - **see below before touching it** |
 | `src/githooks/` | The example hooks a *consuming* repo copies into its own `.githooks/` |
 | `src/VERSION` | The bundle version, single source of truth. `preflight --version` and `install.sh` read it; CI fails if it, the `CHANGELOG` heading, and `--version` disagree |
-| `config/` | The templates `install.sh` writes into `$PREFLIGHT_HOME`: `preflight.toml.example` (model, provider knobs, review caps), `gate.toml.example` (`preflight-gate`'s policy - installed only if `$PREFLIGHT_HOME/gate.toml` is absent) and `secrets.toml.example` (an empty key) |
+| `config/` | The reference files `install.sh` writes into `$PREFLIGHT_HOME`: `settings.toml.example` (the `[selection]` that names the profiles, plus every pr-agent setting the review can be told) and `providers.toml.example` (placeholder endpoint and key, and the model profiles that use them, 600-mode). The user copies them to `settings.toml`/`providers.toml`; **install.sh creates neither** |
 | `scripts/verify` | The gate: every check, cheapest first, in one command. CI runs this |
-| `scripts/ensure-link.sh` | Re-links the secrets file after `uv tool upgrade` recreates the venv |
 | `AGENTS-review-snippet.md` | The block pasted into a *consumer* repo's `AGENTS.md`. **Adapted, not copied** - every section is classified `required` or `setup`, and the `snippet` stage fails if the sections and that table disagree |
 | `tests/run.sh`, `tests/sample/` | Integration tests for the hook; the fixture they build on |
 | `PLAYBOOK.md` | The development standard this repo follows - the gate, the docs doctrine, the records |
@@ -119,7 +120,8 @@ Read [`docs/architecture.md`](docs/architecture.md) (the containment section) an
   argument. `--name-only` without `-z` *quotes* awkward names, and a quoted name is not a path.
 - **The bypasses are load-bearing knowledge.** Unreviewed deletions, renames, symlink typechanges,
   `git rm --cached`, git-quoted path names and gitlink removals have each been a real escape at some point.
-  `tests/README.md` maps every one to the case that guards it - do not weaken those cases.
+  `tests/README.md` maps every one to the case that guards it - do not weaken those cases. A new escape is
+  a new question, not only a new case: ask which other operations reach the same gap.
 
 ### If you change the hook's behaviour, prove it
 
@@ -149,7 +151,9 @@ The directions are different properties:
 Direction 1 alone is not enough. The session that added the run history ran mutations of direction 1
 - all correct, each one watched failing - while assertions in that same new case could not fail, and
 the suite was green throughout (the classified counts are in [`docs/measurements.md`](docs/measurements.md)).
-Run direction 2 on the assertion you just wrote, *before* trusting it.
+Run direction 2 on the assertion you just wrote, *before* trusting it - and on the others in the same case,
+because they share a fixture and a branch, so one of them being unable to fail is evidence about its
+neighbours.
 
 The shapes, each of which passed a green `./scripts/verify` in this repository:
 
@@ -198,8 +202,10 @@ fails.
 |---|---|
 | `tools` | `git`, `python3`, `awk`, `sed`, `mktemp` are present, and `python3` can `import tomllib` (3.11+) |
 | `syntax` | Every script parses - `bash -n` for the helpers and installer, `sh -n` for the hooks and tests |
-| `install` | `install.sh` deploys into a throwaway prefix, is idempotent, and never clobbers `.secrets.toml` |
+| `install` | `install.sh` deploys into a throwaway prefix, is idempotent, and never clobbers `settings.toml` or `providers.toml` |
 | `config` | The generated config parses, the completeness keys are set and the keys left off are absent, and the gate template is inert |
+| `models` | The `settings.toml`/`providers.toml` templates are inert, the renderer derives the endpoint, the key and the transport pin together, and it refuses a chain spanning two providers |
+| `envhelp` | Every `PREFLIGHT_*` the helper reads is in `--help`, no `--help` entry is unread, and an internal variable is not advertised as a setting |
 | `version` | `src/VERSION`, the CHANGELOG's released heading for it, and `--version` agree |
 | `gateshapes` | `preflight-gate` survives the JSON shapes the model really produces |
 | `coverage` | The coverage marker matches pr-agent's footer and ignores prose |
@@ -223,9 +229,10 @@ with Ruby's built-in Psych if you need to inspect config.
 
 ## Never do these
 
-- **Never commit a secret.** Only `config/secrets.toml.example` (empty key) is committed. Real keys live in
-  `$PREFLIGHT_HOME/.secrets.toml` (`~/.config/preflight` by default), which is gitignored and never belongs
-  in the environment.
+- **Never commit a secret.** Only the `config/*.toml.example` templates are committed - settings has no
+  credential field, and the providers example carries a placeholder endpoint and an empty `key`. Real keys
+  live in `$PREFLIGHT_HOME/providers.toml` (`~/.config/preflight` by default, chmod 600), never in the
+  environment.
 - **Never set `core.hooksPath` in this repository.** It is clone-wide: setting it here would affect this
   checkout *and* every worktree of this clone, and would start enforcing a hook against this repo's own
   commits. Do all hook testing in a `mktemp -d` repository.
@@ -242,6 +249,17 @@ with Ruby's built-in Psych if you need to inspect config.
   and failing with exit 4 when none resolves. An unchecked fallback to a bare `main` would produce a fatal
   `git diff` and an **empty** artifact dir, which the hook reports as "no review found" - turning a base
   problem into an unexplainable block on every commit.
+- **Never widen a rendered config's endpoint or transport by inference.** `scripts/settings-render.sh` derives
+  `litellm.custom_llm_provider` AND the endpoint section from ONE provider entry, and its `TRANSPORTS` table is
+  asserted against pr-agent's own `PROVIDER_SETTING_PATHS` by the `models` stage. Both halves are load-bearing:
+  a pin that disagrees with the endpoint is resolved *silently* by LiteLLM, so the request goes to the pinned
+  provider's host carrying that provider's key, with no error. Do not "fall back" to the model id's prefix, to
+  a pin, or to another section's `api_base`, and do not write a section pr-agent reads nothing
+  from - refuse by name instead. The rendered file is the config pr-agent receives, built from `settings.toml`, so a
+  setting the render drops is a setting the run loses; and it holds a credential, so it stays 600-mode, at
+  `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`, outside the repository (a review stages the working tree
+  with `git add -A`). One file per run, so concurrent runs cannot read each other's key; each run deletes
+  its own, and a copy of the last is left at `.pragent.settings.toml` for inspection.
 - **Never make the `post-commit` advisory exit 0 on a sidecar it cannot read.** It is the only thing that
   reports silent non-enforcement, so a malformed sidecar or a missing `python3` must warn. An *absent*
   sidecar stays quiet (no review has run, and `pre-commit` refuses first).
@@ -393,7 +411,7 @@ decision journey that produced the line.
 - History, measurements and reverted experiments belong in `CHANGELOG.md`; design rationale belongs in
   `docs/architecture.md`; operator symptoms belong in `docs/runbooks/troubleshooting.md`.
 - **An unverifiable comment is a liability, not documentation.** Prose is not executed, so a comment that
-  contradicts the code beside it survives indefinitely. A documentation pass took `config/preflight.toml.example` to
+  contradicts the code beside it survives indefinitely. A documentation pass took `config/settings.toml.example` to
   mostly comments - the ratio is in [`docs/measurements.md`](docs/measurements.md), which owns it - and left
   a `post-commit` comment instructing users to "run `preflight review` with the default worktree scope" - a
   scope that had not been the default since the `commit` scope landed. Trimming that comment is what exposed
@@ -423,6 +441,8 @@ audience, and a fact belongs in the one that audience reads:
 that holds it. Measured cost of not doing this: the `reasoning_effort` forwarding rule ended up stated in
 full in several files, and the copies disagreed - some still claimed "pr-agent's `medium` default
 applies" after a probe showed no effort is sent at all. The rule is what makes a fact cheap to correct.
+The exception is a habit an agent must hold *while editing*: that one is stated where the editing
+happens rather than only where the rule is filed, because a link is read after the change, not during it.
 
 **Settle the behaviour before you describe it.** A document states what the code *does*, never what it is
 meant to do. Prose written ahead of its code is a guess about behaviour the code has not yet settled, and
@@ -437,9 +457,9 @@ new wording.
 
 ## Keep each round's change small, or the loop will not converge
 
-This repo's own loop is the thing being built, so it is worth knowing how it fails to end. There are three
-ways, and the first two are already handled: what the model reports, what it was shown, and - this one -
-**how much you change between rounds.**
+This repo's own loop is the thing being built, so it is worth knowing how it fails to end; the ones handled
+above are what the model reports and what it was shown, and the ones handled here are **how much you change
+between rounds** and a round that **fixes the instance and leaves the rule.**
 
 A round reports one defect. Fix the code: usually a few lines. The temptation is to also rewrite the
 comments around it, add a docs paragraph, add a changelog bullet, and add a row to the mutation table.
@@ -453,7 +473,9 @@ findings were almost entirely about the writing - the figures are in
 So:
 
 - **Change the code the finding requires, and little else.** Do not rewrite comments, docs or the changelog
-  unless the finding is *about* those files.
+  unless the finding is *about* those files. That bounds the *prose*, not the fix: reaching the rule behind
+  the finding (below) is often a larger diff than satisfying the finding as written, and it is the smaller
+  change over the loop it ends.
 - **Do not add a sentence saying you fixed something.** The diff is the record. A comment narrating a fix
   duplicates the diff and can only be checked against it, which spends a round to learn nothing.
 - **Code files carry current invariants only.** History and design rationale go to `CHANGELOG.md` and
@@ -471,6 +493,17 @@ So:
 - **The mutation-table rule is not a formality.** Every row in `tests/README.md` must have been *run*: apply
   the mutation, watch the case fail, revert, watch it pass. A row claiming coverage that no case provides is
   worse than no row, because it retires the requirement without testing it.
+- **Answer the class, not the instance.** Satisfying a finding as written is how the same finding returns
+  wearing a different name: the reviewer reports what it saw, so the rest of the class is next round's
+  work, at a full review apiece. A finding is one member of a class the code did not exclude, so before
+  editing, ask **what class is this, and what would make every member of it impossible**. A completeness
+  finding (_you check these, but more exist_) is the commonest member and is never closed by adding the
+  next item: replace the set with the property that makes a set unnecessary - the directory rather than
+  the files in it, the content rather than the marker, the parent rather than the spellings. A finite list
+  is legitimate only when it is _closed_ and asserted against its source, so the check fails when the
+  source grows. **Two rounds on one class is the signal; the third is a course you were already told to
+  change.** The in-repo config guard is the worked example: each round named the file the reviewer had
+  spotted and the class survived, and only the directory predicate ended it.
 
 Test before submitting: would a reviewer find more *claims* to check in this diff than *code*? If yes, cut
 until it does not.
@@ -490,11 +523,43 @@ until it does not.
   trust-boundary reasoning is in `docs/architecture.md`.
 - **`AGENTS.md` and `AGENTS-review-snippet.md` have different audiences:** the first is for agents
   changing this repo, the second is the block pasted into a consuming repo.
+- **The "answer the class, not the instance" rule is stated in both `AGENTS.md` and `PLAYBOOK.md` §3 by
+  design.** An agent must hold that habit *while editing*, so it cannot live one link away; `PLAYBOOK.md`
+  is the publication form for repositories that have no `AGENTS.md`.
 - **One fact lives in one file, chosen by audience** - the table under "Each fact lives in exactly one
   file" names which file each kind of fact belongs to.
 - **`docs/roadmap.md` holds to-dos only**, and finished items are deleted from it into `CHANGELOG.md`. A `[x]`
   item appears only under "Open questions on shipped work", where the tick marks the shipping as settled
   and the paragraph beneath it as the work; the shipping paragraph is context for it.
+- **The review's diff is the pending change against the last commit, and it includes tracked edits that
+  are not staged.** So "no `.gitignore` change appears in this diff" is verifiable: run `git diff HEAD`
+  and read it before reporting a missing rule. `config/settings.toml` and `config/providers.toml` are
+  ignored by explicit path in `.gitignore`, and the `models` stage asserts it with `git check-ignore`.
+- **No endpoint, model id, host or credential is named in the code, the tests or the shipped templates.**
+  Configuration happens after the install, in `$PREFLIGHT_HOME/providers.toml`; the templates carry
+  obvious placeholders (`https://api.example.com/v1`, `your-model-id`) and `install.sh` substitutes
+  nothing - it installs them verbatim. A test fixture names its own fictional provider, so no real
+  endpoint's name reaches an assertion the suite is then written around. "This value is what `<some specific service>` needs" is not
+  a reason to hard-code it - it is a reason to document the key in `config/providers.toml.example`.
+- **`install.sh` never takes a credential.** The key is typed into `providers.toml` (created 600-mode) by
+  the operator, so it never appears in a command's argv, a shell history or the environment. What the code
+  guarantees: `providers.toml` is 600-mode, the rendered config is 600-mode and outside the repository,
+  the review's `git add -A` snapshot cannot see either (`.gitignore`), and a key is refused in any derived
+  or shadowed position. `SECURITY.md` carries that trust model; a change that *widens* it is worth
+  reporting.
+- **`.secrets.toml` is out of scope, including the symlink an older bundle left in the pr-agent package.**
+  Nothing in this bundle reads or writes that name any more; the config is `settings.toml` + `providers.toml`
+  rendered per run to `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`. `install.sh` and `uninstall.sh` therefore do NOT
+  clean up a leftover `pr_agent/settings/.secrets.toml` from a pre-0.6 install, and a finding that asks for
+  that cleanup is out of scope rather than a defect. Measured, not assumed: pr-agent's dynaconf load
+  **skips** a dangling entry in its settings-file list and loads the rest (probe: a `settings/.secrets.toml`
+  symlink pointing at a deleted path, alongside one real settings file - the real one loaded normally). The
+  link is dead weight, not a failure. Delete it by hand if you want it gone.
+- **`--extra_config_url` takes a bare filesystem path, and that is verified, not assumed.** pr-agent's
+  `_resolve_extra_config_to_file()` accepts a bare path, a `file://` URL and an `http(s)://` URL; the
+  renderer passes the bare path, because the two wrappers resolve `$PREFLIGHT_HOME` once and a scheme adds
+  nothing. The stub `pr-agent` in the tests treats the argument as a path, so a scheme regression would not
+  show up there - which is why the property lives in this list rather than only in a test.
 - **Reviews here are non-deterministic on identical content.** The spread is in
   [`docs/measurements.md`](docs/measurements.md), so `new=0` is a judgement signal, not a clean bill of
   health.

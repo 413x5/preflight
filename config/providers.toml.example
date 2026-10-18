@@ -1,0 +1,116 @@
+# The endpoints AND the models. GITIGNORED: copy this file to providers.toml at mode 600, because a provider
+# entry holds an API key. install.sh installs this reference and never creates providers.toml itself.
+#
+# Two jobs, one file: [providers.*] holds the endpoints and credentials, [profiles.*] holds the models
+# that use them. They are together because a profile is only meaningful against the provider it names -
+# the two halves of "how this model is reached" cannot drift, and a rename lands in one file.
+#
+# Which profile is USED is settings.toml's job, one line per slot.
+
+# ---------------------------------------------------------------------------- providers
+#
+# Every key a provider can set:
+#
+#   api_base    the endpoint. Required for every transport that reads one from config (see below).
+#   key         the credential. Required. It goes into the rendered config, 600-mode, never the environment.
+#   transport   pr-agent/LiteLLM's transport for this endpoint. Default "openai", which is the generic
+#               OpenAI-compatible transport and does NOT mean the provider is OpenAI. It decides both the
+#               routing pin and which settings section the endpoint is read from.
+#   stream      true when the endpoint's NON-streaming reply cannot be parsed by LiteLLM. Scopes the
+#               streaming workaround to this provider's own host, so it cannot leak onto another endpoint.
+#   litellm     this endpoint's own [litellm] settings - callbacks, their timeout, message logging,
+#               prompt-cache points, drop_params, a bedrock model_id. See the block at the end.
+
+# EDIT THIS TABLE: the placeholder endpoint, key and model below are the only values you have to replace.
+# `api_base` is your OpenAI-compatible endpoint; `key` is that endpoint's credential.
+# This file is a REFERENCE: copy it to providers.toml (mode 600) and edit that one. install.sh installs
+# this file only - it never creates providers.toml, because it knows none of the values in it.
+[providers.mine]
+api_base = "https://api.example.com/v1"    # replace with your endpoint
+key = ""                                   # paste the API key here; this file is chmod 600
+# Uncomment `true` for an endpoint whose NON-streaming reply LiteLLM cannot parse (one that returns no
+# `choices` list, for instance). It is scoped to this provider's own host, so it cannot leak onto another
+# endpoint - but it is still a knob you set, not one install.sh guesses from the URL.
+# stream = true
+
+# A second OpenAI-compatible endpoint, with its own key. Switching to it is one line in settings.toml.
+# It cannot be a FALLBACK beside the first: pr-agent holds one endpoint per run, so the resolver refuses
+# a chain spanning two providers rather than serving half of it from the wrong host.
+# [providers.work]
+# api_base = "https://llm.internal.corp/v1"
+# key = ""
+#
+# # An endpoint that speaks a non-OpenAI protocol. Only these transports read an api_base from this file -
+# # openai, openrouter, moonshot, ollama, huggingface, databricks - because every other one takes its
+# # endpoint from an environment variable or the provider's own default. Naming one of those with an
+# # api_base is REFUSED rather than silently ignored: it would carry this key to a host you did not choose.
+# [providers.anthropic-direct]
+# transport = "anthropic"
+# key = ""
+
+# ---------------------------------------------------------------------------- profiles
+#
+# A profile is a complete description of ONE model: the id, the provider that serves it, and the settings
+# that are properties of that model. Anything that is the same for every model (the review knobs) lives in
+# settings.toml instead.
+#
+#   [profiles.<name>]           provider = "...", model = "..."
+#   [profiles.<name>.config]    that model's token budgets and model-level knobs:
+#                                 custom_model_max_tokens, max_model_tokens, max_output_tokens,
+#                                 reasoning_effort, enable_claude_extended_thinking,
+#                                 extended_thinking_budget_tokens, extended_thinking_max_output_tokens,
+#                                 enable_claude_adaptive_thinking
+#
+# ONE CATCH, reported rather than refused: pr-agent holds one config per process, so the ASSIGNED profile's
+# settings govern the whole run - including when a fallback answers. A fallback's own budgets therefore
+# cannot take effect while it is a fallback; preflight warns when it sees them, and they apply the moment
+# you assign that profile as `main`.
+#
+# Names are QUOTED wherever they appear, here and in settings.toml: a bare TOML key cannot contain a dot.
+# `[profiles.v4.1-flash]` would split into a table `v4` with a child `1-flash`, which is not a profile -
+# the resolver diagnoses an unquoted one rather than reporting the fragment it parsed.
+
+[profiles.mine]
+provider = "mine"
+model = "your-model-id"   # replace with the id THIS endpoint serves
+
+# The budgets are example values for a large-window model; set them to your model's own numbers.
+# `custom_model_max_tokens` is what pr-agent measures the prompt against when LiteLLM does not know the
+# model - without it an unknown id is a hard error rather than a review. `max_model_tokens` clamps the
+# diff, and `max_output_tokens` caps the reply: unset, an endpoint's own ceiling applies and a reasoning
+# model can spend all of it thinking, returning truncated output that pr-agent treats as a failed call.
+# For a model LiteLLM does know, the first two may be 0 - "look the window up" - but the output cap should
+# stay generous for the reason above.
+[profiles.mine.config]
+custom_model_max_tokens = 200000
+max_model_tokens = 150000
+max_output_tokens = 100000
+
+# [profiles.mine-backup]
+# provider = "mine"
+# model = "your-backup-model-id"
+
+# Pointing the review at another endpoint is a change of assignment, and that endpoint is another provider.
+# [profiles."reviewer-api"]
+# provider = "work"
+# model = "their-model-id"
+
+# ---------------------------------------------------------------------------- a provider's [litellm]
+#
+# The keys accepted here are listed below. The three preflight DERIVES - the transport pin and the
+# streaming pair - are refused, because they follow `transport` and `stream` and a pin that disagreed with
+# the endpoint is resolved by LiteLLM SILENTLY, to the wrong host. Any other key is refused by name
+# rather than ignored, so a setting this list does not know about cannot look configured and do nothing.
+#
+#   enable_callbacks, success_callback, failure_callback, service_callback
+#   callback_timeout_seconds          how long to wait for callbacks to flush
+#   turn_off_message_logging          keep prompt/response content out of callback payloads
+#   cache_control_injection_points    Anthropic prompt-cache points
+#   drop_params                       drop unsupported params instead of failing the request
+#   model_id                          bedrock application inference profile ARN
+#
+# A key identical for EVERY endpoint belongs in settings.toml's [litellm] instead.
+#
+# [providers.work.litellm]
+# callback_timeout_seconds = 5
+# turn_off_message_logging = true

@@ -4,8 +4,8 @@
 
 One command deploys a **machine-local** PR-Agent that reviews your **working tree** (no commit, no GitHub round
 trip) and hands the findings back to whatever coding agent is editing the code. It works against **any
-OpenAI-compatible endpoint**; ClinePass (`openai/cline-pass/deepseek-v4.1-flash`, `https://api.cline.bot/api/v1`)
-is just the built-in default.
+OpenAI-compatible endpoint**; the endpoint, the model and the credential are yours to set once, after the
+install.
 
 ## What you get
 
@@ -20,7 +20,7 @@ Every run that succeeds and produces output is also kept, with its start time, f
 one.
 
 - Reviews include committed **plus uncommitted and untracked** changes — a review never needs a commit.
-- Secrets live in `~/.config/preflight/.secrets.toml` (chmod 600), symlinked into the PR-Agent package.
+- Secrets live in `~/.config/preflight/providers.toml` (chmod 600), one key per endpoint.
   **Nothing secret ever goes into your shell environment.**
 
 ## Docs
@@ -37,8 +37,10 @@ one.
 - macOS or Linux, and `git`.
 - [`uv`](https://astral.sh/uv) — installs PR-Agent in an isolated venv:
   `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- Python 3.13 (the installer's default; `PREFLIGHT_PY` overrides it, and uv can fetch one).
-- Network access to an OpenAI-compatible endpoint (ClinePass by default, or your own).
+- Python 3.13 (the installer's default; `PREFLIGHT_PY` overrides it, and uv can fetch one) for PR-Agent,
+  **and a `python3` 3.11+ on `PATH`** - `preflight` reads `settings.toml` with the standard library's
+  `tomllib`, which entered it in 3.11. `install.sh` warns when the one it finds is older or absent.
+- Network access to an OpenAI-compatible endpoint of your own.
 
 ## Install
 
@@ -46,49 +48,162 @@ one.
 git clone https://github.com/413x5/preflight ~/preflight
 cd ~/preflight
 ./install.sh
-$EDITOR ~/.config/preflight/.secrets.toml      # paste the API key between the quotes
+
+# create your config from the installed references, then edit them
+cp ~/.config/preflight/settings.toml.example  ~/.config/preflight/settings.toml
+( umask 077; cp ~/.config/preflight/providers.toml.example ~/.config/preflight/providers.toml )
+$EDITOR ~/.config/preflight/providers.toml      # your endpoint, key and model id
+$EDITOR ~/.config/preflight/settings.toml       # [selection] main = that profile's name
 ```
 
-Non-interactive:
+`install.sh` installs helpers, hooks and the two **reference** files - `settings.toml.example` and
+`providers.toml.example` - and deliberately creates neither `settings.toml` nor `providers.toml`: it knows
+no endpoint, no model id and no window, so a file it wrote could only be a guess. The two files are yours,
+and a review refuses to start without them rather than defaulting to anything. The refusal offers only the
+copy that applies: a missing `settings.toml` prints that command (and the `providers.toml` one too, if that
+file is absent as well), while a `providers.toml` that defines no `[profiles.<name>]` table names the file
+and the tables to add. It will not tell you to copy a template over a file you already have, because that
+file may be the one holding your key.
 
-```sh
-PREFLIGHT_KEY=... ./install.sh
+The credential is the one value the resolver enforces: it refuses to start on an empty `key` rather than
+calling an endpoint without one. The endpoint and the model are ordinary strings, so the review will send
+them as written - replace the placeholder host and model id, not just the key. `providers.toml` must stay
+`chmod 600`; `install.sh` tightens it on a later run if it finds it looser.
+
+## Using a different endpoint
+
+Configuration happens **after** the install, in `providers.toml` - there are no variables that seed an
+endpoint or a model:
+
+```toml
+# ~/.config/preflight/providers.toml
+[providers.mine]
+api_base = "https://api.example.com/v1"
+key      = "sk-..."                # this file is chmod 600
+# stream = true                    # see below
+
+[profiles.mine]
+provider = "mine"
+model    = "your-model-id"
 ```
 
-## Using another provider
+Then point `settings.toml`'s `[selection]` at that profile name. Variables that configure the *install
+itself* (`PREFLIGHT_PR_AGENT_VERSION`, `PREFLIGHT_PY`, `PREFLIGHT_HOME`, `PREFLIGHT_BIN_DIR`,
+`PREFLIGHT_SKIP_TOOL_INSTALL`) are listed in the header of `install.sh`; none of them names an endpoint or
+a model.
 
-Any OpenAI-compatible endpoint works. Point the installer at it and override whichever defaults you need —
-all of these are optional, and the defaults (ClinePass) are kept when unset:
+Two settings in a profile are worth knowing about:
 
-```sh
-PREFLIGHT_API_BASE=https://api.openai.com/v1 \
-PREFLIGHT_KEY=sk-... \
-PREFLIGHT_MODEL=gpt-4o \
-PREFLIGHT_FALLBACK_MODELS="openai/gpt-4o-mini" \
-PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS=0 \
-PREFLIGHT_MAX_MODEL_TOKENS=0 \
-  ./install.sh
+- **Token budgets** (`[profiles.<name>.config]`). `custom_model_max_tokens` is what pr-agent measures the
+  prompt against when LiteLLM does not know the model id, so an id LiteLLM cannot resolve fails the review
+  until you set it. `max_model_tokens` clamps the diff, and `max_output_tokens` caps the reply: unset, the
+  endpoint's own ceiling applies and a reasoning model can spend all of it thinking, returning truncated
+  output pr-agent treats as a failed call.
+- **`stream = true`** on the *provider*, for an endpoint whose non-streaming reply LiteLLM cannot parse.
+  preflight forces streaming **for that provider's own host only**; every other endpoint gets an empty
+  pair, so the workaround never engages there.
+
+### More than one endpoint
+
+`~/.config/preflight/providers.toml` (600-mode, created by copying the installed reference) holds each endpoint and the
+profiles that use it:
+
+```toml
+# providers.toml
+[providers.mine]
+api_base = "https://api.example.com/v1"
+key      = "sk-..."
+# stream = true                  # only if this host's non-streaming reply needs SSE
+
+[providers.work]
+api_base = "https://llm.internal.corp/v1"
+key      = "sk-..."
 ```
 
-| Variable | Meaning |
-|---|---|
-| `PREFLIGHT_API_BASE` | The endpoint base URL (also written into `.secrets.toml`) |
-| `PREFLIGHT_KEY` | The API key (written into `.secrets.toml`) |
-| `PREFLIGHT_MODEL` | Primary model id, in the endpoint's own id form |
-| `PREFLIGHT_FALLBACK_MODELS` | Comma-separated fallback ids; `none` disables fallback |
-| `PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS` | Context window for a model LiteLLM doesn't know; **`0` = ask LiteLLM** |
-| `PREFLIGHT_MAX_MODEL_TOKENS` | Packing clamp; **`0` = no clamp** |
-| `PREFLIGHT_FORCE_STREAMING_HOST` | Host needing the ClinePass streaming workaround (see below) |
-| `PREFLIGHT_PR_AGENT_VERSION` | pr-agent version to install; the bundle pins one it has been verified against |
+```toml
+# settings.toml - says what the REVIEW does
+[selection]
+main = "mine"                    # the profile to use first, by name
+# fallback = ["mine-backup"]       # commented because nothing defines that profile below; assign a
+                                   # [profiles.*] table you actually have, or leave it out
 
-Two of these matter more than they look:
+[pr_reviewer]
+num_max_findings = 10
+```
 
-- **Token budgets.** `cline-pass/*` is not in LiteLLM's model table, so nothing declares its context window and
-  the packing clamp would cut the diff to 32k — hence the explicit values. For a model LiteLLM *does* know, set
-  both to `0` and let it resolve the window itself rather than overriding it with a guess.
-- **Force-streaming.** ClinePass returns a wrapped non-streaming envelope (`{"data":…,"success":true}`) that
-  LiteLLM cannot parse, so the config forces streaming **for that host only**. The substring is matched against
-  your `api_base`, so for any other endpoint it simply never matches and the block stays inert.
+```toml
+# providers.toml - the same file, above the [providers.*] tables
+[profiles.mine]
+provider = "mine"
+model    = "your-model-id"
+
+[profiles.mine.config]           # this model's own budgets
+custom_model_max_tokens = 200000
+max_model_tokens        = 150000
+max_output_tokens       = 100000
+
+[profiles.work]
+provider = "work"
+model    = "their-model-id"
+```
+
+A profile is a complete description of one model — its id, the endpoint that serves it, and the settings
+that are properties of *that* model — so switching `main` switches all of it. Profiles live beside the
+endpoints they name, in `providers.toml`.
+
+There is no third config file: `settings.toml` is the config pr-agent receives, apart from what a run
+decides (the model, its endpoint and credential, and the three `[litellm]` keys derived from the provider),
+so any pr-agent key works there even if the template does not list it.
+
+`[litellm]` settings are per endpoint too, so they go on the provider:
+
+```toml
+[providers.mine.litellm]
+callback_timeout_seconds = 5
+turn_off_message_logging = true
+cache_control_injection_points = [{ location = "message", role = "system" }]
+```
+
+The keys accepted there are listed in `config/providers.toml.example`: callbacks and their timeout,
+message logging, prompt-cache points, `drop_params`, `model_id`. The three preflight *derives* —
+`custom_llm_provider`, `force_streaming_custom_llm_provider`, `force_streaming_api_base_substrings` — are
+**refused**, because they follow that provider's `transport` and `stream` and a pin that disagreed with the
+endpoint is resolved silently, to the wrong host. Any other `[litellm]` key is refused by name rather than
+ignored, so a newer pr-agent setting is a one-line addition to the allow-list rather than a surprise. A
+setting that is the same for *every* endpoint belongs in `settings.toml`'s own `[litellm]`.
+
+The review knobs are the exception: they are the only run-wide, non-endpoint section, because **pr-agent
+applies `[pr_reviewer]` to the whole run**, not to one model - so a copy per profile would be the same
+answer written twice and free to drift. Every other pr-agent section (`[config]`, `[litellm]`) still
+belongs in `settings.toml` when the value is the same for every model.
+
+One catch, reported rather than refused: because pr-agent holds one config per run, the assigned profile's
+budgets govern every model in the chain, including a fallback that answers. A fallback's own budgets
+therefore cannot take effect while it is a fallback — `preflight` warns when it sees them, and they apply
+the moment that profile is assigned as `main`.
+
+A profile name is a TOML key, and a bare key cannot contain a dot: `[profiles.v4.1-flash]` splits into a
+table `v4` with a child `1-flash`. Name profiles without dots, or quote the name everywhere it appears —
+`[profiles."v4.1-flash"]` and `main = "v4.1-flash"`. The resolver diagnoses an unquoted one and says so.
+
+Switching endpoints is then one line — `main = "work"` — and the model id needs no provider prefix, because
+the provider is named on its own line instead of being spelled inside the id.
+
+Before each run, `preflight` renders those two files into **one** config for pr-agent, 600-mode, outside the
+repository, and overwrites it before every run. Nothing about this is per-run bookkeeping you have to do: an
+install with no assignment in `settings.toml` refuses rather than reviewing: there is no fallback config, so
+a file that assigns no profile has no model at all.
+
+`transport` is optional and defaults to `openai` — the OpenAI-compatible transport, which does not mean the
+provider is OpenAI. Set it to name a different one (`anthropic`, `gemini`, …) where the endpoint is not
+OpenAI-compatible; only `openai`, `openrouter`, `moonshot`, `ollama`, `huggingface` and `databricks` read an
+endpoint from a config file, so a provider on any other transport takes its `api_base` from that provider's own
+environment variable and carries only its key here.
+
+A run holds **one** endpoint, so `main` and its fallbacks must name the same provider: pr-agent pins one
+transport per process, and a chain spanning two would be answered by whichever one is pinned — a different
+host, with that provider's key. `preflight` refuses that instead, naming the provider, and refuses a `provider`
+that no `[providers.*]` table defines rather than letting pr-agent fall back to another section's host.
 
 ## Use
 
@@ -115,7 +230,7 @@ target something else (a release branch, a fork's trunk); if nothing resolves, `
 rather than guessing a ref that does not exist.
 
 One review is meant to report **everything** it was shown, so the loop converges instead of re-discovering
-one issue at a time. `num_max_findings` in `config/preflight.toml.example` governs what the model *reports*,
+one issue at a time. `num_max_findings` in `settings.toml` governs what the model *reports*,
 and that file lists every `[pr_reviewer]` knob pr-agent accepts - the bundle's own settings live and the rest
 commented at upstream's value - so the levers are visible without reading pr-agent's source.
 What that setting cannot do is change what the model was *shown*: when a diff exceeds the token budget
@@ -184,10 +299,10 @@ Use the **relative** hooks path - an absolute one breaks git worktrees. See
 
 - `~/.local/bin/{preflight,preflight-pr,preflight-gate}` — the helpers.
 - `~/.config/preflight/VERSION` — the installed bundle version (`preflight --version` reads it).
-- `~/.config/preflight/{preflight.toml,gate.toml,ensure-link.sh,AGENTS-review-snippet.md,preflight-hook}` — config + helpers (`gate.toml` is created only if missing).
+- `~/.config/preflight/{gate.toml,settings-render.sh,AGENTS-review-snippet.md,preflight-hook}` — helpers (`gate.toml` is created only if missing).
+- `~/.config/preflight/{settings,providers}.toml.example` — the two reference files, 600-mode for the one that shows where the key goes. `install.sh` never creates `settings.toml` or `providers.toml`: they are yours, created by copying the references, and a reinstall leaves them alone (tightening `providers.toml` to 600 if it finds it looser).
 - `~/.config/preflight/githooks/{pre-commit,post-commit}` — the example hooks to copy into a repo's `.githooks/`.
-- `~/.config/preflight/.secrets.toml` — created only if missing, chmod 600.
-- A symlink from that secrets file into the PR-Agent package's `settings/` dir.
+
 
 ## Development
 
@@ -216,8 +331,8 @@ PREFLIGHT_REMOVE_TOOL=1 ./uninstall.sh    # also removes the uv tool
 ```
 
 `uninstall.sh` also cleans up a pre-rename install (`pra`/`pral`/`pral-gate` and `~/.config/pr-agent`), so
-nothing is left behind. Set `PREFLIGHT_KEEP_OLD_CONFIG=1` to keep the old config (its `.secrets.toml` holds your
-key) and migrate it by hand.
+nothing is left behind. Set `PREFLIGHT_KEEP_OLD_CONFIG=1` to keep the old config (it holds the key you will
+want to copy into `providers.toml`) and migrate it by hand.
 
 ## Notes
 
@@ -230,19 +345,38 @@ key) and migrate it by hand.
   set the **relative** `core.hooksPath`. See "Make it enforced" above.
 - The helpers run the upstream **`pr-agent`** tool (installed by `uv`); "pr-agent" here always means that
   upstream project, not this bundle.
-- Upgrading PR-Agent (`uv tool upgrade pr-agent`) recreates the venv; the wrappers re-link the secrets
-  automatically.
+- Upgrading PR-Agent (`uv tool upgrade pr-agent`) recreates the venv. Nothing needs re-linking: the config
+  reaches pr-agent as a file the wrapper renders, so nothing is written into the package's `settings/` dir.
 
 ## Upgrading from the old `pr-agent`-named bundle
 
-The commands and config path were renamed. To migrate without losing the key:
+The commands and config path were renamed. There is no automatic migration: the endpoint, the model and
+the key are values you re-enter in the new `providers.toml`.
 
 ```sh
-cd ~/preflight && ./install.sh                          # installs the new commands + ~/.config/preflight
-mv ~/.config/pr-agent/.secrets.toml ~/.config/preflight/.secrets.toml
-chmod 600 ~/.config/preflight/.secrets.toml
-./uninstall.sh                                          # removes old helpers, config dir and stale .toml
+# 1. Remove the old install (helpers and old config dirs).
+cd ~/preflight && ./uninstall.sh
+
+# 2. Install, create your config from the references it installs, then fill them in.
+./install.sh
+cp ~/.config/preflight/settings.toml.example  ~/.config/preflight/settings.toml
+( umask 077; cp ~/.config/preflight/providers.toml.example ~/.config/preflight/providers.toml )
+$EDITOR ~/.config/preflight/providers.toml
+$EDITOR ~/.config/preflight/settings.toml
 ```
+
+`uninstall.sh` removes the config dir it is pointed at (`rm -rf "$cfg"`), so it takes any configuration of
+the new bundle with it - run it before configuring, not after. `PREFLIGHT_KEEP_OLD_CONFIG=1` spares only the
+*old* pre-rename directory, and the new one is removed either way. If you have already configured the new
+install, copy its `settings.toml` and `providers.toml` somewhere first and put them back after.
 
 Then re-paste the updated `AGENTS-review-snippet.md` into any repo that still calls `pral` — that command no
 longer exists.
+
+## Upgrading a bundle older than the two-file config
+
+`preflight.toml` and `.secrets.toml` are no longer read, and the config dir did not move — so an upgrade
+from the one-file layout leaves the endpoint, the model and the key in files nothing reads, and a review
+refuses until `settings.toml` and `providers.toml` exist. `install.sh` names both files when it finds them;
+the values to carry over are the endpoint, the model id and the token budget into `providers.toml`, and the
+key into that provider's entry. `providers.toml.example` documents every key.

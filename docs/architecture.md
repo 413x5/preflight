@@ -53,39 +53,124 @@ commit, with nothing pointing at the base. Hence exit 4 naming the candidates ra
 Finally it appends `.preflight/` to the repo's `.git/info/exclude` (per-clone metadata, shared by every
 worktree, never committed).
 
-## The ClinePass streaming workaround (provider-specific)
+## The streaming workaround (opt-in, per provider)
 
-This is the one genuinely **ClinePass-specific** piece; it is not part of the general mechanism.
-
-ClinePass returns a **wrapped** non-streaming envelope (`{"data": ..., "success": true}`) that LiteLLM
-cannot normalize. Streaming returns standard SSE, which LiteLLM parses fine. So the config forces
-streaming for that host — and only that host:
+Some endpoints return a **wrapped** non-streaming envelope (a `{"data": ..., "success": true}` body, say)
+that LiteLLM cannot normalize, while their streaming reply is standard SSE that it parses fine. For such
+an endpoint the config forces streaming - and only for that endpoint:
 
 ```toml
 [litellm]
 custom_llm_provider = "openai"
 force_streaming_custom_llm_provider = "openai"
-force_streaming_api_base_substrings = ["api.cline.bot"]
+force_streaming_api_base_substrings = ["api.your-endpoint.example"]
 ```
 
-The substring is matched against the request's `api_base`, so pointing at any other endpoint simply
-never matches and the block is inert — nothing to remove. If you reach ClinePass through a proxy,
-`PREFLIGHT_FORCE_STREAMING_HOST` (or the value in `config/preflight.toml.example`) sets the host to match.
+Those three keys are **derived**, never written by hand. A provider that declares `stream = true` in
+`providers.toml` gets the pair written from its own transport and its own `api_base`; every other provider
+gets an empty pair. The gate requires `force_streaming_custom_llm_provider` to equal the pinned transport
+*and* a substring to match, so the two cannot disagree, and a substring derived from another provider's
+host cannot leak onto this one - see "Named model configurations" below.
 
-Token budgets are needed here for a related reason: `cline-pass/*` is not in LiteLLM's model table, so
-nothing declares the context window and the packing clamp cuts the diff to 32k. Hence
-`custom_model_max_tokens` and `max_model_tokens` are set explicitly. For a model LiteLLM *does* know,
-set both to `0` and let LiteLLM resolve the window — `0` means "look it up", not "no limit".
+The substring is matched against the request's `api_base`. An endpoint reached through a proxy is the
+reason `stream` is a knob on the provider rather than a value inferred from a host name: the provider
+you point at names its own host, and the pair is armed for that host.
 
-Any OpenAI-compatible endpoint that behaves normally needs neither the workaround nor a guessed
-budget.
+Nothing in the mechanism is endpoint-specific. An endpoint that behaves normally needs neither the
+workaround nor a guessed budget.
+
+Token budgets matter for a related reason: LiteLLM does not know every model id, and an id it cannot
+resolve has no declared context window. `custom_model_max_tokens` is what pr-agent measures the prompt
+against instead - without it the run fails rather than reviewing a clamped diff. `max_model_tokens`
+clamps the diff; both may be `0` for a model LiteLLM does know, which means "look it up", not "no limit".
+`max_output_tokens` caps the reply, and leaving it unset lets the endpoint's own ceiling apply - which a
+reasoning model can spend entirely on hidden reasoning, returning truncated output that pr-agent treats as
+a failed call and answers with a fallback.
+
+## Named model configurations, and the rendered config
+
+`~/.config/preflight/settings.toml` assigns one profile to the main slot and others to the fallback chain,
+each by name. Each profile names its endpoint by a **provider** — an entry in
+`~/.config/preflight/providers.toml` (600-mode) holding that endpoint's `api_base` and `key`.
+
+Why a rendered file, rather than the environment-variable layer: a transport can only be **pinned** by a
+settings key, `litellm.custom_llm_provider`. A pin that
+disagrees with the endpoint is resolved *silently* by LiteLLM — the request goes to the pinned provider's
+host carrying that provider's key, with no error and no log line — so the pin and the endpoint have to be
+derived from one entry rather than agreed by hand. Rendering is what makes them one entry.
+
+Each run, `settings-render.sh` reads `settings.toml` and `providers.toml`, and writes **one** config to
+`$PREFLIGHT_HOME/.pragent.settings.<pid>.toml` - 600-mode, one file per run, and what
+`--extra_config_url` points at. The pid in the name is what makes two runs sharing a config dir safe:
+neither can read the other's model, endpoint or key. The run deletes its own file from its `EXIT` trap,
+and a copy of the last one is left at `.pragent.settings.toml` so a run stays inspectable. It lives in the config dir, which is
+outside any repository by default, because `preflight` snapshots the working tree with `git add -A`; a
+config dir inside one is accepted only when the **directory itself** is gitignored there. The unit is the
+directory rather than a list of known file names, because a backup or an editor copy of `providers.toml`
+holds the same key under a name no list can predict, and `git add -A` stages it the same. The renderer
+asks `git ls-files -o --exclude-standard` over that dir and refuses with any file it names. The helpers run
+that check *before* the snapshot as well as at the render: `git add -A` writes a blob for whatever it
+stages, so a refusal that only came afterwards would leave the key in `.git/objects`.
+
+**Two files, and nothing else.** `settings.toml` says what the *review* does — which profiles are assigned,
+and the review's own pr-agent settings — and `providers.toml` says which *models* exist, what each needs, and
+where its endpoint is. They are the only two files: the render starts from a copy of
+`settings.toml`, strips the preflight-only `[selection]` table, and adds the model, the endpoint and the
+three derived `[litellm]` keys. So a section the renderer does not recognise is pr-agent's business and is
+passed through unchanged — which is what makes `settings.toml` the config rather than a subset of one.
+
+Keeping the profiles beside the endpoints is deliberate: a profile is only meaningful against the provider
+it names, so the two halves of "how this model is reached" cannot drift apart and a rename lands in one
+file.
+
+**What is run-wide and what is per model.** `[pr_reviewer]` is applied by pr-agent to the whole run, so it
+is stated once in `settings.toml`; a copy inside a profile is refused, since that would be the same answer
+written twice and free to drift. Everything else a profile can set is a property of *its* model — the token
+budgets and knobs like `reasoning_effort` — and follows whichever profile is assigned, which is what makes a
+profile a complete choice rather than only a model id.
+
+But pr-agent holds one config per process — `get_max_tokens()` and the output-cap resolver both read the
+settings and ignore which model is asking — so the assigned profile's values govern every model in the
+chain, and a fallback's own values cannot apply while it is a fallback. The resolver says so rather than
+dropping them silently, and warns instead of refusing: the profile is valid, and its settings take effect
+the moment it is assigned as `main`, which is a switch of one line.
+
+**`[litellm]` belongs to the endpoint.** The section mixes two kinds of key, and the split follows that:
+the three preflight *derives* — the transport pin and the streaming pair — come from a provider's
+`transport` and `stream`, and are refused inside a provider's own table because a second copy could
+disagree with the endpoint. Everything else in the section is a property of the endpoint — callbacks and
+their timeout, message logging, prompt-cache points, `drop_params`, a bedrock `model_id` — so it is set as
+`[providers.<name>.litellm]` and rendered for the run. A key that is the same for every endpoint stays in
+`settings.toml`'s `[litellm]`.
+
+**One endpoint per run.** pr-agent holds one pinned transport and one section of credentials per process, so
+`main` and its fallbacks must name the same provider. A chain spanning two is not "half-served" — it is
+served entirely by whichever provider is pinned — so the resolver refuses it by name, and refuses a
+`provider` that no `[providers.*]` table defines, which would otherwise fall back to another section's host
+and key.
+
+**Transport, and which ones can carry an endpoint.** `transport` defaults to `openai` — the
+OpenAI-compatible transport, which does not mean the provider is OpenAI. Of the transports pr-agent knows,
+only `openai`, `openrouter`, `moonshot`, `ollama`, `huggingface` and `databricks` read an `api_base` from a
+config file; the rest take their endpoint from an environment variable or their own default and carry only
+a key. An `api_base` on one of those is **refused** rather than written into a section nothing reads, so the
+resolver's transport table is checked against pr-agent's own `PROVIDER_SETTING_PATHS` by the `models`
+stage — which skips, deliberately and visibly, on a machine without pr-agent, so the check runs where a
+key is configured and nowhere pretends to have run.
+
+**No provider prefix is needed in a model id.** With the pin set, pr-agent routes every model to that
+transport, and LiteLLM strips a matching prefix — so `their-model-id` reaches the endpoint as written.
+A prefix that disagrees with the pin is *not* an error either; it is passed through as part of the model
+name, which is why naming the provider on its own line is the supported way to choose an endpoint.
 
 ## Secrets
 
-- Live in `~/.config/preflight/.secrets.toml` (`chmod 600`), under `[openai]`, as `key = "..."`.
-- `install.sh` symlinks them into the PR-Agent package's `settings/` dir.
-- `uv tool upgrade` recreates the venv and drops that symlink, so `preflight` and `preflight-pr` source
-  `ensure-link.sh`, which re-creates it on the next run.
+- Live in `~/.config/preflight/providers.toml` (`chmod 600`), one `key` per `[providers.*]` entry.
+- They reach pr-agent only through the per-run rendered config at `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`,
+  which is 600-mode; the copy left at `.pragent.settings.toml` is the same content, and both sit outside
+  any repository by default (see above for the gitignored-in-repo case).
+- Nothing is written into the pr-agent package: the rendered config carries the section pr-agent reads, so
+  no file is edited there.
 
 The key is never placed in the shell environment.
 
@@ -272,18 +357,19 @@ text that reached `review.md` - so a slow review looks like a slow provider when
 volume. [`measurements.md`](measurements.md) has the figures.
 
 The lever is `[config] reasoning_effort`, and pr-agent forwards it **only** to a model its bundled litellm
-metadata calls reasoning-capable. `cline-pass/*` is not in that table, so the value is read, logged, and
-never sent - the escape hatch is `[config] additional_reasoning_effort_models`, naming the id explicitly,
-and the two are only useful together.
+metadata calls reasoning-capable. An id that table does not know is read, logged, and never sent - the
+escape hatch is `[config] additional_reasoning_effort_models`, naming the id explicitly, and the two are
+only useful together.
 
-`config/preflight.toml.example` sets **neither**, so the practical effect is that **no** effort reaches this endpoint
+`config/settings.toml.example` sets **neither**, so the practical effect is that **no** effort reaches this endpoint
 - not pr-agent's `medium` default either. A probe of the constructed request confirmed it: adding
 `reasoning_effort` produced a byte-identical payload. `docs/roadmap.md` carries the open decision on this;
 `docs/runbooks/troubleshooting.md` carries the measurements and the symptom.
 
 There is deliberately **no sampling pin**, and it is inert anyway: `config.temperature` (upstream default
-0.2) and `config.seed` (default -1, i.e. unset) are left alone, and this endpoint ignores `seed` even when
-set. Reviews therefore sample freely - the stated limit of `new=N/M` - and `docs/roadmap.md` records the probes.
+0.2) and `config.seed` (default -1, i.e. unset) are left alone, and the endpoint measured here ignored
+`seed` even when set. Reviews therefore sample freely - the stated limit of `new=N/M` - and
+`docs/roadmap.md` records the probes.
 
 ## The gate
 
@@ -371,11 +457,10 @@ and the gate can never disagree about what counts as a pass.
 ## Reviewer context: the `Code review` section of AGENTS.md
 
 A reviewer cannot tell a deliberate, documented trade-off from an oversight, so it reports the
-trade-off - the `.preflight-gate.toml` directory trust boundary has been raised as a finding three
+trade-off - the `.preflight-gate.toml` directory trust boundary has been raised as a finding several
 times, and each time the answer was the same. The fix is to hand the reviewer the repository's own
-facts, and AGENTS.md is where they go: it is the convention every other tool reads (Copilot, Cursor,
-Cline, CodeRabbit, and pr-agent's own default `repo_context_files` entry), so no team maintains a
-second file.
+facts, and AGENTS.md is where they go: it is the convention most coding tools read and pr-agent's own
+default `repo_context_files` entry, so no team maintains a second file.
 
 A heading whose text starts with `Code review` - any level - is extracted and sent **alone**, so a long
 AGENTS.md does not follow the reviewer into the prompt. `#`-style (ATX) headings only, which is what
@@ -399,7 +484,7 @@ channel does reach `pr_reviewer`, so it carries the file. It composes into the s
 `extra_instructions` occupies - which is why `[pr_reviewer]` still does not set that key (see
 docs/roadmap.md).
 
-**Everything for it must come through the environment, not `config/preflight.toml.example`.** pr-agent calls
+**Everything for it must come through the environment, not `config/settings.toml.example`.** pr-agent calls
 `inject_artifact_context()` from `cli.py` *before* `apply_repo_settings()` loads `--extra_config_url`,
 so an `[artifacts]` section there is read too late: `enable`, `target_tools` and `artifact_label`
 resolve from the environment and defaults first. The helper therefore
@@ -464,7 +549,7 @@ agent fixes a finding, re-runs, and gets handed a fresh one - so the two are eas
 other, and fixing only one leaves the loop slow.
 
 **The model returns few findings.** `pr_reviewer.num_max_findings` caps how many are returned (upstream
-default 3). `config/preflight.toml.example` raises it. It does not set `pr_reviewer.extra_instructions`, so pr-agent's
+default 3). `config/settings.toml.example` raises it. It does not set `pr_reviewer.extra_instructions`, so pr-agent's
 reviewer prompt is sent unmodified - including its own guidance to prefer not reporting over guessing, and
 its schema's "an empty list is acceptable". See `CHANGELOG.md` for why that text is gone and `docs/roadmap.md`
 for the open experiment.
@@ -593,7 +678,7 @@ preflight: issues=2 security=No risk=low merge=review carefully effort=3 tokens=
 itself uses to dedupe - `(relevant_file, issue_header, issue_content)`, whitespace- and case-normalised -
 so a different issue in the same file is still new while the same sentence is not.
 
-There is **no sampling pin**: `config/preflight.toml.example` sets neither `config.temperature` nor `config.seed`, so
+There is **no sampling pin**: `config/settings.toml.example` sets neither `config.temperature` nor `config.seed`, so
 each review samples freely - the stated limit of `new=N/M`. The prompt is fixed, which
 is what makes a re-review tend to reproduce its wording, but a paraphrase is a normal outcome rather than
 a bug - and it is why a reworded repeat can still read as new. `[config] seed` (a positive integer, which

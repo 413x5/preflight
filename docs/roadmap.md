@@ -22,6 +22,18 @@ Wanted; needs design, or an experiment to settle. Two groups:
 - **Experiments**, each phrased as a question with the result that would settle it. An experiment is
   cheap, reversible and must state what would falsify it; a design item needs a decision first.
 
+- [ ] **Should a repository be able to override the named model configuration?** Deferred deliberately when
+      `settings.toml` and `providers.toml` shipped, and it is the one part of that feature's shape that is
+      still open. Two facts decide it, and the first was measured while building the feature: pr-agent's
+      `apply_repo_settings()` applies `--extra_config_url` FIRST and the repo-local `.pr_agent.toml` after,
+      so a repo that sets `[config] model` **wins** over the rendered file; and in `--stdin`/plain-diff
+      mode, which is how `preflight` invokes pr-agent, `get_repo_settings()` returns nothing, so a
+      repo-local file is currently inert and there is nothing to override. So the question is not whether
+      the override works - it is whether preflight should honour a repo-local file at all, given that the
+      harness is a local pre-commit check on the committer's own work and `.preflight-gate.toml` is already
+      repo-controlled in the same way. A repository that could name its own `provider` would also be naming
+      a credential entry, which is the part needing a decision rather than an implementation.
+
 ### Experiments
 
 - [ ] **Which of the untried levers actually stabilise the finding set?** The convergence test showed the
@@ -30,8 +42,8 @@ Wanted; needs design, or an experiment to settle. Two groups:
 
       **Already tested and rejected - do not repeat:** `[config] seed`. It is inert on this endpoint.
       Direct probes with `seed=42`, `seed=1234` and `temperature=0` each returned a different answer every
-      time (`['Silent-Crimson-47', 'Brisk-Azure-77', 'Swift-Crimson-47', ...]`), and ClinePass accepts the
-      parameter without honouring it. `temperature=0` alone did not stabilise it either. Pinning to
+      time (`['Silent-Crimson-47', 'Brisk-Azure-77', 'Swift-Crimson-47', ...]`), and the endpoint accepted
+      the parameter without honouring it. `temperature=0` alone did not stabilise it either. Pinning to
       `seed` also *fails every review* unless `temperature` is 0 - `ValueError: Seed (42) is not supported
       with temperature (0.2) > 0` - on the primary and the fallback model, so it is a pair or nothing.
 
@@ -75,7 +87,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
       direction, so the cascade was not only sampling variance - a noise knob was deliberately turned up.
       The finding cap is the other half of that trade-off: it is raised well above upstream's default,
       which is what the cap is for, but it is also a lever in the noise direction. Its shipped value is in
-      [`config/preflight.toml.example`](../config/preflight.toml.example) rather than repeated here.
+      [`config/settings.toml.example`](../config/settings.toml.example) rather than repeated here.
 
 ### Open questions on shipped work
 
@@ -115,7 +127,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
       (a cheaper round that reports fewer findings just moves the cost to a later round).
 
       **Still open:** whether the raised `num_max_findings` invites padding (its shipped value is in
-      [`config/preflight.toml.example`](../config/preflight.toml.example)), and `[config] seed` (unset), which
+      [`config/settings.toml.example`](../config/settings.toml.example)), and `[config] seed` (unset), which
       would pin sampling and stabilise `new=N/M` at the cost of whatever coverage pinning removes.
 - [x] **Make pending-commit review the default (the `commit` scope).** Changed the default so
       `preflight review` covers the pending commit - HEAD to the working tree, untracked files included -
@@ -176,14 +188,14 @@ items bear directly on the convergence problem, and one contradicts a choice thi
   analysis tasks with large input", while most open-source models "face challenges with these complex
   tasks", and local models are "suitable for experimentation and learning purposes (mainly for the `ask`
   command), but not suitable for production-level code analysis". For production it recommends commercial
-  models. Our default is a `flash` model, and the failure we measured - an unstable finding set on a
-  large diff - is a structured-output failure at input size. This is the single most relevant line
-  upstream ships.
+  models. The configuration this repository was developed against is a `flash` model, and the failure
+  measured - an unstable finding set on a large diff - is a structured-output failure at input size. This
+  is the single most relevant line upstream ships.
 - **Noise.** The FAQ recommends the **default configuration** for reducing noise, and lists score
   thresholds and `extra_instructions` as the levers to *add* when feedback is too noisy. This bundle
   raised the finding cap well above default and added our own `extra_instructions` - noise levers turned
   up, relevant context for the cascade. Its value is in
-  [`config/preflight.toml.example`](../config/preflight.toml.example), not repeated here.
+  [`config/settings.toml.example`](../config/settings.toml.example), not repeated here.
 - **`reasoning_effort`.** Forwarded only to a model litellm's metadata calls reasoning-capable; add the ID
   to `config.additional_reasoning_effort_models` otherwise, and adding it "surfaces that provider-side
   error instead of the previous silent drop".
@@ -221,8 +233,10 @@ Needs a decision or an external dependency.
 
 - `model_routing` - send small diffs to a cheaper/faster model.
 - `preflight-gate --json` for machine consumers.
-- A provider-preset layer in `install.sh` (e.g. `PREFLIGHT_PROVIDER=openai|openrouter|clinepass`) so
-  the common cases need one variable instead of five.
-- Watch ClinePass usage quota (5-hour / weekly / monthly) - reviews are token-heavy
+- A provider-preset layer in `install.sh` (e.g. `PREFLIGHT_PROVIDER=<name>`) so a set of providers can
+  be seeded from one variable instead of hand-editing `providers.toml`. Note the constraint: anything
+  preset-specific would be an endpoint or a model in this repo, which the provider-agnostic rule in
+  [`AGENTS.md`](../AGENTS.md) forbids - so this would have to load a preset the *user* supplies.
+- Watch the endpoint's usage quota, where it has one - reviews are token-heavy
   (see [`measurements.md`](measurements.md)).
 - Rotate the endpoint key periodically (it lives in a `chmod 600` file, never in the environment).

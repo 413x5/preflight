@@ -201,7 +201,7 @@ fails.
 | Stage | What it checks |
 |---|---|
 | `tools` | `git`, `python3`, `awk`, `sed`, `mktemp` are present, and `python3` can `import tomllib` (3.11+) |
-| `syntax` | Every script parses - `bash -n` for the helpers and installer, `sh -n` for the hooks and tests |
+| `syntax` | Every script parses - `bash -n` for the helpers and installer, `sh -n` for the hooks and tests - and no editor or backup leftover sits beside them |
 | `install` | `install.sh` deploys into a throwaway prefix, is idempotent, and never clobbers `settings.toml` or `providers.toml` |
 | `config` | The generated config parses, the completeness keys are set and the keys left off are absent, and the gate template is inert |
 | `models` | The `settings.toml`/`providers.toml` templates are inert, the renderer derives the endpoint, the key and the transport pin together, and it refuses a chain spanning two providers |

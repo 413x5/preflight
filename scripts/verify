@@ -145,6 +145,12 @@ stage_syntax() {
   do
     sh -n "$f" || { echo "sh syntax: FAIL $f" >&2; rc=1; }
   done
+  # A backup left by an in-place edit is a second copy of a shipped script that nothing parses, nothing
+  # runs, and grep still matches - so it drifts from the file it copies while looking like part of it.
+  # Checked in the directories that hold shipped code, where a stray file is never intended.
+  local stray
+  stray="$(find src scripts config -type f \( -name '*.bak' -o -name '*.orig' -o -name '*~' \) 2>/dev/null)"
+  [ -z "$stray" ] || { echo "stray editor/backup files in the tree:" >&2; printf '  %s\n' $stray >&2; rc=1; }
   [ "$rc" = 0 ] && echo "all scripts parse"
   return "$rc"
 }

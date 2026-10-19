@@ -1,5 +1,8 @@
 .DS_Store
 *.swp
+# Editor and recovery leftovers. A mutation test that edits a file in place leaves one behind, and a
+# committed duplicate of a shipped script drifts from it while still matching every grep for it.
+*.bak
 # never commit a real model or provider configuration: providers.toml holds an API key, and both are
 # per-machine. The bundle ships only the .example templates. Explicit paths, not a bare `*.toml`, so a
 # future committed .toml under config/ is not silently ignored.

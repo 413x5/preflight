@@ -168,7 +168,7 @@ if [ -e "$bindir/preflight" ]; then
   if [ -f "$bindir/preflight" ] && [ ! -L "$bindir/preflight" ] \
      && head -n1 "$bindir/preflight" 2>/dev/null | grep -q '^#!' \
      && grep -q 'local PR-style review of the pending change' "$bindir/preflight" 2>/dev/null; then
-    say "!! stale helper from the old name found: $bindir/preflight (run uninstall.sh to remove it; the command is now 'preflight-code')"
+    say "!! stale helper from the old name found: $bindir/preflight (remove that one file; the command is now 'preflight-code')"
   else
     say "!! $bindir/preflight belongs to another project, not this bundle; left untouched"
   fi

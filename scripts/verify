@@ -258,24 +258,35 @@ stage_install() {
     ./install.sh >"$tmp/ours.out" 2>&1 || rc=1
   grep -q 'stale helper from the old name' "$tmp/ours.out" \
     || { echo "installer does not report this bundle's own retired preflight helper" >&2; rc=1; }
-  rm -f "$tmp/bin/preflight"
-  [ ! -e "$tmp/bin/preflight" ] \
+  # A fresh prefix, checked WITHOUT clearing it first: the assertion is that installing creates no
+  # `preflight`, and a `rm` beforehand would satisfy it whether or not the installer wrote one. This is the
+  # whole point of the rename, so it is asserted against the directory rather than around a deletion.
+  mkdir -p "$tmp/fresh/bin" "$tmp/fresh/cfg"
+  PREFLIGHT_HOME="$tmp/fresh/cfg" PREFLIGHT_BIN_DIR="$tmp/fresh/bin" PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+    ./install.sh >/dev/null 2>&1 || rc=1
+  [ ! -e "$tmp/fresh/bin/preflight" ] \
     || { echo "installer installed a preflight command; the name is retired" >&2; rc=1; }
+  [ -x "$tmp/fresh/bin/preflight-code" ] \
+    || { echo "installer did not install preflight-code" >&2; rc=1; }
 
   # uninstall.sh performs the same one dangerous deletion, and it has no other coverage. Both directions
   # again: it must remove this bundle's own retired helper and must leave another project's binary alone.
   # A SEPARATE prefix, because the runs above configured this one and uninstall.sh removes the config dir.
-  mkdir -p "$tmp/u/bin" "$tmp/u/cfg"
+  # HOME is redirected too: uninstall.sh's pre-rename cleanup removes `$HOME/.config/pr-agent`, and running
+  # the gate must never delete a config dir - or the key in it - on the machine running the tests.
+  mkdir -p "$tmp/u/home" "$tmp/u/bin" "$tmp/u/cfg"
   printf '#!/usr/bin/env bash\n# preflight — local PR-style review of the pending change (or, optionally, the whole branch).\n' \
     > "$tmp/u/bin/preflight"
   chmod +x "$tmp/u/bin/preflight"
-  PREFLIGHT_HOME="$tmp/u/cfg" PREFLIGHT_BIN_DIR="$tmp/u/bin" ./uninstall.sh >"$tmp/u/ours.out" 2>&1 || rc=1
+  HOME="$tmp/u/home" PREFLIGHT_HOME="$tmp/u/cfg" PREFLIGHT_BIN_DIR="$tmp/u/bin" \
+    ./uninstall.sh >"$tmp/u/ours.out" 2>&1 || rc=1
   [ ! -e "$tmp/u/bin/preflight" ] \
     || { echo "uninstaller left this bundle's own retired preflight helper behind" >&2; rc=1; }
   mkdir -p "$tmp/u/bin" "$tmp/u/cfg"
   printf '\177ELF not-a-script\n' > "$tmp/u/bin/preflight"
   chmod +x "$tmp/u/bin/preflight"
-  PREFLIGHT_HOME="$tmp/u/cfg" PREFLIGHT_BIN_DIR="$tmp/u/bin" ./uninstall.sh >"$tmp/u/foreign.out" 2>&1 || rc=1
+  HOME="$tmp/u/home" PREFLIGHT_HOME="$tmp/u/cfg" PREFLIGHT_BIN_DIR="$tmp/u/bin" \
+    ./uninstall.sh >"$tmp/u/foreign.out" 2>&1 || rc=1
   [ -f "$tmp/u/bin/preflight" ] \
     || { echo "uninstaller deleted a preflight binary that was not ours" >&2; rc=1; }
   grep -q 'belongs to another project' "$tmp/u/foreign.out" \

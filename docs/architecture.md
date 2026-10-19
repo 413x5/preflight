@@ -393,7 +393,7 @@ else, including a finding with no file, is **blocking**. The path is normalised 
 those as code).
 
 The gate decides on `security_concerns` and blocking findings, and on nothing else. `risk_level` and
-`estimated_effort_to_review` are **reported** - `preflight-gate` prints them and `preflight review` repeats
+`estimated_effort_to_review` are **reported** - `preflight-gate` prints them and `preflight-code review` repeats
 them - but no verdict depends on them; `merge_recommendation` is reported on `preflight-code`'s summary line
 only, because the gate has no field to print it from. `risk_level` measured unstable across
 identical content (the figures are in [`measurements.md`](measurements.md)), and a gate that fails a commit

@@ -2166,7 +2166,7 @@ case_gate_doc_advisory() {
   local tier_home="$work/gate-tier-home"
   mkdir -p "$tier_home"
   doc='{"review":{"key_issues_to_review":[{"relevant_file":"README.md\n","issue_header":"typo","issue_content":"c"}],"security_concerns":"No"}}'
-  code='{"review":{"key_issues_to_review":[{"relevant_file":"src/preflight\n","issue_header":"bug","issue_content":"c"}],"security_concerns":"No"}}'
+  code='{"review":{"key_issues_to_review":[{"relevant_file":"src/preflight-code\n","issue_header":"bug","issue_content":"c"}],"security_concerns":"No"}}'
 
   gate_run() { ( cd "$d" && PREFLIGHT_HOME="$tier_home" PREFLIGHT_DIR=.preflight bash "$repo_root/src/preflight-gate" ); }
 

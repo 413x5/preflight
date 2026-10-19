@@ -311,7 +311,7 @@ mkdir -p .githooks && install -m 0755 "${PREFLIGHT_HOME:-$HOME/.config/preflight
 git add .githooks
 git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit   # git IGNORES a non-executable hook
 git config core.hooksPath .githooks
-preflight review && preflight-gate          # expect a pass, then the commit is accepted
+preflight-code review && preflight-gate     # expect a pass, then the commit is accepted
 ```
 
 Without an install that last line cannot run - there is no `preflight-code` to review with - so copy the hooks

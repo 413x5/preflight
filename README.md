@@ -321,7 +321,7 @@ Use the **relative** hooks path - an absolute one breaks git worktrees. See
 
 ## What install.sh writes
 
-- `~/.local/bin/{preflight,preflight-pr,preflight-gate}` — the helpers.
+- `~/.local/bin/{preflight-code,preflight-pr,preflight-gate}` — the helpers.
 - `~/.config/preflight/VERSION` — the installed bundle version (`preflight-code --version` reads it).
 - `~/.config/preflight/{settings-render.sh,AGENTS-review-snippet.md,preflight-hook}` — helpers and the shipped snippet.
 - `~/.config/preflight/settings.toml.example` also carries the gate's policy as a commented `[gate]` table: one file for everything preflight can be told, and the renderer strips the table before pr-agent sees it.

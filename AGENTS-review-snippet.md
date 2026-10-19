@@ -65,7 +65,7 @@ for it.
   and blocking key issues.
 
 Loop until `preflight-gate` exits 0: fix every entry in `key_issues_to_review[]` and anything under
-`security_concerns` in one pass, then re-run `preflight review` and `preflight-gate`.
+`security_concerns` in one pass, then re-run `preflight-code review` and `preflight-gate`.
 
 What matters on the summary line is the loop's exit conditions:
 

@@ -525,9 +525,10 @@ until it does not.
   naming one is choosing which machine's credential a review spends. `docs/architecture.md` has the rest.
 - **`AGENTS.md` and `AGENTS-review-snippet.md` have different audiences:** the first is for agents
   changing this repo, the second is the block pasted into a consuming repo.
-- **The "answer the class, not the instance" rule is stated in both `AGENTS.md` and `PLAYBOOK.md` §3 by
-  design.** An agent must hold that habit *while editing*, so it cannot live one link away; `PLAYBOOK.md`
-  is the publication form for repositories that have no `AGENTS.md`.
+- **The "answer the class, not the instance" rule is stated in `AGENTS.md`, `PLAYBOOK.md` §3 and
+  `AGENTS-review-snippet.md` by design.** An agent must hold that habit *while editing*, so it cannot live
+  one link away; `PLAYBOOK.md` is the publication form for repositories that have no `AGENTS.md`, and the
+  snippet carries it to the consuming agent's round-economy habits.
 - **One fact lives in one file, chosen by audience** - the table under "Each fact lives in exactly one
   file" names which file each kind of fact belongs to.
 - **`docs/roadmap.md` holds to-dos only**, and finished items are deleted from it into `CHANGELOG.md`. A `[x]`

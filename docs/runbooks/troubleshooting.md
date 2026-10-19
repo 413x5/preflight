@@ -155,22 +155,20 @@ later edit invalidates it. It is not a bug and there is no time-based expiry to 
 
 ## `git commit` says "the last review did not pass"
 
-The review ran but the gate verdict was not a pass - `preflight-gate` decides this (key issues,
-security concerns, an effort over the limit, or `merge_recommendation=changes_required` when the model was
-asked for that field). Read `.preflight/review.md`, fix the findings, and re-review. The artifacts are left
+The review ran but the gate verdict was not a pass - `preflight-gate` decides this on key issues and
+security concerns, and nothing else. Read `.preflight/review.md`, fix the findings, and re-review. The artifacts are left
 in place on a block precisely so you can read them.
 
 **A finding on documentation does not reach this point.** `preflight-gate` derives a tier from each
 finding's file type and treats documentation (a `.md`/`.markdown`/`.rst`/`.adoc` file) as
 **advisory**: it is printed and tagged `[advisory]`, and it does not fail the gate on its own, so a typo
-in a README no longer blocks a commit by itself. Code under `docs/` and a `requirements.txt` still block,
-and `merge_recommendation = changes_required` fails the gate regardless of tier when the field was
-reported. A finding on code, or one with no file attached, blocks as before. Set `PREFLIGHT_GATE_DOC_BLOCKS=1` (or `doc_blocks = true` in the gate's config file, see
-`preflight-gate --help`) to make documentation findings block too.
+in a README no longer blocks a commit by itself. Code under `docs/` and a `requirements.txt` still block.
+A finding on code, or one with no file attached, blocks as before. Set `PREFLIGHT_GATE_DOC_BLOCKS=1` (or
+`doc_blocks = true` in `[gate]`, see `preflight-gate --help`) to make documentation findings block too.
 
-The gate's policy - which file types count as documentation, whether they block, whether key issues are
-ignored, and the effort ceiling - lives in `$PREFLIGHT_HOME/gate.toml` and an optional repo-local
-`.preflight-gate.toml` that overrides it; the `PREFLIGHT_GATE_*` variables still override both.
+The gate's policy - which file types count as documentation, whether they block, and whether key issues
+are ignored - lives in a `[gate]` table in `$PREFLIGHT_HOME/settings.toml`; a repository overrides any key
+in its own `.preflight.toml`, and the `PREFLIGHT_GATE_*` variables still override both.
 
 If you disagree with a finding, opt out deliberately rather than defeating the hook. The recorded verdict
 comes from the gate and is written **only** by `preflight review`, so to turn it into a pass you must
@@ -186,9 +184,7 @@ sidecar on `fail` and the commit still blocked. That re-review costs another ful
 commit, `git commit --no-verify` is cheaper and leaves no trace.
 
 Note that `PREFLIGHT_GATE_ALLOW_ISSUES` relaxes **key issues only**. Security concerns still fail the gate,
-and so does `merge_recommendation=changes_required` when the model reported it (see the header of
-`preflight-gate`), so a review that is blocked for one of those will stay blocked no matter how it is
-re-run. Genuinely disagreeing with *those* is a `--no-verify` decision, not an opt-out.
+so a review blocked for that stays blocked no matter how it is re-run. Genuinely disagreeing with *those* is a `--no-verify` decision, not an opt-out.
 
 ## `git commit` says "commit blocked: the preflight helper is missing"
 

@@ -333,10 +333,9 @@ A review is a full model call, and what a run costs moves - it is measured in `d
 than repeated here. Do not run one in a loop.
 
 Note when testing the *gate*: `PREFLIGHT_GATE_ALLOW_ISSUES=1` relaxes key issues only.
-`security_concerns` still fails, regardless of the opt-out. The gate's
-`merge_recommendation = changes_required` rule is intact but inert in a default install: the bundle does not
-set `require_merge_recommendation`, so the field is not in the schema the model is sent and `merge=` reports
-`n/a`. `docs/architecture.md` covers why.
+`security_concerns` still fails, regardless of the opt-out. The gate decides on nothing else: effort and
+`risk_level` are printed by it and `merge_recommendation` by `preflight`, never enforced - `docs/architecture.md`
+covers why.
 
 ## Before you start: check docs/roadmap.md for handoff state
 
@@ -518,9 +517,12 @@ until it does not.
 - **The bundle is shell, git hooks and docs.** There is no build step and no package manager, by design.
 - **`src/preflight-gate`'s documentation tier is advisory by default**, covering `.md`, `.markdown`,
   `.rst` and `.adoc`. Which paths that implies, and the reasoning behind it, are in `docs/architecture.md`.
-- **`.preflight-gate.toml` and the gate's opt-outs can relax enforcement.** The hook is a local
+- **`[gate]` in `.preflight.toml` and the gate's opt-outs can relax enforcement.** The hook is a local
   pre-commit check on the committer's own work and `git commit --no-verify` bypasses it regardless; the
   trust-boundary reasoning is in `docs/architecture.md`.
+- **A repository overrides review settings in `.preflight.toml`, but never the models.** The file may set
+  any review section and `[gate]`; `[profiles.*]`, `[providers.*]` and `[selection]` are refused, because
+  naming one is choosing which machine's credential a review spends. `docs/architecture.md` has the rest.
 - **`AGENTS.md` and `AGENTS-review-snippet.md` have different audiences:** the first is for agents
   changing this repo, the second is the block pasted into a consuming repo.
 - **The "answer the class, not the instance" rule is stated in both `AGENTS.md` and `PLAYBOOK.md` §3 by

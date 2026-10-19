@@ -7,7 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A repository can override the review's settings, and the gate's policy, in one committed
+  `.preflight.toml` at its root.** The machine's `settings.toml` stays the base; the repository's file
+  overrides it by section, then by key, so a repo that raises `num_max_findings` keeps every other
+  `[pr_reviewer]` value rather than replacing the whole table. `[profiles.*]`, `[providers.*]` and
+  `[selection]` are **refused** there: each names a model and, through it, a credential entry, and a
+  committed file choosing one would spend that key on every machine that clones the repository. The same file carries the
+  gate's `[gate]` table, so a repository has one file for everything preflight can tell it.
+
 ### Changed
+
+- **The gate's policy is a `[gate]` table, and the separate `gate.toml` files are gone.** The keys used to
+  live in `$PREFLIGHT_HOME/gate.toml`, with a repo-local `.preflight-gate.toml` beside it; both are now one
+  table in `settings.toml` and the repository's `.preflight.toml`. `install.sh` installs no gate file, and
+  retires the old one: an inert `gate.toml` (every key commented out, which is what the old install wrote)
+  is deleted, while one that sets keys is left in place and reported by name until they are moved into
+  `[gate]` - deleting a policy the operator wrote would be the silent-loss failure this bundle refuses.
+  `preflight-gate` reports a retired file that sets keys, and stays quiet about an inert one. The renderer
+  strips `[gate]` from the config pr-agent receives, because pr-agent reads nothing from it.
+
+- **The gate decides on security concerns and blocking findings only.** `risk_level` and
+  `estimated_effort_to_review` are printed by `preflight-gate` and repeated on `preflight`'s summary line;
+  `merge_recommendation` is on `preflight`'s line only, since the gate no longer reads it. No verdict
+  depends on any of them. The merge rule was conditional on
+  `require_merge_recommendation`, which the bundle leaves off, so a default install reported `merge=n/a`
+  and the rule could never fire; both it and `max_effort` (with `PREFLIGHT_GATE_MAX_EFFORT`) are removed
+  rather than left as knobs that change nothing. `docs/architecture.md` records the reasoning.
+
 
 - **`preflight.toml` and `.secrets.toml` are gone; `settings.toml` + `providers.toml` are the whole
   configuration.** Three files had grown into one another: the shipped `preflight.toml` was both the

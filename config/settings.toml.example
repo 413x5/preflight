@@ -95,3 +95,34 @@ num_max_findings = 10
 # enable_review_coverage_footer = true
 # enable_large_pr_chunking = false  # the bundle reports partial coverage instead of chunking
 # max_number_of_calls = 3  # does nothing unless chunking is on
+
+# ---------------------------------------------------------------------------- [gate]
+# The policy `preflight-gate` applies to the review. It is NOT a pr-agent section: the renderer strips it,
+# so it never reaches the model. Every key has a built-in default and every key below is COMMENTED OUT -
+# this is a reference, not a copy of the defaults, and a live key would freeze today's value into every
+# machine that installed the bundle.
+#
+# A repository overrides any key in its own `.preflight.toml` (the same file carries its review settings),
+# and the PREFLIGHT_GATE_* environment variables override both. `preflight-gate --help` lists the keys; the
+# invalid-value behaviour is in docs/architecture.md.
+#
+# [gate]
+#
+# File types whose findings are ADVISORY (reported and counted, but not fatal). Matched on the extension,
+# so the rule holds wherever the file lives and cannot be defeated by a directory name. `.txt` is
+# deliberately not in the default list - `requirements.txt` is a dependency manifest, and a finding there
+# must keep blocking - and neither is `.mdx`, which is Markdown plus executable JSX.
+#
+# Default: [".md", ".markdown", ".rst", ".adoc"]
+# doc_suffixes = [".md", ".markdown", ".rst", ".adoc"]
+#
+# Count documentation findings as blocking. Equivalent to PREFLIGHT_GATE_DOC_BLOCKS=1. Booleans are
+# `true`/`false`; `1`/`0` are also accepted, but any other number is rejected and reported.
+#
+# Default: false
+# doc_blocks = true
+#
+# Ignore key issues. Security concerns still fail. Equivalent to PREFLIGHT_GATE_ALLOW_ISSUES=1.
+#
+# Default: false
+# allow_issues = true

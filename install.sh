@@ -107,10 +107,40 @@ install -m 0644 "$src/VERSION"        "$cfg/VERSION"
 # templates above: a helper that is missing while settings.toml assigns a model is a refused review, so an
 # upgraded install must carry both together.
 install -m 0644 "$scripts/settings-render.sh" "$cfg/settings-render.sh"
-# The gate's policy template. Installed only if absent, so an edited live file is never overwritten -
-# the gate has built-in defaults, so an untouched file and no file behave identically.
-if [ -f "$config/gate.toml.example" ] && [ ! -f "$cfg/gate.toml" ]; then
-  install -m 0644 "$config/gate.toml.example" "$cfg/gate.toml"
+# The gate's policy is a [gate] table in the settings.toml reference above, not a file of its own: one file
+# for everything preflight can be told, and the renderer strips the table before pr-agent sees it. The old
+# install created an INERT `gate.toml` (every key commented out), so that one is removed here. A file that
+# SETS keys is not: deleting it would throw away a policy the operator wrote, so it is left for the gate to
+# report by name until the keys are moved into [gate].
+if [ -f "$cfg/gate.toml" ]; then
+  # THREE outcomes, not two: 0 = parsed and empty (retire it), 1 = parsed and sets keys (leave it, report
+  # it), 2 = could not parse it (no tomllib, or malformed) - which must not read as "it holds a policy",
+  # or a machine whose interpreter is older than 3.11 is told to migrate keys the file does not have.
+  _retire_rc=0
+  python3 - "$cfg/gate.toml" <<'PY' >/dev/null 2>&1 || _retire_rc=$?
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    sys.exit(2)
+try:
+    with open(sys.argv[1], "rb") as fh:
+        empty = tomllib.load(fh) == {}
+except Exception:
+    sys.exit(2)
+sys.exit(0 if empty else 1)
+PY
+  case "$_retire_rc" in
+    0)
+      rm -f "$cfg/gate.toml"
+      say "==> removed the retired $cfg/gate.toml (it set nothing; gate keys now live under [gate] in settings.toml)" ;;
+    1)
+      say "!! $cfg/gate.toml is no longer read - move its keys into a [gate] table in settings.toml, then delete it" ;;
+    *)
+      # The file is not read either way; what matters is not claiming to know what is in it. Left in
+      # place, like the keyed case, because deleting a file that could hold a policy loses it.
+      say "!! $cfg/gate.toml is no longer read, and this python3 cannot parse it to tell whether it sets keys; move any keys to [gate] in settings.toml, then delete it" ;;
+  esac
 fi
 # preflight-hook is what a repo's committed .githooks/pre-commit calls (via $PREFLIGHT_HOOK or
 # ~/.config/preflight/preflight-hook), so it lives with the config rather than on PATH.

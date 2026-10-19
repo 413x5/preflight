@@ -22,17 +22,6 @@ Wanted; needs design, or an experiment to settle. Two groups:
 - **Experiments**, each phrased as a question with the result that would settle it. An experiment is
   cheap, reversible and must state what would falsify it; a design item needs a decision first.
 
-- [ ] **Should a repository be able to override the named model configuration?** Deferred deliberately when
-      `settings.toml` and `providers.toml` shipped, and it is the one part of that feature's shape that is
-      still open. Two facts decide it, and the first was measured while building the feature: pr-agent's
-      `apply_repo_settings()` applies `--extra_config_url` FIRST and the repo-local `.pr_agent.toml` after,
-      so a repo that sets `[config] model` **wins** over the rendered file; and in `--stdin`/plain-diff
-      mode, which is how `preflight` invokes pr-agent, `get_repo_settings()` returns nothing, so a
-      repo-local file is currently inert and there is nothing to override. So the question is not whether
-      the override works - it is whether preflight should honour a repo-local file at all, given that the
-      harness is a local pre-commit check on the committer's own work and `.preflight-gate.toml` is already
-      repo-controlled in the same way. A repository that could name its own `provider` would also be naming
-      a credential entry, which is the part needing a decision rather than an implementation.
 
 ### Experiments
 
@@ -160,7 +149,8 @@ Wanted; needs design, or an experiment to settle. Two groups:
       iterations). The single-review completeness work (the finding cap, the coverage line) is
       done; this is the remaining half - not yet a second report per round.
 - [ ] **`risk_level` is reported but never enforced - decide what it is for.** The gate reads it only to
-      print it; the verdict comes from effort/security/`merge_recommendation`/issues. Measured over four
+      print it; the verdict comes from security/blocking issues. (Effort and `merge_recommendation` were
+      removed from the gate entirely - see `CHANGELOG.md`.) Measured over four
       consecutive reviews of this repo it was `low, low, medium, low` on similar finding counts, while
       `merge_recommendation` never moved off `merge_with_caution` - so it is unstable and does not track
       findings (`risk=low` with two key issues was observed). **Two further reviews (the pin/README

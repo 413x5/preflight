@@ -868,7 +868,10 @@ upstream = tomllib.load(open(defaults_path, "rb"))["pr_reviewer"]
 # comment banner naming the section (an `# ---- [pr_reviewer]` divider) satisfies a naive split, which
 # leaves an empty body and reports every key as unlisted.
 body = re.split(r"(?m)^\[pr_reviewer\]\s*$", open(ours_path, encoding="utf-8", errors="replace").read(), maxsplit=1)[1]
-body = re.split(r"(?m)^\[", body, maxsplit=1)[0]
+# The next section, live OR commented: a reference file spells a whole section as a commented block (the
+# [gate] one is inert by design), and stopping only at a live header would read its keys as [pr_reviewer]
+# comments - reporting every gate key as one pr-agent does not declare.
+body = re.split(r"(?m)^#?\s*\[", body, maxsplit=1)[0]
 live = tomllib.load(open(ours_path, "rb")).get("pr_reviewer", {})
 commented = {}
 for line in body.splitlines():
@@ -2153,9 +2156,9 @@ case_gate_doc_advisory() {
   # verdict, so a regression that classified everything the same way cannot pass.
   local d doc code problems="" out rc boundary
   d="$work/gate-tier"; mkdir -p "$d/.preflight"
-  # A scratch PREFLIGHT_HOME, because the gate reads $PREFLIGHT_HOME/gate.toml when it exists and
-  # install.sh now creates that file. Without this the case would depend on the developer's machine
-  # state - a home policy that narrowed or widened doc_suffixes would flip the expected exit codes.
+  # A scratch PREFLIGHT_HOME, because the gate reads [gate] from $PREFLIGHT_HOME/settings.toml when that
+  # file exists, and a developer machine has one. Without this the case would depend on the developer's
+  # machine state - a home policy that narrowed or widened doc_suffixes would flip the expected exit codes.
   #
   # Scoped to the `bash` invocations below rather than exported: a case function runs in the top-level
   # shell, so an exported PREFLIGHT_HOME would leak into every later case - including the live one,
@@ -2217,52 +2220,80 @@ case_gate_doc_advisory() {
 }
 
 case_gate_config() {
-  # The gate's tunables come from an optional TOML file - home, then a repo-local override - with the
-  # environment on top, so a repo whose docs differ can say so without a one-off variable, and a one-off
-  # can still win without editing a file. What this case pins is the PRECEDENCE and the degradation:
-  # the suffix list is what actually decides a verdict, so a config that silently failed to load would
-  # leave a repo believing its policy was in force.
+  # The gate's tunables come from a [gate] table - in the machine's settings.toml, then in a repo-local
+  # `.preflight.toml` override - with the environment on top, so a repo whose docs differ can say so
+  # without a one-off variable, and a one-off can still win without editing a file. What this case pins is
+  # the PRECEDENCE and the degradation: the suffix list is what actually decides a verdict, so a config
+  # that silently failed to load would leave a repo believing its policy was in force.
   #
   # It also pins the two failure modes that matter: a malformed file must WARN and fall back rather than
   # crash (a crash is a non-zero exit, which the commit hook reads as "the review did not pass"), and an
   # unknown/absent key must keep the built-in default rather than disabling a check.
   local d home problems="" out rc key home_line repo_line review want
-  local FINDING_FOO FINDING_PY FINDING_EFFORT_3 FINDING_EFFORT_5
+  local FINDING_FOO FINDING_PY FINDING_EFFORT_5
   d="$work/gate-config"; home="$work/gate-config-home"
   mkdir -p "$d/.preflight" "$home"
+  # A real repository: the gate resolves the repo-local file at the repository ROOT, so a bare directory
+  # would only exercise the cwd fallback (and the subdirectory assertion below would pass for the wrong
+  # reason - or fail, as it did when this fixture was added before the init).
+  ( cd "$d" && git init -q . ) >/dev/null 2>&1
 
   # One finding per tier/field, so a table row can name the shape it needs.
   FINDING_FOO='{"review":{"key_issues_to_review":[{"relevant_file":"notes.foo","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}'
   FINDING_PY='{"review":{"key_issues_to_review":[{"relevant_file":"a.py","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}'
-  FINDING_EFFORT_3='{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":3}}'
   FINDING_EFFORT_5='{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":5}}'
 
   gate_cfg_run() { ( cd "$d" && PREFLIGHT_HOME="$home" PREFLIGHT_DIR=.preflight "$@" bash "$repo_root/src/preflight-gate" ); }
 
-  # Home config narrows documentation to `.foo`, so a `.md` finding blocks and a `.foo` one does not.
-  printf 'doc_suffixes = [".foo"]\nmax_effort = 4\n' > "$home/gate.toml"
+  # Home config narrows documentation to `.foo`, so a `.md` finding blocks and a `.foo` one does not. The
+  # [gate] table sits BESIDE the review's own sections, in the same file: a [pr_reviewer] key there is not
+  # an unknown gate key, and the gate must not warn about it.
+  printf '[pr_reviewer]\nnum_max_findings = 3\n\n[gate]\ndoc_suffixes = [".foo"]\n' > "$home/settings.toml"
   printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"README.md","issue_header":"h","issue_content":"c"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3}}' > "$d/.preflight/review.json"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   [ "$rc" = 1 ] || problems="$problems
-        | the home gate.toml did not take effect: a .md finding should have blocked (exit $rc): $out"
+        | the home [gate] did not take effect: a .md finding should have blocked (exit $rc): $out"
+  case "$out" in *"unknown key"*) problems="$problems
+        | the gate reported the review's own settings as unknown keys: $out" ;; esac
 
   printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"notes.foo","issue_header":"h","issue_content":"c"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3}}' > "$d/.preflight/review.json"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   [ "$rc" = 0 ] || problems="$problems
         | a suffix from doc_suffixes was not treated as advisory (exit $rc): $out"
 
-  # max_effort from the file, with no env var set.
-  printf '%s' '{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":5}}' > "$d/.preflight/review.json"
-  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
-  [ "$rc" = 1 ] || problems="$problems
-        | max_effort in gate.toml did not fail an over-limit effort (exit $rc): $out"
-
-  # The repo-local file overrides the home file.
-  printf 'doc_suffixes = [".md"]\n' > "$d/.preflight-gate.toml"
-  printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"README.md","issue_header":"h","issue_content":"c"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3}}' > "$d/.preflight/review.json"
+  # Effort is REPORTED, never enforced: a high estimate is the model's own number, not a property of the
+  # change, so it must not decide the verdict. A [gate] key no longer read is still reported rather than
+  # silently ignored, because a policy that looks in force while nothing applies it is the failure this
+  # whole case guards.
+  printf '[gate]\ndoc_suffixes = [".foo"]\n' > "$home/settings.toml"
+  printf '%s' '{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":5,"merge_recommendation":"changes_required"}}' > "$d/.preflight/review.json"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   [ "$rc" = 0 ] || problems="$problems
-        | the repo-local .preflight-gate.toml did not override the home doc_suffixes (exit $rc): $out"
+        | effort or merge_recommendation still decided the verdict (exit $rc): $out"
+  case "$out" in *"merge="*) problems="$problems
+        | the merged recommendation is still on the gate's summary line: $out" ;; esac
+
+  # A key the gate no longer reads is REPORTED rather than ignored: a retired max_effort left in [gate]
+  # is a policy that looks in force while nothing applies it, which is the failure this case guards.
+  printf '[gate]\nmax_effort = 4\n' > "$home/settings.toml"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  case "$out" in *"unknown key 'max_effort'"*) ;; *) problems="$problems
+        | a retired max_effort in [gate] was not reported as an unknown key: $out" ;; esac
+
+  # The repo-local .preflight.toml overrides the home file. The home policy is RESTATED first, and the
+  # assertion is driven in both directions: with `.foo` alone, `.md` blocks; with the repo file widening
+  # it to `.md`, it does not. Without the restatement the home file is whatever the blocks above left, and
+  # `.md` is advisory by the built-in default - so the run would pass whether or not the repo file was read.
+  printf '[gate]\ndoc_suffixes = [".foo"]\n' > "$home/settings.toml"
+  printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"README.md","issue_header":"h","issue_content":"c"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3}}' > "$d/.preflight/review.json"
+  rm -f "$d/.preflight.toml"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | with no repo-local file, the home doc_suffixes did not make .md block (exit $rc): $out"
+  printf '[gate]\ndoc_suffixes = [".md"]\n' > "$d/.preflight.toml"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | the repo-local .preflight.toml did not override the home doc_suffixes (exit $rc): $out"
 
   # The environment overrides both files.
   rc=0; out="$(PREFLIGHT_GATE_DOC_BLOCKS=1 gate_cfg_run 2>&1)" || rc=$?
@@ -2271,15 +2302,17 @@ case_gate_config() {
 
   # A bare `1` is a natural mirror of the env var, and TOML parses it as an int. Falling back to the
   # default (False, permissive) would leave the writer believing the gate was strict.
-  printf 'doc_suffixes = [".foo"]\ndoc_blocks = 1\n' > "$d/.preflight-gate.toml"
+  printf '[gate]\ndoc_suffixes = [".foo"]\ndoc_blocks = 1\n' > "$d/.preflight.toml"
   printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"notes.foo","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}' > "$d/.preflight/review.json"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   [ "$rc" = 1 ] || problems="$problems
         | doc_blocks = 1 (a TOML integer) did not make documentation block (exit $rc): $out"
 
   # Malformed TOML: warn, fall back to the home file, never crash. A crash is a non-zero exit, which
-  # the commit hook reads as "the review did not pass".
-  printf 'not = = toml\n' > "$d/.preflight-gate.toml"
+  # the commit hook reads as "the review did not pass". The home file is restated because the blocks
+  # above replaced it, and this assertion is about the FALLBACK, not about whatever was left behind.
+  printf '[gate]\ndoc_suffixes = [".foo"]\n' > "$home/settings.toml"
+  printf '[gate]\nnot = = toml\n' > "$d/.preflight.toml"
   printf '%s' "$FINDING_FOO" > "$d/.preflight/review.json"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   [ "$rc" = 0 ] || problems="$problems
@@ -2291,32 +2324,24 @@ case_gate_config() {
 
   # Present but unreadable. A directory in the file's place is the portable way to produce that: a
   # permissions test would pass under root, which ignores the mode bits.
-  rm -rf "$d/.preflight-gate.toml"; mkdir -p "$d/.preflight-gate.toml"
+  rm -rf "$d/.preflight.toml"; mkdir -p "$d/.preflight.toml"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   case "$out" in *"warning"*) ;; *) problems="$problems
         | an unreadable config was ignored silently: $out" ;; esac
   [ "$rc" = 0 ] || problems="$problems
         | an unreadable config should fall back to the home policy (exit $rc): $out"
-  rmdir "$d/.preflight-gate.toml" 2>/dev/null || true
+  rmdir "$d/.preflight.toml" 2>/dev/null || true
 
-  # A non-numeric env override is a typo, not a request to drop the ceiling the file set. The review is
-  # written explicitly rather than reused: with a stale fixture the gate can exit non-zero for an
-  # unrelated reason, and the assertion could not tell "kept the ceiling" from "dropped it".
-  printf 'max_effort = 4\n' > "$home/gate.toml"
+  # The retired PREFLIGHT_GATE_MAX_EFFORT is inert, in both directions: it must not restore a ceiling the
+  # gate deliberately dropped, and an unparseable value must not fail the run either.
+  printf '[gate]\ndoc_suffixes = [".foo"]\n' > "$home/settings.toml"
   printf '%s' "$FINDING_EFFORT_5" > "$d/.preflight/review.json"
-  rc=0; out="$(PREFLIGHT_GATE_MAX_EFFORT=abc gate_cfg_run 2>&1)" || rc=$?
-  [ "$rc" = 1 ] || problems="$problems
-        | a non-numeric PREFLIGHT_GATE_MAX_EFFORT dropped the ceiling from the config (exit $rc): $out"
-  case "$out" in *"warning"*) ;; *) problems="$problems
-        | a non-numeric PREFLIGHT_GATE_MAX_EFFORT was not reported: $out" ;; esac
-
-  # The complementary direction, which the assertion above cannot see: a VALID env override REPLACES the
-  # ceiling, so a review the file's ceiling would pass now fails. The env value must differ from the
-  # file's for this to distinguish "applied" from "ignored".
-  printf '%s' "$FINDING_EFFORT_3" > "$d/.preflight/review.json"
   rc=0; out="$(PREFLIGHT_GATE_MAX_EFFORT=2 gate_cfg_run 2>&1)" || rc=$?
-  [ "$rc" = 1 ] || problems="$problems
-        | a valid PREFLIGHT_GATE_MAX_EFFORT did not replace the file's ceiling (exit $rc): $out"
+  [ "$rc" = 0 ] || problems="$problems
+        | the retired PREFLIGHT_GATE_MAX_EFFORT still failed an over-limit effort (exit $rc): $out"
+  rc=0; out="$(PREFLIGHT_GATE_MAX_EFFORT=abc gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || problems="$problems
+        | an unparseable PREFLIGHT_GATE_MAX_EFFORT failed the run (exit $rc): $out"
 
 
   # THE CLASS, as a table: for every key, an invalid value must be REPORTED and must leave the value
@@ -2329,8 +2354,10 @@ case_gate_config() {
   # Columns: key | home policy | repo-local policy | review | expected exit
   while IFS='|' read -r key home_line repo_line review want; do
     [ -n "$key" ] || continue
-    printf '%b\n' "$home_line" > "$home/gate.toml"
-    printf '%b\n' "$repo_line" > "$d/.preflight-gate.toml"
+    # A leading `+` continues the line on the PREVIOUS one, as `\n` does in a format string: the table
+    # rows below stay one physical line each, and a multi-key policy is still expressible.
+    printf '[gate]\n%b\n' "$(printf '%s' "$home_line" | tr '+' '\n')" > "$home/settings.toml"
+    printf '[gate]\n%b\n' "$(printf '%s' "$repo_line" | tr '+' '\n')" > "$d/.preflight.toml"
     printf '%s' "$review" > "$d/.preflight/review.json"
     rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
     case "$out" in
@@ -2349,23 +2376,18 @@ doc_suffixes|doc_suffixes = [".foo"]|doc_suffixes = [""]|$FINDING_FOO|0
 doc_suffixes|doc_suffixes = [".foo"]|doc_suffixes = [".md", 1]|$FINDING_PY|1
 doc_suffixes|doc_suffixes = [".foo"]|doc_suffixes = ["../x"]|$FINDING_PY|1
 doc_suffixes|doc_suffixes = [".foo"]|doc_suffixes = ["."]|$FINDING_PY|1
-doc_blocks|doc_suffixes = [".foo"]\ndoc_blocks = true|doc_blocks = "ture"|$FINDING_FOO|1
-allow_issues|doc_suffixes = [".foo"]\nallow_issues = true|allow_issues = "maybe"|$FINDING_PY|0
-allow_issues|doc_suffixes = [".foo"]\nallow_issues = true|allow_issues = 2|$FINDING_PY|0
-allow_issues|doc_suffixes = [".foo"]\nallow_issues = false|allow_issues = 2|$FINDING_PY|1
-allow_issues|doc_suffixes = [".foo"]\nallow_issues = false|allow_issues = -1|$FINDING_PY|1
-max_effort|max_effort = 4|max_effort = true|$FINDING_EFFORT_3|0
-max_effort|max_effort = 4|max_effort = true|$FINDING_EFFORT_5|1
-max_effort|max_effort = 4|max_effort = inf|$FINDING_EFFORT_5|1
-max_effort|max_effort = 4|max_effort = 3.5|$FINDING_EFFORT_5|1
-max_effort|max_effort = 4|max_effort = "3x"|$FINDING_EFFORT_5|1
+doc_blocks|doc_suffixes = [".foo"]+doc_blocks = true|doc_blocks = "ture"|$FINDING_FOO|1
+allow_issues|doc_suffixes = [".foo"]+allow_issues = true|allow_issues = "maybe"|$FINDING_PY|0
+allow_issues|doc_suffixes = [".foo"]+allow_issues = true|allow_issues = 2|$FINDING_PY|0
+allow_issues|doc_suffixes = [".foo"]+allow_issues = false|allow_issues = 2|$FINDING_PY|1
+allow_issues|doc_suffixes = [".foo"]+allow_issues = false|allow_issues = -1|$FINDING_PY|1
 EOF
 
   # A suffix without a leading dot is NORMALISED, not matched raw: `endswith("txt")` would also match
   # `notes.baktxt`, which is broader than the extension the writer meant. `.txt` blocks here precisely
   # because it is not a `.txt`.
-  printf 'doc_suffixes = [".md"]\n' > "$home/gate.toml"
-  printf 'doc_suffixes = ["txt"]\n' > "$d/.preflight-gate.toml"
+  printf '[gate]\ndoc_suffixes = [".md"]\n' > "$home/settings.toml"
+  printf '[gate]\ndoc_suffixes = ["txt"]\n' > "$d/.preflight.toml"
   printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"notes.baktxt","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}' > "$d/.preflight/review.json"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   [ "$rc" = 1 ] || problems="$problems
@@ -2375,8 +2397,8 @@ EOF
 
   # A path fragment is not an extension: `endswith('docs/')` would match anything under a directory of
   # that name, which is not "this file type". Rejected, so the home value stands.
-  printf 'doc_suffixes = [".foo"]\n' > "$home/gate.toml"
-  printf 'doc_suffixes = ["docs/"]\n' > "$d/.preflight-gate.toml"
+  printf '[gate]\ndoc_suffixes = [".foo"]\n' > "$home/settings.toml"
+  printf '[gate]\ndoc_suffixes = ["docs/"]\n' > "$d/.preflight.toml"
   printf '%s' "$FINDING_FOO" > "$d/.preflight/review.json"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   [ "$rc" = 0 ] || problems="$problems
@@ -2387,8 +2409,8 @@ EOF
   # An empty entry invalidates the WHOLE list rather than being dropped with the rest applied: a list
   # the writer got wrong is one value, and partially honouring it is the silent difference this rule
   # exists to avoid. The home value must therefore survive a list that also contains a valid entry.
-  printf 'doc_suffixes = [".foo"]\n' > "$home/gate.toml"
-  printf 'doc_suffixes = [".md", ""]\n' > "$d/.preflight-gate.toml"
+  printf '[gate]\ndoc_suffixes = [".foo"]\n' > "$home/settings.toml"
+  printf '[gate]\ndoc_suffixes = [".md", ""]\n' > "$d/.preflight.toml"
   printf '%s' "$FINDING_FOO" > "$d/.preflight/review.json"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   [ "$rc" = 0 ] || problems="$problems
@@ -2398,8 +2420,8 @@ EOF
 
   # Waiving key issues must not leave the finding labelled as if it still blocked: the label and the
   # exit code have to agree, which is the same rule the doc_blocks override follows.
-  rm -f "$home/gate.toml"
-  printf 'doc_suffixes = [".md"]\nallow_issues = true\n' > "$d/.preflight-gate.toml"
+  rm -f "$home/settings.toml"
+  printf '[gate]\ndoc_suffixes = [".md"]\nallow_issues = true\n' > "$d/.preflight.toml"
   printf '%s' "$FINDING_PY" > "$d/.preflight/review.json"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   [ "$rc" = 0 ] || problems="$problems
@@ -2411,13 +2433,73 @@ EOF
 
   # An unknown key is reported too: a typo'd key name is how a policy looks configured while doing
   # nothing, and it has no validator to inherit the rule from.
-  printf 'doc_block = true\n' > "$d/.preflight-gate.toml"
+  printf '[gate]\ndoc_block = true\n' > "$d/.preflight.toml"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   case "$out" in *"unknown key"*) ;; *) problems="$problems
         | an unknown config key was not reported: $out" ;; esac
 
   # With no config files at all, the built-in defaults make a .md advisory and a code finding block.
-  rm -f "$home/gate.toml" "$d/.preflight-gate.toml"
+  rm -f "$home/settings.toml" "$d/.preflight.toml"
+
+  # The files the policy lived in before it moved into [gate] are NOT read, and a keyed one is reported by
+  # name. An inert one is silent: that is exactly what the old install wrote, so nothing was lost.
+  #
+  # The retired value DIFFERS from the one in [gate], and that is what makes the assertion discriminating:
+  # when both files said `allow_issues = true`, a regression that read the retired file merged the same
+  # value the [gate] table already had, so the verdict was unchanged and the case stayed green.
+  printf 'allow_issues = true\n' > "$home/gate.toml"
+  printf '[gate]\ndoc_suffixes = [".md"]\n' > "$home/settings.toml"
+  printf '%s' "$FINDING_PY" > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | a retired gate.toml was applied over [gate] (exit $rc, want 1: its allow_issues=true only wins if the file is read): $out"
+  case "$out" in *"no longer read"*) ;; *) problems="$problems
+        | a retired gate.toml that sets keys was not reported: $out" ;; esac
+  printf '# every key commented out, as the old install wrote it\n' > "$home/gate.toml"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  case "$out" in *"no longer read"*) problems="$problems
+        | an inert retired gate.toml was reported, though it lost no policy: $out" ;; esac
+  rm -f "$home/gate.toml"
+
+  # The REPO-LOCAL retired file is reported too, and from the same repository-root resolution as
+  # `.preflight.toml` (both paths come from `_retired_files()`). The value again differs from [gate], so
+  # the verdict would move if it were read.
+  rm -f "$home/gate.toml"
+  printf '[gate]\ndoc_suffixes = [".md"]\n' > "$home/settings.toml"
+  printf 'allow_issues = true\n' > "$d/.preflight-gate.toml"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | a retired .preflight-gate.toml was applied over [gate] (exit $rc, want 1): $out"
+  case "$out" in *".preflight-gate.toml"*"no longer read"*) ;; *) problems="$problems
+        | a retired repo-local .preflight-gate.toml that sets keys was not reported by name: $out" ;; esac
+  rm -f "$d/.preflight-gate.toml"
+
+  # A [pr_reviewer] key beside [gate] is the review's, not a typo in the gate's: the gate reads ONLY the
+  # [gate] table, so it must not warn about the rest of the file it shares.
+  printf '[pr_reviewer]\nnum_max_findings = 3\n\n[gate]\ndoc_suffixes = [".foo"]\n' > "$home/settings.toml"
+  printf '%s' "$FINDING_PY" > "$d/.preflight/review.json"
+  rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
+  case "$out" in *"unknown key"*) problems="$problems
+        | the gate reported the review's [pr_reviewer] keys as unknown gate keys: $out" ;; esac
+  [ "$rc" = 1 ] || problems="$problems
+        | a code finding no longer blocked beside a valid [gate] table (exit $rc): $out"
+  rm -f "$home/settings.toml"
+
+  # The repository file is resolved at the repository ROOT, so a gate invocation from a subdirectory
+  # (where a pre-commit hook or an agent may run it) reads the same policy. A cwd-relative lookup would
+  # silently fall back to the machine's defaults there, which is the "policy never loaded" failure this
+  # case exists to catch - and it would be invisible, because the verdict is still a verdict.
+  printf '[gate]\ndoc_blocks = true\n' > "$d/.preflight.toml"
+  printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"README.md","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}' > "$d/.preflight/review.json"
+  mkdir -p "$d/nested"
+  rc=0; out="$( cd "$d/nested" && PREFLIGHT_HOME="$home" PREFLIGHT_DIR="$d/.preflight" \
+                bash "$repo_root/src/preflight-gate" "$d/.preflight/review.json" 2>&1 )" || rc=$?
+  [ "$rc" = 1 ] || problems="$problems
+        | from a subdirectory, the repo-local .preflight.toml was not read (exit $rc): $out"
+  case "$out" in *"[blocking]"*) ;; *) problems="$problems
+        | from a subdirectory, the promoted doc finding was not labelled blocking: $out" ;; esac
+  rm -rf "$d/nested"; rm -f "$d/.preflight.toml"
+
   printf '%s' '{"review":{"key_issues_to_review":[{"relevant_file":"README.md","issue_header":"h","issue_content":"c"}],"security_concerns":"No"}}' > "$d/.preflight/review.json"
   rc=0; out="$(gate_cfg_run 2>&1)" || rc=$?
   [ "$rc" = 0 ] || problems="$problems
@@ -3183,6 +3265,77 @@ TOML
     *) problems="$problems
         | the refusal for a fallback-only assignment did not say a fallback is not a main model: $(cat "$work/models.out")" ;;
   esac
+
+  # A REPOSITORY may override a review setting in its own committed `.preflight.toml`, without touching
+  # the machine's settings.toml. The merge is by SECTION then by KEY, so an override says one thing and
+  # every other [pr_reviewer] value from settings.toml survives - a whole-file replacement would silently
+  # drop the finding cap that keeps the loop convergent. Asserted on the bytes pr-agent receives, because
+  # a merge that only happened in the resolver's head would look identical from here.
+  printf '[selection]\nmain = "work-main"\n\n[pr_reviewer]\nreview_heading = "From settings.toml"\nnum_max_findings = 10\n' > "$cfg/settings.toml"
+  printf '[providers.work]\napi_base = "https://llm.internal.corp/v1"\nkey = "key-two"\n\n[profiles.work-main]\nprovider = "work"\nmodel = "their-model-id"\n' \
+    > "$cfg/providers.toml"
+  chmod 600 "$cfg/providers.toml"
+  printf '[pr_reviewer]\nnum_max_findings = 4\n\n[gate]\nallow_issues = true\n' > "$d/.preflight.toml"
+  _ov="$(bash -c '. "$1"; __preflight_render_settings "$2" "$3" >/dev/null 2>&1; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"' \
+        _ "$repo_root/scripts/settings-render.sh" "$cfg" "$d" 2>/dev/null)" || _ov=''
+  if [ -z "$_ov" ] || [ ! -s "$_ov" ]; then
+    problems="$problems
+        | a repository .preflight.toml made the render refuse: $(bash -c '. "$1"; __preflight_render_settings "$2" "$3"' _ "$repo_root/scripts/settings-render.sh" "$cfg" "$d" 2>&1 | tail -3)"
+  else
+    cat > "$work/models-override.py" <<'PY'
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+bad = []
+if d["pr_reviewer"]["num_max_findings"] != 4:
+    bad.append(f"the repo override did not apply: num_max_findings={d['pr_reviewer']['num_max_findings']!r}")
+if d["pr_reviewer"].get("review_heading") != "From settings.toml":
+    bad.append("the repo override replaced the whole [pr_reviewer] instead of merging into it")
+if "gate" in d:
+    bad.append("the [gate] policy reached pr-agent, which reads nothing from it")
+print("; ".join(bad))
+sys.exit(1 if bad else 0)
+PY
+    out="$(python3 "$work/models-override.py" "$_ov")" || problems="$problems
+        | the repository .preflight.toml was not applied correctly: $out"
+    rm -f "$_ov"
+  fi
+  # And the same file, same content, with NO repository argument: the override must not apply, or the
+  # assertion above would pass even if the renderer read the file unconditionally from the cwd.
+  _nov="$(cd "$d" && bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null 2>&1; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"' \
+        _ "$repo_root/scripts/settings-render.sh" "$cfg" 2>"$work/models-noroot.err")" || _nov=''
+  # A render that REFUSED is a failure, not a reason to skip: `preflight` passes `${root:-}`, so an empty
+  # root is the ordinary outside-a-repository case, and a regression that refused it would break the
+  # helper there while this case stayed green by asserting nothing.
+  if [ -z "$_nov" ] || [ ! -s "$_nov" ]; then
+    problems="$problems
+        | the renderer refused without a repository argument, which is the outside-a-repository case: $(tail -3 "$work/models-noroot.err")"
+  else
+    python3 - "$_nov" <<'PY' || problems="$problems
+        | the override applied without a repository argument, so its scope is the cwd rather than the reviewed tree"
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+sys.exit(1 if d["pr_reviewer"]["num_max_findings"] != 10 or "gate" in d else 0)
+PY
+    rm -f "$_nov"
+  fi
+  rm -f "$d/.preflight.toml"
+
+  # A committed file must not choose which credential a review spends: naming a provider directly, or a
+  # profile through [selection], is the same decision one indirection apart. Both are refused by name.
+  for _bad in '[providers.x]\nkey = "k"' '[profiles.x]\nprovider = "work"\nmodel = "m"' '[selection]\nmain = "work-main"'; do
+    printf '%b\n' "$_bad" > "$d/.preflight.toml"
+    rc=0
+    ( cd "$d" && bash -c '. "$1"; __preflight_render_settings "$2" "$3"' \
+        _ "$repo_root/scripts/settings-render.sh" "$cfg" "$d" ) >"$work/models-bad.out" 2>&1 || rc=$?
+    [ "$rc" != 0 ] || problems="$problems
+        | a .preflight.toml choosing a model or credential was accepted: $_bad"
+    case "$(cat "$work/models-bad.out")" in
+      *"cannot override"*) ;;
+      *) problems="$problems
+        | the refusal for $_bad did not name it as an override a repository cannot make: $(cat "$work/models-bad.out" | tail -2)" ;;
+    esac
+  done
+  rm -f "$d/.preflight.toml"
 
   if [ -z "$problems" ]; then ok "a named model configuration is rendered, scoped and cleaned up" "REQ-HOOK-44"
   else bad "a named model configuration is rendered, scoped and cleaned up" "REQ-HOOK-44" \

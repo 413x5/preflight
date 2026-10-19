@@ -323,18 +323,52 @@ assert prov_entry.get("api_base"), "the provider has no api_base"
 assert "key" in prov_entry, "the provider has no key field"
 print(f"config seeds: {main} -> {prof.get('model')} @ {prov_entry.get('api_base')}")
 PY
-  # The gate's policy template. It must PARSE, and it must be INERT: every key is commented out, so an
-  # untouched install and no file behave identically and the built-in defaults stay the one source of
-  # truth. A live key here would freeze today's default into every machine, and a later release that
-  # changed that default would be silently ignored.
-  python3 - "$tmp/cfg/gate.toml" "$PWD/config/gate.toml.example" <<'PY' || rc=1
+  # The gate's policy now lives in a [gate] table of settings.toml, and must be INERT in the reference:
+  # every key commented out, so an untouched install and no [gate] section behave identically and the
+  # built-in defaults stay the one source of truth. A live key here would freeze today's default into every
+  # machine, and a later release that changed that default would be silently ignored.
+  #
+  # The retired home file must be GONE from a fresh install: nothing reads it, and a file that looks like
+  # policy while nothing applies it is the failure this check exists to prevent.
+  [ ! -e "$tmp/cfg/gate.toml" ] \
+    || { echo "installer still writes the retired gate.toml" >&2; rc=1; }
+  python3 - "$tmp/cfg/settings.toml.example" "$PWD/config/settings.toml.example" <<'PY' || rc=1
 import sys, tomllib
 for label, path in (("installed", sys.argv[1]), ("template", sys.argv[2])):
     with open(path, "rb") as fh:
         d = tomllib.load(fh)
-    assert d == {}, f"{label} gate.toml sets {sorted(d)}; every key must be commented out so the built-in defaults stay authoritative"
-print("gate policy template parses and is inert (no keys set)")
+    assert "gate" not in d, \
+        f"{label} settings.toml.example sets [gate] {sorted(d['gate'])}; every key must stay commented out so the built-in defaults remain authoritative"
+print("gate policy reference is inert (no [gate] keys set)")
 PY
+  # An install over a PREVIOUS install: the old inert gate.toml is retired, but a file that sets keys is
+  # left for the gate to report rather than silently deleted with a policy the operator wrote.
+  printf '# inert\n' > "$tmp/cfg/gate.toml"
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+    ./install.sh >/dev/null 2>&1 || rc=1
+  [ ! -e "$tmp/cfg/gate.toml" ] \
+    || { echo "installer left the retired inert gate.toml in place" >&2; rc=1; }
+  printf 'max_effort = 3\n' > "$tmp/cfg/gate.toml"
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+    ./install.sh >"$tmp/retired.out" 2>&1 || rc=1
+  [ -f "$tmp/cfg/gate.toml" ] \
+    || { echo "installer deleted a gate.toml that sets keys instead of reporting it" >&2; rc=1; }
+  grep -q 'no longer read' "$tmp/retired.out" \
+    || { echo "installer did not report a keyed gate.toml it left in place" >&2; rc=1; }
+  # A file the interpreter cannot parse is a THIRD state, not "it sets keys": on a machine whose python3
+  # predates tomllib (macOS's own does), the old two-way check read every inert gate.toml as policy and
+  # told the operator to migrate keys the file does not have. Simulated with an unparseable file, which
+  # reaches the same branch.
+  printf 'not = = toml\n' > "$tmp/cfg/gate.toml"
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+    ./install.sh >"$tmp/unparsed.out" 2>&1 || rc=1
+  grep -q 'cannot parse it' "$tmp/unparsed.out" \
+    || { echo "installer did not distinguish an unparseable gate.toml from one that sets keys" >&2; rc=1; }
+  grep -q 'move its keys' "$tmp/unparsed.out" \
+    && { echo "installer claimed an unparseable gate.toml holds keys to migrate" >&2; rc=1; }
+  [ -f "$tmp/cfg/gate.toml" ] \
+    || { echo "installer deleted a gate.toml it could not read" >&2; rc=1; }
+  rm -f "$tmp/cfg/gate.toml"
   rm -rf "$tmp"
   return "$rc"
 }
@@ -998,9 +1032,9 @@ stage_gateshapes() {
   local rc=0 d gate st out shape falsy truthy
   d="$(mktemp -d)"
   gate="$PWD/src/preflight-gate"
-  # A scratch PREFLIGHT_HOME: the gate reads $PREFLIGHT_HOME/gate.toml when it exists, and install.sh
-  # creates that file on a developer machine, so an edited policy would otherwise change these
-  # assertions' expected exit codes.
+  # A scratch PREFLIGHT_HOME: the gate reads [gate] from $PREFLIGHT_HOME/settings.toml when that file
+  # exists, and a developer machine has one, so an edited policy would otherwise change these assertions'
+  # expected exit codes.
   inside() { ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight bash "$gate" ); }
   put() { mkdir -p "$d/.preflight"; printf '%s' "$1" > "$d/.preflight/review.json"; }
 
@@ -1054,10 +1088,13 @@ stage_gateshapes() {
     else st=$?; [ "$st" = 2 ] || { echo "security_concerns=$truthy exited $st, expected 2" >&2; rc=1; }; fi
   done
 
-  # The effort clamp still parses a numeric field.
-  put '{"review":{"estimated_effort_to_review_[1-5]":5,"key_issues_to_review":[]}}'
-  if ( cd "$d" && PREFLIGHT_DIR=.preflight PREFLIGHT_GATE_MAX_EFFORT=3 bash "$gate" ) >/dev/null 2>&1; then
-    echo "effort clamp did not fail at 5 > 3" >&2; rc=1
+  # Effort and the merge recommendation are REPORTED, never enforced: neither is trusted input, so a
+  # review carrying a high effort, or a merge_recommendation of changes_required, must still PASS.
+  put '{"review":{"estimated_effort_to_review_[1-5]":5,"merge_recommendation":"changes_required","key_issues_to_review":[],"security_concerns":"No"}}'
+  out="$(inside 2>&1)" || rc=1
+  echo "$out" | grep -q 'PASS' || { echo "a reported effort or merge recommendation decided the verdict: $out" >&2; rc=1; }
+  if ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight PREFLIGHT_GATE_MAX_EFFORT=3 bash "$gate" ) >/dev/null 2>&1; then :; else
+    echo "the retired PREFLIGHT_GATE_MAX_EFFORT still changed the verdict" >&2; rc=1
   fi
 
   # The doc tier: a finding on documentation is advisory and must NOT fail the gate, while one on code

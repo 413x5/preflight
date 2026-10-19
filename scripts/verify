@@ -284,14 +284,14 @@ stage_install() {
   printf '#!/usr/bin/env bash\n# preflight — local PR-style review of the pending change (or, optionally, the whole branch).\n' \
     > "$tmp/u/bin/preflight"
   chmod +x "$tmp/u/bin/preflight"
-  HOME="$tmp/u/home" PREFLIGHT_HOME="$tmp/u/cfg" PREFLIGHT_BIN_DIR="$tmp/u/bin" \
+  HOME="$tmp/u/home" PREFLIGHT_HOME="$tmp/u/cfg" PREFLIGHT_BIN_DIR="$tmp/u/bin" PREFLIGHT_REMOVE_TOOL=0 \
     ./uninstall.sh >"$tmp/u/ours.out" 2>&1 || rc=1
   [ ! -e "$tmp/u/bin/preflight" ] \
     || { echo "uninstaller left this bundle's own retired preflight helper behind" >&2; rc=1; }
   mkdir -p "$tmp/u/bin" "$tmp/u/cfg"
   printf '\177ELF not-a-script\n' > "$tmp/u/bin/preflight"
   chmod +x "$tmp/u/bin/preflight"
-  HOME="$tmp/u/home" PREFLIGHT_HOME="$tmp/u/cfg" PREFLIGHT_BIN_DIR="$tmp/u/bin" \
+  HOME="$tmp/u/home" PREFLIGHT_HOME="$tmp/u/cfg" PREFLIGHT_BIN_DIR="$tmp/u/bin" PREFLIGHT_REMOVE_TOOL=0 \
     ./uninstall.sh >"$tmp/u/foreign.out" 2>&1 || rc=1
   [ -f "$tmp/u/bin/preflight" ] \
     || { echo "uninstaller deleted a preflight binary that was not ours" >&2; rc=1; }

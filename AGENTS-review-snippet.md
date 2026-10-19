@@ -90,6 +90,12 @@ Every round is a full model call that re-reads the whole diff, so these habits a
 
 - **Fix everything material in one pass.** A round that resolves many findings is cheaper than many rounds
   that resolve one each.
+- **Answer the class, not the instance.** A finding is one member of a class the code did not exclude, so
+  a patch that closes only what the reviewer saw returns next round under a different name. Before editing,
+  ask what class this is and what would make every member of it impossible: replace the set with the
+  property that makes a set unnecessary (the directory rather than the files in it), and close a finite
+  list only by asserting it against its source. Two rounds on one class is the signal; a third means
+  change course.
 - **A review reports on prose as hard as on code.** A claim the reviewer can check and you have not is a
   finding you bought. Write less commentary, and make sure what you write is true.
 - **Do not document behaviour you have not settled.** Write the code, confirm what it does, then describe

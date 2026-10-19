@@ -17,66 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   committed file choosing one would spend that key on every machine that clones the repository. The same file carries the
   gate's `[gate]` table, so a repository has one file for everything preflight can tell it.
 
-### Changed
-
-- **The gate's policy is a `[gate]` table, and the separate `gate.toml` files are gone.** The keys used to
-  live in `$PREFLIGHT_HOME/gate.toml`, with a repo-local `.preflight-gate.toml` beside it; both are now one
-  table in `settings.toml` and the repository's `.preflight.toml`. `install.sh` installs no gate file, and
-  retires the old one: an inert `gate.toml` (every key commented out, which is what the old install wrote)
-  is deleted, while one that sets keys is left in place and reported by name until they are moved into
-  `[gate]` - deleting a policy the operator wrote would be the silent-loss failure this bundle refuses.
-  `preflight-gate` reports a retired file that sets keys, and stays quiet about an inert one. The renderer
-  strips `[gate]` from the config pr-agent receives, because pr-agent reads nothing from it.
-
-- **The gate decides on security concerns and blocking findings only.** `risk_level` and
-  `estimated_effort_to_review` are printed by `preflight-gate` and repeated on `preflight`'s summary line;
-  `merge_recommendation` is on `preflight`'s line only, since the gate no longer reads it. No verdict
-  depends on any of them. The merge rule was conditional on
-  `require_merge_recommendation`, which the bundle leaves off, so a default install reported `merge=n/a`
-  and the rule could never fire; both it and `max_effort` (with `PREFLIGHT_GATE_MAX_EFFORT`) are removed
-  rather than left as knobs that change nothing. `docs/architecture.md` records the reasoning.
-
-
-- **`preflight.toml` and `.secrets.toml` are gone; `settings.toml` + `providers.toml` are the whole
-  configuration.** Three files had grown into one another: the shipped `preflight.toml` was both the
-  renderer's merge base and the fallback config for an install that had not adopted profiles, and
-  `.secrets.toml` existed only to feed the single `[openai]` section that a second endpoint could not share.
-  Now there are two, with one job each:
-
-  - `settings.toml` — what the review does. `[selection]` names the profiles to use; every other section is
-    a pr-agent section, passed through unchanged, so a key this bundle does not list still works.
-  - `providers.toml` — the endpoints and their keys (600-mode), and the `[profiles.*]` tables that use them.
-
-  The render starts from a copy of `settings.toml` and adds the model, the endpoint and the three
-  `[litellm]` keys derived from the provider, so settings.toml *is* the config rather than a subset of one.
-  `[selection]` exists because `[config]` is now pr-agent's own section: `main`/`fallback` name PROFILES,
-  which is not a pr-agent key and would otherwise be written into `[config]` and read as settings pr-agent
-  does not have.
-
-  A missing `settings.toml` is now a refusal that names both files, not a silent fall back to
-  `preflight.toml` — there is no second config, so a run without a model must fail closed. `ensure-link.sh`
-  goes with the symlink it maintained: the rendered config carries the credential, so the package's
-  `settings/` directory is never written to.
-
-  The templates are regenerated as full references: `settings.toml.example` lists every `[pr_reviewer]` key
-  pr-agent declares (live where the bundle sets it, commented at upstream's value otherwise) and
-  `providers.toml.example` every provider key, transport and profile-level setting. **`install.sh` installs
-  those example files and nothing else** - it does not create `settings.toml` or `providers.toml`, because
-  it knows no endpoint, model id or budget and a file it wrote could only be a guess. The user copies the
-  pair into place (the install states the two commands) and edits it. Every install-time variable that
-  seeded a config value is removed with the file it configured (`PREFLIGHT_API_BASE`, `PREFLIGHT_KEY`,
-  `PREFLIGHT_MODEL`, `PREFLIGHT_FALLBACK_MODELS`, `PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS`,
-  `PREFLIGHT_MAX_MODEL_TOKENS`, `PREFLIGHT_FORCE_STREAMING_HOST`): a variable that quietly stops working
-  once the file exists is worse than a file you edit, and a value baked in at install time is a value
-  someone has to find and correct. The remaining variables configure the install itself.
-
-  Nothing in the shipped templates names an endpoint, a model or a host: they carry obvious placeholders
-  (`https://api.example.com/v1`, `your-model-id`, example budgets), and the configuration is a step the
-  user completes after installing. The gate's fixtures and the test suite name their own fictional
-  providers too, so no real endpoint's name reaches an assertion the suite would then be written around.
-
-### Added
-
 - **`PREFLIGHT_PROGRESS_EVERY`: the review says it is still going.** The wait for a review's artifact
   (phase 1, `PREFLIGHT_REVIEW_WAIT`) printed nothing between the run starting and the artifact appearing,
   so a wedged endpoint and a review that was simply thinking were the same thing on screen: silence, for up
@@ -152,6 +92,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.example` templates, so the review's own `git add -A` snapshot cannot pick up a credential. The `models`
   stage runs `git check-ignore` on both paths, so a rule that disappeared fails the gate rather than
   relying on this paragraph.
+
+### Changed
+
+- **The consumer snippet now carries "answer the class, not the instance".** The rule was added to
+  `AGENTS.md` and [`PLAYBOOK.md`](PLAYBOOK.md) but not to
+  [`AGENTS-review-snippet.md`](AGENTS-review-snippet.md), so a consuming agent could still fix the one
+  finding the reviewer named and meet the rest of its class on the next round, at a full review apiece.
+  The snippet's round-economy section now asks what class a finding belongs to and what would make every
+  member of it impossible. No product behaviour changes.
+
+- **The gate's policy is a `[gate]` table, and the separate `gate.toml` files are gone.** The keys used to
+  live in `$PREFLIGHT_HOME/gate.toml`, with a repo-local `.preflight-gate.toml` beside it; both are now one
+  table in `settings.toml` and the repository's `.preflight.toml`. `install.sh` installs no gate file, and
+  retires the old one: an inert `gate.toml` (every key commented out, which is what the old install wrote)
+  is deleted, while one that sets keys is left in place and reported by name until they are moved into
+  `[gate]` - deleting a policy the operator wrote would be the silent-loss failure this bundle refuses.
+  `preflight-gate` reports a retired file that sets keys, and stays quiet about an inert one. The renderer
+  strips `[gate]` from the config pr-agent receives, because pr-agent reads nothing from it.
+
+- **The gate decides on security concerns and blocking findings only.** `risk_level` and
+  `estimated_effort_to_review` are printed by `preflight-gate` and repeated on `preflight`'s summary line;
+  `merge_recommendation` is on `preflight`'s line only, since the gate no longer reads it. No verdict
+  depends on any of them. The merge rule was conditional on
+  `require_merge_recommendation`, which the bundle leaves off, so a default install reported `merge=n/a`
+  and the rule could never fire; both it and `max_effort` (with `PREFLIGHT_GATE_MAX_EFFORT`) are removed
+  rather than left as knobs that change nothing. `docs/architecture.md` records the reasoning.
+
+
+- **`preflight.toml` and `.secrets.toml` are gone; `settings.toml` + `providers.toml` are the whole
+  configuration.** Three files had grown into one another: the shipped `preflight.toml` was both the
+  renderer's merge base and the fallback config for an install that had not adopted profiles, and
+  `.secrets.toml` existed only to feed the single `[openai]` section that a second endpoint could not share.
+  Now there are two, with one job each:
+
+  - `settings.toml` — what the review does. `[selection]` names the profiles to use; every other section is
+    a pr-agent section, passed through unchanged, so a key this bundle does not list still works.
+  - `providers.toml` — the endpoints and their keys (600-mode), and the `[profiles.*]` tables that use them.
+
+  The render starts from a copy of `settings.toml` and adds the model, the endpoint and the three
+  `[litellm]` keys derived from the provider, so settings.toml *is* the config rather than a subset of one.
+  `[selection]` exists because `[config]` is now pr-agent's own section: `main`/`fallback` name PROFILES,
+  which is not a pr-agent key and would otherwise be written into `[config]` and read as settings pr-agent
+  does not have.
+
+  A missing `settings.toml` is now a refusal that names both files, not a silent fall back to
+  `preflight.toml` — there is no second config, so a run without a model must fail closed. `ensure-link.sh`
+  goes with the symlink it maintained: the rendered config carries the credential, so the package's
+  `settings/` directory is never written to.
+
+  The templates are regenerated as full references: `settings.toml.example` lists every `[pr_reviewer]` key
+  pr-agent declares (live where the bundle sets it, commented at upstream's value otherwise) and
+  `providers.toml.example` every provider key, transport and profile-level setting. **`install.sh` installs
+  those example files and nothing else** - it does not create `settings.toml` or `providers.toml`, because
+  it knows no endpoint, model id or budget and a file it wrote could only be a guess. The user copies the
+  pair into place (the install states the two commands) and edits it. Every install-time variable that
+  seeded a config value is removed with the file it configured (`PREFLIGHT_API_BASE`, `PREFLIGHT_KEY`,
+  `PREFLIGHT_MODEL`, `PREFLIGHT_FALLBACK_MODELS`, `PREFLIGHT_CUSTOM_MODEL_MAX_TOKENS`,
+  `PREFLIGHT_MAX_MODEL_TOKENS`, `PREFLIGHT_FORCE_STREAMING_HOST`): a variable that quietly stops working
+  once the file exists is worse than a file you edit, and a value baked in at install time is a value
+  someone has to find and correct. The remaining variables configure the install itself.
+
+  Nothing in the shipped templates names an endpoint, a model or a host: they carry obvious placeholders
+  (`https://api.example.com/v1`, `your-model-id`, example budgets), and the configuration is a step the
+  user completes after installing. The gate's fixtures and the test suite name their own fictional
+  providers too, so no real endpoint's name reaches an assertion the suite would then be written around.
 
 ## [0.5.0] - 2026-10-16
 

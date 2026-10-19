@@ -4,7 +4,7 @@
 
 # The helpers are shell scripts: text, LF-only.
 *.sh                 text eol=lf
-src/preflight        text eol=lf
+src/preflight-code   text eol=lf
 src/preflight-hook   text eol=lf
 src/preflight-pr     text eol=lf
 src/preflight-gate   text eol=lf

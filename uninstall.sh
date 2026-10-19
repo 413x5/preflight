@@ -3,16 +3,30 @@
 #   ./uninstall.sh                            # helpers + config (keeps the uv tool)
 #   PREFLIGHT_REMOVE_TOOL=1 ./uninstall.sh    # also `uv tool uninstall pr-agent`
 #
-# Also cleans up a pre-rename install (pra/pral/pral-gate + ~/.config/pr-agent), so the rename
-# never leaves two installs behind. Set PREFLIGHT_KEEP_OLD_CONFIG=1 to migrate the old config by
-# hand instead (it holds the API key you will want in providers.toml).
+# Also cleans up a pre-rename install (pra/pral/pral-gate + ~/.config/pr-agent, and the `preflight`
+# command this bundle shipped before it was renamed), so the rename never leaves two installs behind.
+# Set PREFLIGHT_KEEP_OLD_CONFIG=1 to migrate the old config by hand instead (it holds the API key you
+# will want in providers.toml).
 set -euo pipefail
 cfg="${PREFLIGHT_HOME:-$HOME/.config/preflight}"
 bindir="${PREFLIGHT_BIN_DIR:-$HOME/.local/bin}"
 say() { printf '%s\n' "$*" >&2; }
 
-rm -f "$bindir/preflight" "$bindir/preflight-pr" "$bindir/preflight-gate"
+rm -f "$bindir/preflight-code" "$bindir/preflight-pr" "$bindir/preflight-gate"
 say "removed helpers from $bindir"
+# `preflight` was this bundle's command before the rename, and an unrelated project uses the same name.
+# Only OUR old helper is removed: a shell script that describes this bundle. Anything else at that path is
+# left alone and named, because this is the one removal that could delete another project's executable.
+if [ -e "$bindir/preflight" ]; then
+  if [ -f "$bindir/preflight" ] && [ ! -L "$bindir/preflight" ] \
+     && head -n1 "$bindir/preflight" 2>/dev/null | grep -q '^#!' \
+     && grep -q 'local PR-style review of the pending change' "$bindir/preflight" 2>/dev/null; then
+    rm -f "$bindir/preflight"
+    say "removed the old-name helper $bindir/preflight"
+  else
+    say "kept $bindir/preflight: it belongs to another project, not this bundle"
+  fi
+fi
 rm -rf "$cfg"
 say "removed $cfg"
 

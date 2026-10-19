@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Changed
+
+- **Breaking: the `preflight` command is now `preflight-code`.** An unrelated project,
+  [`ghuntley/preflight`](https://github.com/ghuntley/preflight), ships a binary of the same name, so on a
+  machine with both installed whichever came first on `PATH` answered - and the other one's arguments
+  (`review`, `describe`, …) are not its subcommands. Nothing else took the name: `preflight-gate`,
+  `preflight-pr`, `preflight-hook`, every `PREFLIGHT_*` variable and `~/.config/preflight` are unchanged,
+  and the project is still called `preflight`.
+  - **No compatibility shim.** An installed `preflight` alias would recreate exactly the collision this
+    removes, so the old name is retired rather than forwarded, as `pra`/`pral` were.
+  - Output follows the command: the summary line is now `preflight-code: issues=…`, and the hook, the
+    example hooks and the gate's "run the review first" hint name `preflight-code`. The shared resolver in
+    `settings-render.sh` takes the caller's name, so a refusal under `preflight-pr` still says
+    `preflight-pr`.
+  - `install.sh` reports an old `preflight` helper and leaves another project's binary of that name alone;
+    `uninstall.sh` removes only this bundle's own, recognised by the description on its second line.
+  - **Consumers must re-paste `AGENTS-review-snippet.md`**, or update the command in their own `AGENTS.md`:
+    a snippet calling `preflight` now names a command this bundle no longer installs.
 
 ## [0.6.0] - 2026-10-19
 

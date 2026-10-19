@@ -5,11 +5,11 @@ that review. The reviewer is a machine-local PR-Agent run over the **working tre
 and no commit required:
 
 ```sh
-preflight review   # the pending change (HEAD -> working tree) -> .preflight/review.md + .preflight/review.json
+preflight-code review   # the pending change (HEAD -> working tree) -> .preflight/review.md + .preflight/review.json
 preflight-gate     # exit 0 = pass, 1 = key issues, 2 = security concerns, 3 = no review yet
 ```
 
-`preflight --help` lists every command and environment variable; `preflight --version` reports the
+`preflight-code --help` lists every command and environment variable; `preflight-code --version` reports the
 installed bundle version.
 
 ### What to keep, and what to drop
@@ -40,7 +40,7 @@ written - a paraphrase of a fact about the installed helper is a fact that drift
 
 ### Scope
 
-`preflight review` reviews **the pending commit**: everything HEAD does not yet contain, tracked and
+`preflight-code review` reviews **the pending commit**: everything HEAD does not yet contain, tracked and
 untracked. Its diff comes from a throwaway snapshot of the working tree, so reviewing never stages,
 commits or rewrites anything - the index is untouched and HEAD does not move. Reviewing commit by commit
 covers a multi-commit branch completely, because each commit is checked against the tree that was reviewed
@@ -56,7 +56,7 @@ for it.
 
 ### Read the review
 
-`preflight review` prints a summary line and writes its artifacts:
+`preflight-code review` prints a summary line and writes its artifacts:
 
 - `.preflight/review.md` - prose.
 - `.preflight/review.json` - structured: `review.key_issues_to_review[]`, `review.security_concerns`,
@@ -113,14 +113,14 @@ Every round is a full model call that re-reads the whole diff, so these habits a
 - **The review supplements your test/lint gate, it does not replace it.** A clean review says nothing about
   types, lint or the tests.
 - **`.preflight/` is gitignored and per worktree.** The exclude lives in `.git/info/exclude`, so review
-  output is never committed and two worktrees never collide. `preflight` adds the exclude itself, and for
+  output is never committed and two worktrees never collide. `preflight-code` adds the exclude itself, and for
   the branch scopes it fetches the remote before diffing, so it never compares against a stale local
   default branch.
 - **The helpers are machine-local, not part of the repository.** They live in `~/.local/bin` and are driven
   by `~/.config/preflight/settings.toml` + `providers.toml`, and work against any OpenAI-compatible
   endpoint. If they are
-  missing, install them with the bundle's `install.sh`. Other commands: `preflight describe`,
-  `preflight improve`, `preflight ask "<question>"`.
+  missing, install them with the bundle's `install.sh`. Other commands: `preflight-code describe`,
+  `preflight-code improve`, `preflight-code ask "<question>"`.
 
 ### Make it enforced: refuse a commit that was not reviewed
 
@@ -143,7 +143,7 @@ obeys. Check both with `git ls-files -s .githooks/` - each line must read `10075
 
 #### What the hook does, and does not do
 
-- It **verifies** that the content being committed was what `preflight review` reviewed. Unreviewed content
+- It **verifies** that the content being committed was what `preflight-code review` reviewed. Unreviewed content
   blocks the commit, and the offending paths are named. The recorded review must also have **passed**
   `preflight-gate`.
 - It **never runs a review** and never stages anything; it only reads.
@@ -195,14 +195,14 @@ The helpers, the config template and the full docs live in the bundle's own repo
 
 **<https://github.com/413x5/preflight>**
 
-Read it (do not guess) when this snippet does not answer a question about `preflight`:
+Read it (do not guess) when this snippet does not answer a question about `preflight-code`:
 
 - `README.md` - install, use, and the "using another provider" recipe.
 - `docs/architecture.md` - how the working-tree snapshot, the commit hook, the gate and the provider config work.
 - `docs/runbooks/troubleshooting.md` - symptoms and fixes.
 
 **Re-paste this snippet from your local installation**, not from the repository. The installed copy at
-`~/.config/preflight/AGENTS-review-snippet.md` is the one that matches the `preflight` actually on this
+`~/.config/preflight/AGENTS-review-snippet.md` is the one that matches the `preflight-code` actually on this
 machine, so every command and env var it names is one the installed bundle understands - a newer snippet
 pasted over an older helper would describe behaviour that is not there:
 
@@ -215,6 +215,6 @@ repository is ahead, re-run its `install.sh` first and re-paste afterwards, so t
 move together:
 
 ```sh
-preflight --version                                                            # installed
+preflight-code --version                                                       # installed
 gh api -H 'Accept: application/vnd.github.raw' repos/413x5/preflight/contents/src/VERSION
 ```

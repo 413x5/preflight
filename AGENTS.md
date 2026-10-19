@@ -43,7 +43,7 @@ the outside - fix one and the loop is still slow.
    must keep working. Mechanism and the keys left off deliberately: `docs/architecture.md`.
 3. **That the findings are *new*.** A reviewer cannot distinguish a deliberate, documented trade-off from
    an oversight, and each round reviews the code and comments the previous round wrote - so re-running
-   keeps raising concerns already answered, at a full model call per round. `preflight` reports
+   keeps raising concerns already answered, at a full model call per round. `preflight-code` reports
    `new=N/M` on the summary line for exactly this reason, and `new=0` is the stopping signal.
 
 `config/settings.toml.example` sets the completeness key it keeps, and the `config` stage asserts that and
@@ -68,11 +68,11 @@ can never miss anything".
 | Path | What it is |
 |---|---|
 | `install.sh`, `uninstall.sh` | Deploy/remove the setup on a machine. `bash`, idempotent |
-| `src/preflight` | `preflight` - reviews the working tree; also dispatches `preflight hook` |
+| `src/preflight-code` | `preflight-code` - reviews the working tree; also dispatches `preflight-code hook` |
 | `src/preflight-pr`, `src/preflight-gate` | Hosted/PR mode; the machine-checkable verdict |
 | `src/preflight-hook` | The commit-time verifier - **see below before touching it** |
 | `src/githooks/` | The example hooks a *consuming* repo copies into its own `.githooks/` |
-| `src/VERSION` | The bundle version, single source of truth. `preflight --version` and `install.sh` read it; CI fails if it, the `CHANGELOG` heading, and `--version` disagree |
+| `src/VERSION` | The bundle version, single source of truth. `preflight-code --version` and `install.sh` read it; CI fails if it, the `CHANGELOG` heading, and `--version` disagree |
 | `config/` | The reference files `install.sh` writes into `$PREFLIGHT_HOME`: `settings.toml.example` (the `[selection]` that names the profiles, plus every pr-agent setting the review can be told) and `providers.toml.example` (placeholder endpoint and key, and the model profiles that use them, 600-mode). The user copies them to `settings.toml`/`providers.toml`; **install.sh creates neither** |
 | `scripts/verify` | The gate: every check, cheapest first, in one command. CI runs this |
 | `AGENTS-review-snippet.md` | The block pasted into a *consumer* repo's `AGENTS.md`. **Adapted, not copied** - every section is classified `required` or `setup`, and the `snippet` stage fails if the sections and that table disagree |
@@ -239,11 +239,14 @@ with Ruby's built-in Psych if you need to inspect config.
 - **Never introduce an absolute `core.hooksPath`** in anything you write, including docs and examples. It
   breaks git worktrees - each worktree would run another checkout's hooks dir. Relative `.githooks` only.
 - **Never reintroduce the old names.** `pra`/`pral`/`pral-gate` and `~/.config/pr-agent/` are the former
-  names; `pr-agent` means only the upstream tool.
+  names; `pr-agent` means only the upstream tool. The same applies to the bare `preflight` command: it was
+  renamed to `preflight-code` because an unrelated project ships a binary of that name, so nothing here
+  installs, aliases or prints it as a command. `preflight-gate`, `preflight-pr`, `preflight-hook`, the
+  `PREFLIGHT_*` variables and `~/.config/preflight` keep their names - the *project* is still `preflight`.
 - **Never make the doc examples require a paid key or the network**, and never add a test that does.
 - **Never hand-edit a `.preflight/review.meta.json`** in a test to fake the *real* review path. The suite
   deliberately simulates a review by writing a sidecar (`review_here`); that is a fixture, not a shortcut
-  for production code. `preflight review` is the only thing that may write it.
+  for production code. `preflight-code review` is the only thing that may write it.
 - **Never let base resolution silently guess.** The base is resolved by *verifying* each candidate
   (`PREFLIGHT_BASE`, `origin/HEAD`, `ls-remote --symref origin HEAD`, then `origin/main|master`, `main|master`)
   and failing with exit 4 when none resolves. An unchecked fallback to a bare `main` would produce a fatal
@@ -268,7 +271,7 @@ with Ruby's built-in Psych if you need to inspect config.
 
 macOS ships **bash 3.2**, and its parser mis-handles a heredoc that sits **inside `$( )`** when the body
 contains an **apostrophe**: it treats the quote as opening a string and reports `unexpected EOF while
-looking for matching '`, pointing at a line far from the cause. Sites like that live in `src/preflight`,
+looking for matching '`, pointing at a line far from the cause. Sites like that live in `src/preflight-code`,
 `src/preflight-hook`, `src/githooks/post-commit` and `tests/run.sh`.
 
 So: an apostrophe is fine in a normal heredoc, and fine in a comment *outside* one - but not in the body
@@ -281,7 +284,7 @@ check catches it (`sh -n` / `bash -n` per file), which is also how CI would.
 Ask which state the machine is in rather than reaching for either:
 
 ```sh
-command -v preflight        # a path means installed; no output means a bare clone
+command -v preflight-code   # a path means installed; no output means a bare clone
 ```
 
 - **Bare clone.** The offline half works with no key and no network: `./scripts/verify` is the whole gate,
@@ -292,7 +295,7 @@ command -v preflight        # a path means installed; no output means a bare clo
 
 `python3` 3.11 or newer is needed to run the gate, because it parses TOML with `tomllib`, which entered the
 standard library there; `tools` reports a too-old interpreter rather than letting a later stage die on an
-import error. What ships needs less - the hook, the installer and `preflight` import nothing outside the
+import error. What ships needs less - the hook, the installer and `preflight-code` import nothing outside the
 standard library, so they run on an interpreter the gate refuses, and only `preflight-gate` degrades (its
 row in [`docs/architecture.md`](docs/architecture.md) says how). The `python3` macOS ships is below the
 floor, so a machine needs another one on `PATH`.
@@ -311,7 +314,7 @@ git config core.hooksPath .githooks
 preflight review && preflight-gate          # expect a pass, then the commit is accepted
 ```
 
-Without an install that last line cannot run - there is no `preflight` to review with - so copy the hooks
+Without an install that last line cannot run - there is no `preflight-code` to review with - so copy the hooks
 from `src/githooks/` instead of the config dir, and commit with the checkout's helper, which is the one a
 clone modifies:
 
@@ -323,7 +326,7 @@ git config core.hooksPath .githooks
 PREFLIGHT_HOOK="$CHECKOUT/src/preflight-hook" git -c commit.gpgsign=false commit --allow-empty -m should-block
 ```
 
-The `git add -A` before the first commit is required: `preflight review` exits 3 on a repo with no commits,
+The `git add -A` before the first commit is required: `preflight-code review` exits 3 on a repo with no commits,
 and without it the single file stays untracked. The first commit passes unreviewed by design, because the
 hook cannot be installed before the commit that installs it. `core.hooksPath` is local to the clone you set
 it in, so a `mktemp -d` repository is the only thing it affects; never set it in a preflight checkout,
@@ -334,7 +337,7 @@ than repeated here. Do not run one in a loop.
 
 Note when testing the *gate*: `PREFLIGHT_GATE_ALLOW_ISSUES=1` relaxes key issues only.
 `security_concerns` still fails, regardless of the opt-out. The gate decides on nothing else: effort and
-`risk_level` are printed by it and `merge_recommendation` by `preflight`, never enforced - `docs/architecture.md`
+`risk_level` are printed by it and `merge_recommendation` by `preflight-code`, never enforced - `docs/architecture.md`
 covers why.
 
 ## Before you start: check docs/roadmap.md for handoff state
@@ -412,7 +415,7 @@ decision journey that produced the line.
 - **An unverifiable comment is a liability, not documentation.** Prose is not executed, so a comment that
   contradicts the code beside it survives indefinitely. A documentation pass took `config/settings.toml.example` to
   mostly comments - the ratio is in [`docs/measurements.md`](docs/measurements.md), which owns it - and left
-  a `post-commit` comment instructing users to "run `preflight review` with the default worktree scope" - a
+  a `post-commit` comment instructing users to "run `preflight-code review` with the default worktree scope" - a
   scope that had not been the default since the `commit` scope landed. Trimming that comment is what exposed
   the matching bug (the advisory warned on every default-scope commit), which no test had covered.
 

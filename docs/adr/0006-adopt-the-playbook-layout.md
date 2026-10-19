@@ -66,7 +66,7 @@ implied.
 Bad, and worth naming:
 
 - **`src/` means something weaker here than the playbook intends.** Upstream, `src/` is "the only
-  hand-written, shipped code", built into artifacts. This bundle has no build step at all - `src/preflight`
+  hand-written, shipped code", built into artifacts. This bundle has no build step at all - `src/preflight-code`
   and its siblings *are* the product, copied to `$PREFLIGHT_HOME` by `install.sh`. The playbook's
   `src/` conformance buys guessability and costs a small lie in the name. `files/` was the alternative
   lie ("files" names nothing), and a guessable name was judged worth more than a literal one.

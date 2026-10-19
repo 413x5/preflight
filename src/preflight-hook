@@ -8,7 +8,7 @@
 # It answers one question: does the content being committed match the content that was reviewed?
 # Anything being committed that the reviewer never saw blocks the commit.
 #
-# Exit: 0 = the commit may proceed | 1 = blocked (run 'preflight review', then commit again)
+# Exit: 0 = the commit may proceed | 1 = blocked (run 'preflight-code review', then commit again)
 #
 # Env:  PREFLIGHT_DIR   artifact dir (default .preflight)
 #       PREFLIGHT_SKIP=1 bypass once (same idea as 'git commit --no-verify')
@@ -22,27 +22,27 @@ root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 cd "$root" || exit 0
 
 fail() {
-  printf 'preflight: commit blocked: %s\n' "$1" >&2
-  printf "preflight: run 'preflight review', then commit again.\n" >&2
+  printf 'preflight-code: commit blocked: %s\n' "$1" >&2
+  printf "preflight-code: run 'preflight-code review', then commit again.\n" >&2
   exit 1
 }
 
 # Fail closed on a missing interpreter rather than silently passing an unverified commit.
 command -v python3 >/dev/null 2>&1 || fail "python3 is required to read the review sidecar"
 
-# A repository with no commits has nothing to protect, and `preflight review` cannot run before HEAD
+# A repository with no commits has nothing to protect, and `preflight-code review` cannot run before HEAD
 # exists - so blocking here would deadlock adoption: the hook could never be installed before the
 # commit that installs it.
 git rev-parse --verify -q HEAD >/dev/null 2>&1 || {
-  printf 'preflight: not enforced: this repository has no commits yet.\n' >&2
-  printf "preflight: run 'preflight review' after this first commit to enforce later ones.\n" >&2
+  printf 'preflight-code: not enforced: this repository has no commits yet.\n' >&2
+  printf "preflight-code: run 'preflight-code review' after this first commit to enforce later ones.\n" >&2
   exit 0
 }
 
 meta="$dir/review.meta.json"
 [ -f "$meta" ] || fail "no review found for this repo"
 
-# Read the sidecar written by `preflight review`. Prints shell assignments; empty on any problem.
+# Read the sidecar written by `preflight-code review`. Prints shell assignments; empty on any problem.
 assignments=$(python3 - "$meta" <<'PY'
 import json, sys
 try:
@@ -70,8 +70,8 @@ eval "$assignments"
 case "${pf_scope:-}" in
   commit|worktree) ;;
   *)
-    printf 'preflight: not enforced: the last review used scope=%s (hook enforcement needs commit or worktree scope).\n' "${pf_scope:-unknown}" >&2
-    printf "preflight: run 'preflight review' with the default scope to enforce commits.\n" >&2
+    printf 'preflight-code: not enforced: the last review used scope=%s (hook enforcement needs commit or worktree scope).\n' "${pf_scope:-unknown}" >&2
+    printf "preflight-code: run 'preflight-code review' with the default scope to enforce commits.\n" >&2
     exit 0
     ;;
 esac
@@ -140,7 +140,7 @@ with open(sys.argv[3], 'wb') as out:
 PY
 
 if [ -s "$tmpd/changed" ] || [ -s "$tmpd/deleted" ]; then
-  printf 'preflight: commit blocked: these paths changed after the review:\n' >&2
+  printf 'preflight-code: commit blocked: these paths changed after the review:\n' >&2
   python3 - "$tmpd/changed" "$tmpd/deleted" <<'PY' >&2
 import sys
 
@@ -153,7 +153,7 @@ def show(path, prefix):
 show(sys.argv[1], b'')
 show(sys.argv[2], b'(deleted) ')
 PY
-  printf "preflight: run 'preflight review', then commit again.\n" >&2
+  printf "preflight-code: run 'preflight-code review', then commit again.\n" >&2
   exit 1
 fi
 exit 0

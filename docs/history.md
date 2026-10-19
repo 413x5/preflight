@@ -19,6 +19,18 @@ named after it made every sentence ambiguous - "pr-agent is pinned" was true and
 401" was also true, about two different things. The old names are retired rather than aliased, and the
 rule is that `pr-agent` means only the upstream tool.
 
+The later rename of the bare command to `preflight-code` was for the opposite reason: not that the name
+described the wrong thing, but that it was not unique. `ghuntley/preflight` is a Rust proxy that inspects
+outbound LLM requests for secrets, and it installs a binary called `preflight` too. Both tools resolve
+their subcommand from the same argument position, so a shared `PATH` made one of them answer the other's
+`review` - and a bundle that is hard to invoke is not enforcing anything.
+
+Only the command moved. The *project* is still `preflight`, so `preflight-gate`, `preflight-pr`,
+`preflight-hook`, `PREFLIGHT_*` and `~/.config/preflight` keep their names: renaming them would have been a
+second breaking change with no collision behind it, since the other project has no binary that could
+collide. The same "retired, not aliased" rule applies, because installing a `preflight` forwarder would
+have restored the collision on every machine that has both.
+
 ## Base resolution: a fallback that turned into a silent block
 
 The `worktree` and `head` scopes diff against a resolved base. The first implementation resolved it

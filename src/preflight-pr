@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # preflight-pr — run PR-Agent with the global preflight config (hosted/PR mode, needs a token).
 set -euo pipefail
-# The same config dir `preflight` and install.sh use, PREFLIGHT_HOME included, so both helpers read
+# The same config dir `preflight-code` and install.sh use, PREFLIGHT_HOME included, so both helpers read
 # one tree. ${HOME:-} because this runs under `set -u`.
 cfgdir="${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}"
 here="$(cd "$(dirname "$0")" && pwd)"
 
-# The model configuration, resolved exactly as `preflight` resolves it - shared helper, same lookup
+# The model configuration, resolved exactly as `preflight-code` resolves it - shared helper, same lookup
 # order - so the two cannot disagree about which model answers. settings.toml and providers.toml are the
 # ONLY sources now, so both must be present: there is no second config to fall back to.
 # The rendered config is per run ($PREFLIGHT_HOME/.pragent.settings.<pid>.toml); this process removes its
@@ -35,6 +35,8 @@ for _arg in "$@"; do
   esac
 done
 
+# Names this command in the shared renderer's refusals.
+__preflight_caller_name='preflight-pr'
 mprof=''
 for cand in "$here/settings-render.sh" "$here/../scripts/settings-render.sh" "${cfgdir}/settings-render.sh"; do
   if [ -f "$cand" ]; then mprof="$cand"; break; fi

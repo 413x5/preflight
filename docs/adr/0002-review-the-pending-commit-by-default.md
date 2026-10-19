@@ -8,7 +8,7 @@
 
 ## Context and problem statement
 
-`preflight review` has to choose what to diff. The tool's purpose is to review a change *before* it
+`preflight-code review` has to choose what to diff. The tool's purpose is to review a change *before* it
 becomes a pull request, so the natural default is the change about to be committed - but the first
 shipped default was the branch scopes, which diff against a resolved base.
 

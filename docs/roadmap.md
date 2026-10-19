@@ -80,7 +80,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
 
 ### Open questions on shipped work
 
-- [x] **Make the post-run hang survivable, and stop it hiding the counts.** `preflight review` writes
+- [x] **Make the post-run hang survivable, and stop it hiding the counts.** `preflight-code review` writes
       its artifacts and then sometimes never exits (sleeping in `kevent`, or spinning in the asyncio
       loop), because pr-agent's post-run callback drain blocks after the review is
       finished. The helper now reads the summary from `review.json` *before* waiting, so a hang cannot hide
@@ -119,7 +119,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
       [`config/settings.toml.example`](../config/settings.toml.example)), and `[config] seed` (unset), which
       would pin sampling and stabilise `new=N/M` at the cost of whatever coverage pinning removes.
 - [x] **Make pending-commit review the default (the `commit` scope).** Changed the default so
-      `preflight review` covers the pending commit - HEAD to the working tree, untracked files included -
+      `preflight-code review` covers the pending commit - HEAD to the working tree, untracked files included -
       instead of the whole branch since the default branch, which is what the tool exists for: reviewing a
       change before it is submitted. Landed as [#5](https://github.com/413x5/preflight/pull/5) - CI green on
       both platforms. The per-commit coverage argument, both branch scopes, and the three `REQ-HOOK-33`
@@ -128,8 +128,8 @@ Wanted; needs design, or an experiment to settle. Two groups:
       **Still open: it has never been reviewed by the tool itself.** It was committed and pushed without a
       review pass, at the maintainer's direction.
 
-- [x] **Surface `risk_level` / `merge_recommendation` in `preflight`'s summary line.** The summary carried
-      only the counts the gate fails on (issues, security), so `preflight review` could report a change
+- [x] **Surface `risk_level` / `merge_recommendation` in `preflight-code`'s summary line.** The summary carried
+      only the counts the gate fails on (issues, security), so `preflight-code review` could report a change
       the gate then refused, discoverable only by running a second command. Those fields are now on the line
       and degrade to `n/a` when absent. `REQ-HOOK-35` asserts both, and that an omitted field does not
       print an empty or `None` value.
@@ -144,7 +144,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
       pattern `REQ-HOOK-32` established. That closes a wiring gap `REQ-HOOK-31` cannot see (it runs the
       counting block standalone, so `emit_summary` never being called would pass it), costs no tokens, and
       runs on every PR.
-- [ ] **One review packet.** Optionally run `preflight review` + `preflight improve` together so a
+- [ ] **One review packet.** Optionally run `preflight-code review` + `preflight-code improve` together so a
       coding agent gets the findings *and* concrete suggested diffs in a single round (fewer
       iterations). The single-review completeness work (the finding cap, the coverage line) is
       done; this is the remaining half - not yet a second report per round.
@@ -164,9 +164,9 @@ Wanted; needs design, or an experiment to settle. Two groups:
       the same shape of waste that removed it. The safer shape is an explicit, deterministic policy such
       as `block_on = security,changes_required,issues`, or the existing `PREFLIGHT_GATE_ALLOW_ISSUES=1`
       opt-out. Not yet decided.
-- [ ] **`preflight --since <ref>`** for a pseudo-incremental review - plain-diff mode has no true
+- [ ] **`preflight-code --since <ref>`** for a pseudo-incremental review - plain-diff mode has no true
       incremental, so this would re-review only what changed since the last pass.
-- [ ] **Remember the last reviewed commit** so a second `preflight review` can skip unchanged work.
+- [ ] **Remember the last reviewed commit** so a second `preflight-code review` can skip unchanged work.
 
 ## What upstream's own docs say (checked against the installed v0.47.0)
 
@@ -215,7 +215,7 @@ Needs a decision or an external dependency.
 - [ ] **Bot identity.** Decide between a dedicated bot account (works with the CLI), the
       `github-actions[bot]` identity (Actions only), or a GitHub App + webhook server (not
       CLI-compatible). Required before Layer 2/3 can post under its own name.
-- [ ] **Pre-push hook** that reruns `preflight review` + `preflight-gate` and blocks a push when the gate
+- [ ] **Pre-push hook** that reruns `preflight-code review` + `preflight-gate` and blocks a push when the gate
       fails. Secondary to the commit hook: a pushed branch's content equals its commits, which the commit
       hook already covers, and a pre-push check cannot detect a rewritten or already-pushed hash.
 

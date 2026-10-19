@@ -1053,6 +1053,26 @@ if dangling:
     sys.exit("help cites README sections that do not exist: " + ", ".join(dangling))
 print(f"help documents all {len(should_be_helped)} settings the helper reads, and no others")
 PY
+  # The resolver is sourced by the helpers, by the gate and by a bare `. scripts/settings-render.sh` in a
+  # test, so its DEFAULT caller name is what a direct source prints. The retired bare command must never be
+  # that default: it would label a refusal with a command the bundle does not install.
+  python3 - scripts/settings-render.sh <<'PY' || rc=1
+import re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+shell_default = re.search(r'__preflight_caller_name="\$\{__preflight_caller_name:-([^}]*)\}"', src)
+python_default = re.search(r'PROG = sys\.argv\[5\] if len\(sys\.argv\) > 5 else "([^"]*)"', src)
+fails = []
+for label, m in (("shell", shell_default), ("python", python_default)):
+    if not m:
+        fails.append(f"the {label} fallback for the caller name is gone; update this guard")
+    elif m.group(1) in ("preflight", ""):
+        fails.append(f"the {label} fallback is '{m.group(1)}', which names the retired command")
+    elif m.group(1) != "preflight-code":
+        fails.append(f"the {label} fallback is '{m.group(1)}', not the installed command")
+if fails:
+    sys.exit("; ".join(fails))
+print("a direct source of the resolver names preflight-code, not the retired command")
+PY
   return "$rc"
 }
 

@@ -29,10 +29,10 @@
 PREFLIGHT_RENDERED_CONFIG=''
 
 # The command that sourced this file, for the messages below: the two helpers share this resolver, and a
-# refusal has to name the command the operator actually ran. Set by the caller before sourcing; the
-# fallback keeps a bare `. scripts/settings-render.sh` in a test readable rather than prefixing with
-# nothing.
-__preflight_caller_name="${__preflight_caller_name:-preflight}"
+# refusal has to name the command the operator actually ran. Set by the caller before sourcing. The
+# fallback is the bundle's own command, because the gate and a direct `. scripts/settings-render.sh`
+# source this file without one - and the retired bare name must never appear in output.
+__preflight_caller_name="${__preflight_caller_name:-preflight-code}"
 
 # The rendered path is PER RUN: `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`. Two runs sharing one config
 # dir therefore never touch the same file, so no lock is needed - and a lock was the wrong shape anyway,
@@ -191,7 +191,7 @@ import copy, json, os, re, sys
 
 # The command that sourced this file (`preflight-code` or `preflight-pr`); every message below names
 # it, because a refusal has to identify the command the operator actually ran.
-PROG = sys.argv[5] if len(sys.argv) > 5 else "preflight"
+PROG = sys.argv[5] if len(sys.argv) > 5 else "preflight-code"
 
 try:
     import tomllib

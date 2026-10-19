@@ -205,7 +205,7 @@ fails.
 | `install` | `install.sh` deploys into a throwaway prefix, is idempotent, and never clobbers `settings.toml` or `providers.toml` |
 | `config` | The generated config parses, the completeness keys are set and the keys left off are absent, and the gate template is inert |
 | `models` | The `settings.toml`/`providers.toml` templates are inert, the renderer derives the endpoint, the key and the transport pin together, and it refuses a chain spanning two providers |
-| `envhelp` | Every `PREFLIGHT_*` the helper reads is in `--help`, no `--help` entry is unread, and an internal variable is not advertised as a setting |
+| `envhelp` | Every `PREFLIGHT_*` the helper reads is in `--help`, no `--help` entry is unread, an internal variable is not advertised as a setting, and the shared resolver's default caller name is the installed command |
 | `version` | `src/VERSION`, the CHANGELOG's released heading for it, and `--version` agree |
 | `gateshapes` | `preflight-gate` survives the JSON shapes the model really produces |
 | `coverage` | The coverage marker matches pr-agent's footer and ignores prose |

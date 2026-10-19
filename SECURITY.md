@@ -17,7 +17,7 @@ committer's own work.
 That framing decides what counts as a vulnerability here, so it is stated plainly rather than implied:
 
 - **The commit hook is not a boundary against a hostile repository.** It is bypassed by design with
-  `git commit --no-verify` or `PREFLIGHT_SKIP=1`, and a committed `.preflight-gate.toml` may relax
+  `git commit --no-verify` or `PREFLIGHT_SKIP=1`, and a committed `.preflight.toml` may relax
   enforcement without the operator setting anything. Both are accepted: the hook exists to catch *your own*
   unreviewed commit, not to stop someone who already has write access to the repository. Do not deploy it
   as a control that gates untrusted contributors.

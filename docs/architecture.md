@@ -373,12 +373,14 @@ There is deliberately **no sampling pin**, and it is inert anyway: `config.tempe
 
 ## The gate
 
-`preflight-gate` is a small, dependency-free check over `review.json`:
+`preflight-gate` is a small check over `review.json`. It needs `python3` for the TOML policy and
+`git rev-parse --show-toplevel` (with a cwd fallback) to find the repository's `.preflight.toml` wherever it
+is invoked from:
 
 | Exit | Meaning |
 |---|---|
 | 0 | pass |
-| 1 | `merge_recommendation = changes_required` (only when the model was asked for the field - see below), or a key issue on non-documentation |
+| 1 | a key issue on non-documentation |
 | 2 | security concerns present |
 | 3 | no review found |
 
@@ -390,11 +392,14 @@ else, including a finding with no file, is **blocking**. The path is normalised 
 (real payloads carry a trailing newline in `relevant_file`, and a naive `endswith('.md')` would classify
 those as code).
 
-The merge rule is the one exit the shipped configuration does not exercise: `preflight-gate` reads
-`review.merge_recommendation` and fails on `changes_required` whenever the field is present, but whether
-it is present is pr-agent's `require_merge_recommendation`, which gates the field in the schema the model
-is sent. The bundle leaves that off, so a default install reports `merge=n/a` and the rule cannot fire -
-which is why the summary line prints it as `n/a` rather than as a verdict nobody made.
+The gate decides on `security_concerns` and blocking findings, and on nothing else. `risk_level` and
+`estimated_effort_to_review` are **reported** - `preflight-gate` prints them and `preflight review` repeats
+them - but no verdict depends on them; `merge_recommendation` is reported on `preflight`'s summary line
+only, because the gate has no field to print it from. `risk_level` measured unstable across
+identical content (the figures are in [`measurements.md`](measurements.md)), and a gate that fails a commit
+on an unstable value is a loop that re-runs a full model call to get a different answer rather than a
+different change. `merge_recommendation` is conditional on `require_merge_recommendation`, which the bundle
+leaves off, so it is usually absent and always `n/a` - a rule on it could not fire.
 
 A finding's tier is always printed, and it is kept consistent with the verdict: with `doc_blocks` a
 promoted finding prints `[blocking]`, and with `allow_issues` a waived one prints `[waived]` and is
@@ -418,10 +423,11 @@ as documentation, not an ordinary code finding.
 
 ## The gate's policy file
 
-Every gate tunable has a built-in default, so the gate needs no config to run. It is read from two
-optional TOML files - `$PREFLIGHT_HOME/gate.toml` (machine-wide), then `./.preflight-gate.toml` (repo,
-overriding) - and the `PREFLIGHT_GATE_*` environment variables override both, so a one-off invocation
-needs no edit. Keys: `doc_suffixes` (list), `doc_blocks`, `allow_issues` (bools), `max_effort` (int).
+Every gate tunable has a built-in default, so the gate needs no config to run. It is read from a `[gate]`
+table in two optional TOML files - `$PREFLIGHT_HOME/settings.toml` (machine-wide), then `.preflight.toml`
+at the repository root (repo, overriding) - and the `PREFLIGHT_GATE_*` environment variables override
+both, so a one-off invocation needs no edit. The table is stripped from the rendered config: pr-agent reads
+nothing from it. Keys: `doc_suffixes` (list), `doc_blocks`, `allow_issues` (bools).
 
 **One rule, one place.** A value that is present but invalid is *reported* and the value already in
 force is *kept*. Every key names only how to validate its own value; the warning, the fallback and the
@@ -434,17 +440,17 @@ cannot mask a valid one from the home file.
 
 | Situation | What happens |
 |---|---|
-| A value that is present but invalid - `doc_blocks = "ture"`, `max_effort = inf`/`3.5`/`true`, a non-numeric env override, or a boolean given as a number other than the `0`/`1` mirror | warns, naming the key and the reason, and keeps the value already in force. The `0`/`1` restriction matters: "any non-zero number is true" would let `allow_issues = 2` disable the key-issue check, which is the unsafe direction |
+| A value that is present but invalid - `doc_blocks = "ture"`, a non-string suffix, or a boolean given as a number other than the `0`/`1` mirror | warns, naming the key and the reason, and keeps the value already in force. The `0`/`1` restriction matters: "any non-zero number is true" would let `allow_issues = 2` disable the key-issue check, which is the unsafe direction |
 | A suffix entry | validated against one WHITELISTED shape - a leading dot and a few name characters - rather than a list of rejected cases. A dotless `"txt"` is normalised to `.txt` (matching it raw would also match `notes.baktxt`, and the normalisation is reported); a path fragment, `.`, an empty string, or a non-string entry is invalid, and the previous list stands. The whitelist is the point: a blacklist of rejected inputs is unbounded, and every one of these was a bug found in turn |
 | An unknown key | warns; a typo'd key name is how a policy looks configured while doing nothing |
 | A key that is absent | nothing to say: the built-in default, or the value already in force, stands |
 | A malformed (unparseable) config file | warns and falls back. A crash is a non-zero exit, which the commit hook reads as "the review did not pass" |
 | A config file that is present but unreadable | warns and falls back; only an *absent* file is silent |
 | A `tomllib`-less interpreter (Python < 3.11) | no file is read; a present file warns, because a hard dependency would leave the gate unable to run, and it fails closed |
-| The repo-local filename | `.preflight-gate.toml`, not `.preflight/gate.toml` - pr-agent owns `.preflight/` via `--output`/`--json-output` |
-| The trust boundary | a committed `.preflight-gate.toml` can relax enforcement (`allow_issues`, wider `doc_suffixes`) without the operator setting anything. That is accepted, not overlooked: the hook is a local pre-commit check on the committer's own work, and a committer who wants to skip it already has `git commit --no-verify` / `PREFLIGHT_SKIP=1`. It is not a boundary against a hostile repository, and it should not be relied on as one |
+| The repo-local filename | `.preflight.toml` at the repository root, not under `.preflight/` - pr-agent owns that directory via `--output`/`--json-output`. The same file carries the repository's review overrides, so one committed file holds every setting a repo can change |
+| The trust boundary | a committed `.preflight.toml` can relax enforcement (`allow_issues`, wider `doc_suffixes`) without the operator setting anything. That is accepted, not overlooked: the hook is a local pre-commit check on the committer's own work, and a committer who wants to skip it already has `git commit --no-verify` / `PREFLIGHT_SKIP=1`. It is not a boundary against a hostile repository, and it should not be relied on as one |
 
-Because the tier and the effort ceiling are what decide a verdict, the config file is not cosmetic: a
+Because the tier and the key-issue opt-out are what decide a verdict, the config file is not cosmetic: a
 policy that silently failed to load would leave a repo believing its rules were in force. `REQ-HOOK-39`
 pins the precedence in both directions and the rule above, driven from a table: one row per key, with
 the two wrong behaviours - dropping the key to a hardcoded default, or applying the invalid value -
@@ -457,7 +463,7 @@ and the gate can never disagree about what counts as a pass.
 ## Reviewer context: the `Code review` section of AGENTS.md
 
 A reviewer cannot tell a deliberate, documented trade-off from an oversight, so it reports the
-trade-off - the `.preflight-gate.toml` directory trust boundary has been raised as a finding several
+trade-off - the `.preflight.toml` trust boundary has been raised as a finding several
 times, and each time the answer was the same. The fix is to hand the reviewer the repository's own
 facts, and AGENTS.md is where they go: it is the convention most coding tools read and pr-agent's own
 default `repo_context_files` entry, so no team maintains a second file.
@@ -498,7 +504,7 @@ context channel that can silence findings is a trust boundary in disguise. And i
 **working tree**, not the base branch, which is the opposite of what pr-agent and Codacy do with their
 config files; they read from the default branch so a change cannot edit its own reviewer instructions.
 That is deliberate here: this is a local pre-commit harness, the file is committed and therefore part of
-the diff under review, and it is repo-controlled in exactly the way `.preflight-gate.toml` is - not a
+the diff under review, and it is repo-controlled in exactly the way `.preflight.toml` is - not a
 boundary against an untrusted repository.
 
 **What it does not fix.** Missing facts are only one cause of a wrong finding. A model that misreads
@@ -575,9 +581,9 @@ chunked branch), so the footer arrives whether or not the diff was split.
 
 The other fields the bundle leaves off are in the same family, because asking for a field changes the
 schema the model is sent. `require_merge_recommendation` gates `merge_recommendation` in pr-agent's reviewer
-prompt, so `preflight-gate`'s `FAIL merge_recommendation=changes_required` rule has nothing to read while it
-is off - the gate's `merge=` field reports `n/a`. What the gate decides on regardless is `security_concerns`,
-the key-issue count and effort.
+prompt, and the bundle leaves it off, so a review carries no merge recommendation to read. `preflight`'s
+summary line therefore reports `merge=n/a`, and the gate never decides on it: what it decides on is
+`security_concerns` and the blocking key-issue count.
 
 Whatever is left uncovered after that is reported rather than hidden. pr-agent appends a coverage footer
 to `review.md`, and `preflight` repeats it on the summary line as `coverage=PARTIAL ...`. That line exists

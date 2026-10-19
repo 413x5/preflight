@@ -194,6 +194,30 @@ repository, and overwrites it before every run. Nothing about this is per-run bo
 install with no assignment in `settings.toml` refuses rather than reviewing: there is no fallback config, so
 a file that assigns no profile has no model at all.
 
+### Per-repository settings, and the gate's policy
+
+A repository may override any review setting in **one** committed file at its root, `.preflight.toml`. The
+merge is by section, then by key: what the file sets wins, and everything it does not mention stays as the
+machine's `settings.toml` had it.
+
+```toml
+# .preflight.toml - committed with the repository
+[pr_reviewer]
+num_max_findings = 16
+
+[gate]                     # the same table, so the gate's policy travels with the repo too
+doc_blocks = true
+```
+
+`[profiles.*]`, `[providers.*]` and `[selection]` are **refused** there. Each names a model and, through it,
+a credential entry, and a committed file that chose one would decide, on every machine that clones the
+repository, which key a review spends. The models stay machine-local in `settings.toml`/`providers.toml`;
+the repository overrides what the review *does* and what the gate decides.
+
+The gate reads only its `[gate]` table, from `settings.toml` and then `.preflight.toml`; `preflight-gate
+--help` lists the keys, and the `PREFLIGHT_GATE_*` environment variables override both. The renderer strips
+`[gate]` from the config pr-agent receives, since pr-agent reads nothing from it.
+
 `transport` is optional and defaults to `openai` — the OpenAI-compatible transport, which does not mean the
 provider is OpenAI. Set it to name a different one (`anthropic`, `gemini`, …) where the endpoint is not
 OpenAI-compatible; only `openai`, `openrouter`, `moonshot`, `ollama`, `huggingface` and `databricks` read an
@@ -210,7 +234,7 @@ that no `[providers.*]` table defines rather than letting pr-agent fall back to 
 ```sh
 cd /any/repo
 preflight review       # -> .preflight/review.md + .preflight/review.json
-preflight-gate         # exit 0 = pass; 1 = changes required/issues; 2 = security concerns; 3 = no review
+preflight-gate         # exit 0 = pass; 1 = key issues; 2 = security concerns; 3 = no review
 preflight describe     # or: preflight improve ; preflight ask "<question>"
 preflight --help       # every command and environment variable
 preflight --version    # the installed bundle version
@@ -299,7 +323,8 @@ Use the **relative** hooks path - an absolute one breaks git worktrees. See
 
 - `~/.local/bin/{preflight,preflight-pr,preflight-gate}` — the helpers.
 - `~/.config/preflight/VERSION` — the installed bundle version (`preflight --version` reads it).
-- `~/.config/preflight/{gate.toml,settings-render.sh,AGENTS-review-snippet.md,preflight-hook}` — helpers (`gate.toml` is created only if missing).
+- `~/.config/preflight/{settings-render.sh,AGENTS-review-snippet.md,preflight-hook}` — helpers and the shipped snippet.
+- `~/.config/preflight/settings.toml.example` also carries the gate's policy as a commented `[gate]` table: one file for everything preflight can be told, and the renderer strips the table before pr-agent sees it.
 - `~/.config/preflight/{settings,providers}.toml.example` — the two reference files, 600-mode for the one that shows where the key goes. `install.sh` never creates `settings.toml` or `providers.toml`: they are yours, created by copying the references, and a reinstall leaves them alone (tightening `providers.toml` to 600 if it finds it looser).
 - `~/.config/preflight/githooks/{pre-commit,post-commit}` — the example hooks to copy into a repo's `.githooks/`.
 

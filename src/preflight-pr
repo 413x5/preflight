@@ -52,7 +52,10 @@ if [ -z "$mprof" ]; then
   exit 2
 fi
 . "$mprof"
-__preflight_render_settings "$cfgdir" || exit $?
+# The repository whose `.preflight.toml` may override the machine settings. `preflight-pr` is invoked from
+# the checkout it posts about, so its own root is the right scope.
+pr_root="$(git rev-parse --show-toplevel 2>/dev/null)" || pr_root=''
+__preflight_render_settings "$cfgdir" "$pr_root" || exit $?
 rendered_cfg="$PREFLIGHT_RENDERED_CONFIG"
 
 # pr-agent is run as a child rather than `exec`d, so this process stays alive to reap it and to remove the

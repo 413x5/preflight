@@ -6,8 +6,7 @@ and no commit required:
 
 ```sh
 preflight review   # the pending change (HEAD -> working tree) -> .preflight/review.md + .preflight/review.json
-preflight-gate     # exit 0 = pass, 1 = changes required, key issues, or effort above the ceiling,
-                   #          2 = security concerns, 3 = no review yet
+preflight-gate     # exit 0 = pass, 1 = key issues, 2 = security concerns, 3 = no review yet
 ```
 
 `preflight --help` lists every command and environment variable; `preflight --version` reports the
@@ -62,7 +61,8 @@ for it.
 - `.preflight/review.md` - prose.
 - `.preflight/review.json` - structured: `review.key_issues_to_review[]`, `review.security_concerns`,
   `review.relevant_tests`, `review.estimated_effort_to_review_[1-5]`, `review.risk_level`,
-  `review.merge_recommendation`.
+  `review.merge_recommendation`. The three last are informational: the gate decides on security concerns
+  and blocking key issues.
 
 Loop until `preflight-gate` exits 0: fix every entry in `key_issues_to_review[]` and anything under
 `security_concerns` in one pass, then re-run `preflight review` and `preflight-gate`.
@@ -81,9 +81,8 @@ What matters on the summary line is the loop's exit conditions:
   normally is. Raise `config.max_output_tokens` if you see it on an install that does not set it - see
   `docs/runbooks/troubleshooting.md` rather than re-running.
 
-`risk=` is reported but the gate never decides on it; the gate fails on security concerns,
-key issues, effort above `PREFLIGHT_GATE_MAX_EFFORT`, or - when the repository asks for it with
-`require_merge_recommendation` - `merge_recommendation=changes_required`.
+`risk=`, `merge=` and `effort=` are reported but the gate never decides on them; it fails on security
+concerns and on blocking key issues.
 
 ### Optimising the review process
 

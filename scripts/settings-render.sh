@@ -84,6 +84,13 @@ __preflight_refuse_in_repo_config() {
 __preflight_render_settings() {
   local cfgdir="${1:-${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}}"
   local settings="$cfgdir/settings.toml" out rc=0
+  # The repository whose `.preflight.toml` may override the machine settings. Passed by the caller, never
+  # guessed here: `preflight` has already resolved the reviewed repository's root, and this function is
+  # also called with fixtures that must not pick up the checkout's own file.
+  local repo_root="${2:-}" repo_override=''
+  if [ -n "$repo_root" ]; then
+    repo_override="$repo_root/.preflight.toml"
+  fi
 
   # No settings.toml means no model, and there is no other config to fall back to.
   if [ ! -f "$settings" ]; then
@@ -170,7 +177,10 @@ __preflight_render_settings() {
   # else is a REFUSAL the caller propagates. There is no third status: a file that assigns no profile is a
   # refusal like any other (there is no fallback config to review with), so a caller only has to check
   # "non-zero means stop" and never has to tell two kinds of success apart.
-  if ! python3 - "$settings" "$cfgdir/providers.toml" "$out" <<'PY'
+  # The repository's own override file, resolved at the repository root so a review started from a
+  # subdirectory finds the same file the commit does. Empty outside a repository, where there is nothing
+  # to override.
+  if ! python3 - "$settings" "$cfgdir/providers.toml" "$out" "$repo_override" <<'PY'
 import copy, json, os, re, sys
 
 try:
@@ -183,6 +193,7 @@ except ModuleNotFoundError:
     sys.exit(2)
 
 settings_path, providers_path, out_path = sys.argv[1:4]
+repo_path = sys.argv[4] if len(sys.argv) > 4 else ""
 
 # transport -> (section pr-agent reads, key name inside it, whether it reads the endpoint from config).
 # Generated from pr-agent's own PROVIDER_SETTING_PATHS. A transport pr-agent does not read would take the
@@ -255,6 +266,10 @@ DERIVED_LITELLM_KEYS = (
 # without being written into pr-agent's own section and read as settings it does not have.
 SELECTION_SECTION = "selection"
 SELECTION_KEYS = ("main", "fallback")
+# The gate's policy, read by `preflight-gate` rather than by pr-agent: the section is stripped from the
+# rendered config, because writing it there would look configured and do nothing. It lives in the same
+# file so a repository has ONE file for everything preflight can be told.
+GATE_SECTION = "gate"
 # Written by the render from the assignment, so a value here would be a second answer.
 ASSIGNMENT_KEYS = ("model", "fallback_models")
 
@@ -319,8 +334,46 @@ def load(path, label):
     return data
 
 
-# ------------------------------------------------------------------ settings.toml
+# ------------------------------------------------------------------ settings.toml + .preflight.toml
 data = load(settings_path, "settings.toml")
+
+# A repository may override any setting in ONE committed file, `.preflight.toml` (the name avoids
+# `.preflight/`, which pr-agent owns through `--output`/`--json-output`). The merge is by SECTION, then by
+# KEY: a repo that sets [pr_reviewer] num_max_findings keeps every other [pr_reviewer] value from
+# settings.toml, so an override says one thing and not a copy of the whole review. `[profiles.*]` and
+# `[providers.*]` and `[selection]` are refused there: naming a provider, directly or through a profile
+# assignment, is choosing which machine credential a review spends, and a repository does not do that.
+if repo_path and os.path.exists(repo_path):
+    repo_data = load(repo_path, ".preflight.toml")
+    for key in sorted(repo_data):
+        if not isinstance(repo_data[key], dict):
+            refuse(f".preflight.toml '{key}' is not a table",
+                   "every section of .preflight.toml is a [table] of settings")
+    # `[selection]` is refused with them: naming a profile is how a model - and therefore a provider and
+    # its key - is chosen, so a committed file that assigned one would decide which credential a review
+    # spends on every machine that clones the repository. It is the same hazard as naming a provider
+    # directly, one indirection away.
+    for _stray in ("providers", "profiles", SELECTION_SECTION):
+        if _stray in repo_data:
+            refuse(f".preflight.toml defines [{_stray}], which a repository cannot override",
+                   "the profiles, the providers and the assignment decide a model and a credential entry,",
+                   "and a committed file choosing one would spend that key on every machine that clones it",
+                   "override review settings and the [gate] policy here; keep the models in "
+                   "settings.toml/providers.toml")
+    for section, values in repo_data.items():
+        base = data.get(section)
+        if base is None:
+            data[section] = copy.deepcopy(values)
+        elif isinstance(base, dict):
+            # A deep merge: a nested table (a provider's litellm quirk, a future nested setting) is
+            # overridden key by key too, so a repo changing one callback keeps its siblings.
+            for key, value in values.items():
+                if isinstance(base.get(key), dict) and isinstance(value, dict):
+                    base[key].update(copy.deepcopy(value))
+                else:
+                    base[key] = copy.deepcopy(value)
+        else:
+            data[section] = copy.deepcopy(values)
 
 # Every top-level section is a table (a scalar at the top level is a TOML mistake, not a setting).
 for key in sorted(data):
@@ -623,6 +676,9 @@ if not main_name:
 # belongs. `copy.deepcopy` handles every type the parser can produce.
 rendered = copy.deepcopy(data)
 rendered.pop(SELECTION_SECTION, None)
+# The gate's policy is preflight's, not pr-agent's: leaving it in would be a section pr-agent reads nothing
+# from, which is the "looks configured, does nothing" shape refused everywhere else in this file.
+rendered.pop(GATE_SECTION, None)
 
 config = rendered.setdefault("config", {})
 if not isinstance(config, dict):

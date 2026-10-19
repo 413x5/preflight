@@ -110,7 +110,8 @@ Config:  <dir>/settings.toml + <dir>/providers.toml, where <dir> is PREFLIGHT_HO
          (any OpenAI-compatible endpoint; see README "Using a different endpoint")
          <dir>/settings.toml names model configurations; <dir>/providers.toml holds the
          endpoints and keys they name. When one is assigned, `preflight` renders both
-         into the config pr-agent reads. See README "More than one endpoint".
+         into the config pr-agent reads. A repository may override review and [gate]
+         settings in its own ./.preflight.toml. See README "Per-repository settings, and the gate's policy".
 Loop:    preflight review && preflight-gate   (exit 0 = pass)
          preflight-gate --help                for the gate's exits and options
 Docs:    https://github.com/413x5/preflight
@@ -433,7 +434,7 @@ fi
 # A missing settings.toml means there is no model and no review, and the renderer prints that refusal: it
 # is the one place that knows which of the two files is absent, so the wording cannot drift between here
 # and the sibling helper.
-__preflight_render_settings "$cfgdir" || exit $?
+__preflight_render_settings "$cfgdir" "${root:-}" || exit $?
 rendered_cfg="$PREFLIGHT_RENDERED_CONFIG"
 
 case "$cmd" in
@@ -470,7 +471,7 @@ fi
 # Codacy do with `.pr_agent.toml`, which they read from the default branch so a PR cannot edit its own
 # reviewer instructions. This is a local pre-commit harness: the file is committed, so it is part of
 # the diff under review and a change to it is reviewable. Repo-controlled in the same way
-# `.preflight-gate.toml` is, and not a boundary against an untrusted repository.
+# `.preflight.toml` is, and not a boundary against an untrusted repository.
 context_note='none'
 if [ "$cmd" = 'review' ] || [ "$cmd" = 'review_pr' ]; then
   # Relative to the repository root, because the helper cd's there (`root=` / `cd "$root"`) before any
@@ -611,10 +612,11 @@ issues = _raw_issues if isinstance(_raw_issues, list) else []
 # preflight-gate's own `as_text`, including the boolean case - `security_concerns: true` is common enough
 # that the gate has a dedicated guard for it.
 #
-# `merge_recommendation` is one of the four things preflight-gate fails on (effort, security,
-# merge_recommendation, issues); making it visible here means `preflight review` can no longer report a
-# review the gate would then refuse. `risk_level` is reported but NOT enforced - the gate reads it only
-# to print it, so `risk=low` alongside real findings passes regardless. See docs/roadmap.md.
+# `merge_recommendation` and `risk_level` are REPORTED and never enforced: the gate decides on security
+# concerns and blocking findings. `risk_level` measured unstable across identical content (see
+# docs/measurements.md), and `merge_recommendation` is conditional on a key the bundle leaves off, so it
+# is usually absent. They stay on the line because they tell a reader what the model thought, not because
+# a verdict depends on them.
 def as_text(value):
     if value is None:
         return ''

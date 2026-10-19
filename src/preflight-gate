@@ -3,10 +3,9 @@
 #
 #   preflight-gate [path-to-review.json]   (default: ${PREFLIGHT_DIR:-.preflight}/review.json)
 #
-# Exit: 0 = pass | 1 = changes required / key issues | 2 = security concerns | 3 = no review
-# Config:  $PREFLIGHT_HOME/gate.toml, then ./.preflight-gate.toml (repo-local, overrides it)
-# Env:  PREFLIGHT_GATE_ALLOW_ISSUES=1  ignore key issues (security/merge-rec still apply)
-#       PREFLIGHT_GATE_MAX_EFFORT=N    fail when estimated_effort_to_review exceeds N
+# Exit: 0 = pass | 1 = key issues | 2 = security concerns | 3 = no review
+# Config:  [gate] in $PREFLIGHT_HOME/settings.toml, then [gate] in ./.preflight.toml (repo, overrides)
+# Env:  PREFLIGHT_GATE_ALLOW_ISSUES=1  ignore key issues (security still applies)
 #       PREFLIGHT_GATE_DOC_BLOCKS=1    count documentation findings as blocking (default: advisory)
 set -euo pipefail
 json="${1:-${PREFLIGHT_DIR:-.preflight}/review.json}"
@@ -21,30 +20,31 @@ preflight-gate — machine check over the latest review (default .preflight/revi
 Usage:  preflight-gate [review.json]
 
 Exit:   0  pass
-        1  changes required, or key issues present
+        1  key issues present
         2  security concerns present
         3  no review yet (run 'preflight review' first)
 
 Environment:
-  PREFLIGHT_GATE_ALLOW_ISSUES=1   ignore key issues (security and merge_recommendation still fail).
-                                  Waived findings are labelled `[waived]` and counted, so a PASS they
-                                  produced is not mistaken for a review with nothing to say
-  PREFLIGHT_GATE_MAX_EFFORT=N     fail when estimated_effort_to_review exceeds N
+  PREFLIGHT_GATE_ALLOW_ISSUES=1   ignore key issues (security concerns still fail). Waived findings are
+                                  labelled `[waived]` and counted, so a PASS they produced is not
+                                  mistaken for a review with nothing to say
   PREFLIGHT_GATE_DOC_BLOCKS=1     count findings on documentation as blocking
 
 Configuration:
-  Optional, and every key has a built-in default. Two TOML files are read, the later overriding the
-  earlier, and the environment variables above override both:
+  Optional, and every key has a built-in default. Two files are read, the later overriding the
+  earlier, and the environment variables above override both. The keys live in a [gate] table, so
+  one file carries both the review's settings and the gate's policy:
 
-    $PREFLIGHT_HOME/gate.toml    machine-wide (default ~/.config/preflight/gate.toml)
-    ./.preflight-gate.toml       repo-local, for policy that differs per repository
+    $PREFLIGHT_HOME/settings.toml   machine-wide (default ~/.config/preflight/settings.toml)
+    <repo>/.preflight.toml          repo-local (at the repository root), for policy that differs
+                                    per repository; the same file carries the review's own overrides
 
-  Keys: doc_suffixes (list), doc_blocks (bool), allow_issues (bool), max_effort (int).
+  Keys: doc_suffixes (list), doc_blocks (bool), allow_issues (bool).
 
 Findings on a documentation file (`.md`, `.markdown`, `.rst`, `.adoc` by default - see
 `doc_suffixes`) are ADVISORY by default: they are printed and counted, but they do not fail the gate,
-so a typo in a README does not fail the gate on its own (merge_recommendation and security_concerns
-still fail regardless). Any other path - including code under `docs/`, or a `requirements.txt` - blocks.
+so a typo in a README does not fail the gate on its own (security concerns still fail regardless). Any
+other path - including code under `docs/`, or a `requirements.txt` - blocks.
 EOF
     exit 0 ;;
 esac
@@ -76,14 +76,31 @@ DEFAULTS = {
     'doc_suffixes': ('.md', '.markdown', '.rst', '.adoc'),
     'doc_blocks': False,
     'allow_issues': False,
-    'max_effort': None,
 }
 
+def _repo_local():
+    # The repository's file is resolved at its ROOT, so the gate finds the same file whether it is run
+    # from the root or a subdirectory - and `preflight review` already runs it from the root. Outside a
+    # repository there is nothing to override, and the cwd is the honest fallback.
+    try:
+        import subprocess
+        top = subprocess.run(['git', 'rev-parse', '--show-toplevel'],
+                             capture_output=True, text=True, timeout=10)
+        root = top.stdout.strip()
+    except Exception:
+        root = ''
+    return os.path.join(root or '.', '.preflight.toml')
+
 def _config_files():
-    home = os.path.join(os.environ.get('PREFLIGHT_HOME') or os.path.expanduser('~/.config/preflight'), 'gate.toml')
-    # The repo-local file is deliberately NOT `.preflight/gate.toml`: pr-agent owns the `.preflight`
-    # directory through `--output`/`--json-output`.
-    return [home, '.preflight-gate.toml']
+    home = os.environ.get('PREFLIGHT_HOME') or os.path.expanduser('~/.config/preflight')
+    # The gate's keys live in a [gate] table of the SAME files the review reads, so a repository carries
+    # one `.preflight.toml` and the machine one `settings.toml`. The repo-local file is deliberately NOT
+    # under `.preflight/`: pr-agent owns that directory through `--output`/`--json-output`.
+    return [os.path.join(home, 'settings.toml'), _repo_local()]
+
+def _retired_files():
+    home = os.environ.get('PREFLIGHT_HOME') or os.path.expanduser('~/.config/preflight')
+    return [os.path.join(home, 'gate.toml'), os.path.join(os.path.dirname(_repo_local()), '.preflight-gate.toml')]
 
 def _warn(message):
     print(f'preflight-gate: warning: {message}', file=sys.stderr)
@@ -108,20 +125,6 @@ def _validate_bool(value):
     if isinstance(value, str) and value.strip().lower() in ('1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'):
         return value.strip().lower() in ('1', 'true', 'yes', 'on'), None
     return _INVALID, 'not a boolean'
-
-def _validate_int(value):
-    # A bool is not an integer here even though `int(True)` is 1: `max_effort = true` would otherwise
-    # install a ceiling of 1 and fail every review over it. OverflowError covers `inf`/`1e999`, a TOML
-    # float that `int()` refuses; a non-integral float is rejected rather than truncated.
-    if isinstance(value, bool):
-        return _INVALID, 'not an integer'
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return _INVALID, 'not an integer'
-    if isinstance(value, float) and value != parsed:
-        return _INVALID, 'not an integer'
-    return parsed, None
 
 # A suffix must be a string, and the RESULT must look like one extension. This is a whitelist, not a
 # list of rejected cases: anything that does not match is invalid, which is what makes the domain
@@ -163,7 +166,6 @@ _VALIDATORS = {
     'doc_suffixes': _validate_suffixes,
     'doc_blocks': _validate_bool,
     'allow_issues': _validate_bool,
-    'max_effort': _validate_int,
 }
 
 def _apply(cfg, key, source, value):
@@ -206,17 +208,51 @@ def _read_file(cfg, path):
         # not pass" - so the previous values stay in force and the file is reported.
         _warn(f'ignoring unparseable config {path}')
         return
-    _merge(cfg, path, loaded)
+    # Only [gate] is the gate's policy. The rest of the file is the review's configuration, which the
+    # renderer reads and this process must not: a [pr_reviewer] key is not a typo, and reporting it as an
+    # unknown gate key would train the reader to ignore this warning.
+    if not isinstance(loaded, dict):
+        _warn(f'ignoring config {path}: no table at the top level')
+        return
+    section = loaded.get('gate')
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        _warn(f'ignoring [gate] in {path}: it is not a table')
+        return
+    _merge(cfg, path, section)
+
+def _read_retired():
+    # The files this policy lived in before it moved into a [gate] table. A present one is NOT read - its
+    # keys are in the wrong place now - but silence over one that SETS keys would leave a policy looking in
+    # force while the built-in defaults decided the verdicts, so it is reported by name. An inert file
+    # parses to `{}` and stays quiet: that is exactly what the old install wrote, and nothing was lost.
+    for path in _retired_files():
+        if not os.path.exists(path):
+            continue
+        if tomllib is None:
+            _warn(f'{path} is no longer read: the gate keys live in a [gate] table of settings.toml/.preflight.toml')
+            continue
+        try:
+            with open(path, 'rb') as fh:
+                loaded = tomllib.load(fh)
+        except Exception:
+            _warn(f'{path} is no longer read, and could not be parsed: move its keys into a [gate] table '
+                  'of settings.toml (machine-wide) or .preflight.toml (this repository)')
+            continue
+        if loaded:
+            _warn(f'{path} sets keys that are no longer read: move them into a [gate] table '
+                  'of settings.toml (machine-wide) or .preflight.toml (this repository)')
 
 def load_policy():
     cfg = dict(DEFAULTS)
+    _read_retired()
     for path in _config_files():
         _read_file(cfg, path)
     # The environment is applied last, through the same validator, so a one-off override cannot behave
     # differently from the file value it replaces.
     for key, var in (('allow_issues', 'PREFLIGHT_GATE_ALLOW_ISSUES'),
-                     ('doc_blocks', 'PREFLIGHT_GATE_DOC_BLOCKS'),
-                     ('max_effort', 'PREFLIGHT_GATE_MAX_EFFORT')):
+                     ('doc_blocks', 'PREFLIGHT_GATE_DOC_BLOCKS')):
         if os.environ.get(var):
             _apply(cfg, key, var, os.environ[var])
     return cfg
@@ -267,7 +303,6 @@ else:
     r = {}
 eff = r.get('estimated_effort_to_review_[1-5]')
 risk = as_text(r.get('risk_level'))
-rec = as_text(r.get('merge_recommendation'))
 tests = as_text(r.get('relevant_tests'))
 issues = r.get('key_issues_to_review')
 # The last field without a guard, and the one this file's whole stance is about: a truthy non-list
@@ -314,7 +349,7 @@ n_blocking = tiers.count('blocking')
 n_advisory = tiers.count('advisory')
 n_waived = tiers.count('waived')
 
-line = (f"preflight-gate: effort={eff} risk={risk or 'n/a'} merge={rec or 'n/a'} tests={tests or 'n/a'}"
+line = (f"preflight-gate: effort={eff} risk={risk or 'n/a'} tests={tests or 'n/a'}"
         f" issues={len(issues)}")
 if n_advisory or n_waived:
     line += f" blocking={n_blocking} advisory={n_advisory} waived={n_waived}"
@@ -325,22 +360,15 @@ for it, tier in zip(issues, tiers):
         print(f"preflight-gate:   - {as_text(it.get('relevant_file'))}: {as_text(it.get('issue_header'))} [{tier}]")
     else:
         print(f"preflight-gate:   - {as_text(it)} [{tier}]")
-# Effort can arrive as an int, a float or a numeric string; anything else is simply not comparable, so
-# the clamp is skipped rather than crashing the gate. OverflowError is in the tuple because JSON has
-# no infinity: a literal like 1e999 (or a 400-digit integer) parses to a non-finite float, and
-# `int(float('inf'))` raises OverflowError, not ValueError - which would be an uncaught traceback, the
-# very failure class this file works to avoid.
-try:
-    eff_n = int(float(eff))
-except (TypeError, ValueError, OverflowError):
-    eff_n = None
-me = POLICY['max_effort']
-if me is not None and eff_n is not None and eff_n > me:
-    print(f"preflight-gate: FAIL effort {eff_n} > {me}"); sys.exit(1)
+# Effort is REPORTED, never enforced: it is the model's own estimate, and a ceiling on it decided
+# verdicts from a number the review did not have to be right about. Security and blocking findings are
+# the properties the gate decides on.
+#
+# The merge recommendation is not read either: pr-agent emits it only when the repository asks
+# `require_merge_recommendation`, which the bundle leaves off, so a rule on it would have nothing to read
+# in a default install.
 if not is_no(sec):
     print('preflight-gate: FAIL security concerns present'); sys.exit(2)
-if rec.lower() == 'changes_required':
-    print('preflight-gate: FAIL merge_recommendation=changes_required'); sys.exit(1)
 if issues and n_blocking and not POLICY['allow_issues']:
     print('preflight-gate: FAIL key issues present'); sys.exit(1)
 if n_advisory:

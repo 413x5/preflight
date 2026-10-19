@@ -137,7 +137,7 @@ stage_syntax() {
   # invisible. The hooks and the tests are POSIX sh - they may run where only sh exists.
   local rc=0 f
   for f in install.sh uninstall.sh \
-           src/preflight src/preflight-pr src/preflight-gate scripts/verify scripts/release scripts/settings-render.sh
+           src/preflight-code src/preflight-pr src/preflight-gate scripts/verify scripts/release scripts/settings-render.sh
   do
     bash -n "$f" || { echo "bash syntax: FAIL $f" >&2; rc=1; }
   done
@@ -145,6 +145,12 @@ stage_syntax() {
   do
     sh -n "$f" || { echo "sh syntax: FAIL $f" >&2; rc=1; }
   done
+  # A backup left by an in-place edit is a second copy of a shipped script that nothing parses, nothing
+  # runs, and grep still matches - so it drifts from the file it copies while looking like part of it.
+  # Checked in the directories that hold shipped code, where a stray file is never intended.
+  local stray
+  stray="$(find src scripts config -type f \( -name '*.bak' -o -name '*.orig' -o -name '*~' \) 2>/dev/null)"
+  [ -z "$stray" ] || { echo "stray editor/backup files in the tree:" >&2; printf '  %s\n' $stray >&2; rc=1; }
   [ "$rc" = 0 ] && echo "all scripts parse"
   return "$rc"
 }
@@ -158,7 +164,7 @@ stage_install() {
   PREFLIGHT_SKIP_TOOL_INSTALL=1 \
     ./install.sh || rc=1
   local f
-  for f in preflight preflight-pr preflight-gate; do
+  for f in preflight-code preflight-pr preflight-gate; do
     [ -x "$tmp/bin/$f" ] || { echo "installer did not install $f" >&2; rc=1; }
   done
   for f in preflight-hook VERSION settings-render.sh settings.toml.example providers.toml.example; do
@@ -237,8 +243,64 @@ stage_install() {
     && { echo "installer tells a configured user to copy settings.toml.example over their settings.toml" >&2; rc=1; }
   rm -f "$tmp/cfg/settings.toml" "$tmp/cfg/providers.toml"
 
+  # The retired `preflight` command shares its name with an unrelated project, so the installer must tell
+  # OUR old helper from someone else's binary. Both directions, because either one alone is satisfiable by
+  # a wrong implementation: a blind delete passes the stale case and destroys the other project's tool,
+  # while never looking passes the foreign case and leaves a command that no longer matches this bundle.
+  printf '#!/bin/sh\n# a different preflight\n' > "$tmp/bin/preflight"
+  chmod +x "$tmp/bin/preflight"
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+    ./install.sh >"$tmp/foreign.out" 2>&1 || rc=1
+  grep -q 'belongs to another project' "$tmp/foreign.out" \
+    || { echo "installer does not say a foreign preflight was left alone" >&2; rc=1; }
+  grep -q 'stale helper from the old name' "$tmp/foreign.out" \
+    && { echo "installer called another project's preflight a stale helper" >&2; rc=1; }
+  [ -f "$tmp/bin/preflight" ] \
+    || { echo "installer deleted a preflight binary that was not ours" >&2; rc=1; }
+  # Our own old helper carries the marker on line 2 of every release that shipped it.
+  printf '#!/usr/bin/env bash\n# preflight — local PR-style review of the pending change (or, optionally, the whole branch).\n' \
+    > "$tmp/bin/preflight"
+  PREFLIGHT_HOME="$tmp/cfg" PREFLIGHT_BIN_DIR="$tmp/bin" PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+    ./install.sh >"$tmp/ours.out" 2>&1 || rc=1
+  grep -q 'stale helper from the old name' "$tmp/ours.out" \
+    || { echo "installer does not report this bundle's own retired preflight helper" >&2; rc=1; }
+  # A fresh prefix, checked WITHOUT clearing it first: the assertion is that installing creates no
+  # `preflight`, and a `rm` beforehand would satisfy it whether or not the installer wrote one. This is the
+  # whole point of the rename, so it is asserted against the directory rather than around a deletion.
+  mkdir -p "$tmp/fresh/bin" "$tmp/fresh/cfg"
+  PREFLIGHT_HOME="$tmp/fresh/cfg" PREFLIGHT_BIN_DIR="$tmp/fresh/bin" PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+    ./install.sh >/dev/null 2>&1 || rc=1
+  [ ! -e "$tmp/fresh/bin/preflight" ] \
+    || { echo "installer installed a preflight command; the name is retired" >&2; rc=1; }
+  [ -x "$tmp/fresh/bin/preflight-code" ] \
+    || { echo "installer did not install preflight-code" >&2; rc=1; }
 
-  # The pr-agent pin is load-bearing: `preflight` matches the exact wording of pr-agent's own coverage
+  # uninstall.sh performs the same one dangerous deletion, and it has no other coverage. Both directions
+  # again: it must remove this bundle's own retired helper and must leave another project's binary alone.
+  # A SEPARATE prefix, because the runs above configured this one and uninstall.sh removes the config dir.
+  # HOME is redirected too: uninstall.sh's pre-rename cleanup removes `$HOME/.config/pr-agent`, and running
+  # the gate must never delete a config dir - or the key in it - on the machine running the tests.
+  mkdir -p "$tmp/u/home" "$tmp/u/bin" "$tmp/u/cfg"
+  printf '#!/usr/bin/env bash\n# preflight — local PR-style review of the pending change (or, optionally, the whole branch).\n' \
+    > "$tmp/u/bin/preflight"
+  chmod +x "$tmp/u/bin/preflight"
+  HOME="$tmp/u/home" PREFLIGHT_HOME="$tmp/u/cfg" PREFLIGHT_BIN_DIR="$tmp/u/bin" PREFLIGHT_REMOVE_TOOL=0 \
+    ./uninstall.sh >"$tmp/u/ours.out" 2>&1 || rc=1
+  [ ! -e "$tmp/u/bin/preflight" ] \
+    || { echo "uninstaller left this bundle's own retired preflight helper behind" >&2; rc=1; }
+  mkdir -p "$tmp/u/bin" "$tmp/u/cfg"
+  printf '\177ELF not-a-script\n' > "$tmp/u/bin/preflight"
+  chmod +x "$tmp/u/bin/preflight"
+  HOME="$tmp/u/home" PREFLIGHT_HOME="$tmp/u/cfg" PREFLIGHT_BIN_DIR="$tmp/u/bin" PREFLIGHT_REMOVE_TOOL=0 \
+    ./uninstall.sh >"$tmp/u/foreign.out" 2>&1 || rc=1
+  [ -f "$tmp/u/bin/preflight" ] \
+    || { echo "uninstaller deleted a preflight binary that was not ours" >&2; rc=1; }
+  grep -q 'belongs to another project' "$tmp/u/foreign.out" \
+    || { echo "uninstaller does not say a foreign preflight was kept" >&2; rc=1; }
+
+
+
+  # The pr-agent pin is load-bearing: `preflight-code` matches the exact wording of pr-agent's own coverage
   # footer, so an unpinned install can silently stop reporting coverage=PARTIAL. Anchor on the
   # `uv tool install` COMMAND at line start - the pin string also appears in the `say` echo above it, so
   # matching the bare string would pass with the install unpinned.
@@ -480,7 +542,7 @@ for _path in (sys.argv[1], sys.argv[2]):
     _found = set(re.findall(r"__[A-Z_]+__", open(_path, encoding="utf-8").read()))
     assert not _found, f"{_path} carries placeholders nothing substitutes: {sorted(_found)}"
 
-# The repository's own config pair must stay untracked: providers.toml holds a real key, and `preflight`
+# The repository's own config pair must stay untracked: providers.toml holds a real key, and `preflight-code`
 # snapshots the working tree with `git add -A`, so a rule that quietly disappeared would put the key into a
 # review AND into a commit. Asserted here rather than only described in the CHANGELOG, because the diff a
 # reviewer sees does not include an unchanged .gitignore - which is how this was twice reported as missing.
@@ -940,18 +1002,18 @@ PY
 }
 
 stage_envhelp() {
-  # `preflight --help` is the only place a user discovers the environment variables, so a var the helper
+  # `preflight-code --help` is the only place a user discovers the environment variables, so a var the helper
   # reads but the help never mentions is one nobody finds - and a var the help names but nothing reads is
   # advice that does nothing. Both directions are checked, against the code itself rather than a list.
   local rc=0
-  python3 - src/preflight <<'PY' || rc=1
+  python3 - src/preflight-code <<'PY' || rc=1
 import re, sys
 
 src = open(sys.argv[1], encoding="utf-8").read()
 
 usage = re.search(r"cat <<'EOF'\n(.*?)\nEOF", src, re.S)
 if not usage:
-    sys.exit("cannot find the usage heredoc in src/preflight; update this guard")
+    sys.exit("cannot find the usage heredoc in src/preflight-code; update this guard")
 helped = set(re.findall(r"PREFLIGHT_[A-Z_]+", usage.group(1)))
 
 # Every PREFLIGHT_* the file READS, across the whole script.
@@ -959,7 +1021,7 @@ read = set(re.findall(r"\$\{?(PREFLIGHT_[A-Z_]+)", src))
 
 # INTERNAL names are the helper-to-helper channel, not settings - they must NOT be advertised.
 INTERNAL = {"PREFLIGHT_RENDERED_CONFIG"}
-# Read by a DIFFERENT helper in the bundle, and documented here because `preflight --help` is the bundle's
+# Read by a DIFFERENT helper in the bundle, and documented here because `preflight-code --help` is the bundle's
 # one help page - the hook has no `--help` of its own. Checked against that file so the claim stays true.
 DELEGATED = {"PREFLIGHT_SKIP": "src/preflight-hook"}
 should_be_helped = read - INTERNAL
@@ -974,9 +1036,9 @@ for name, owner in DELEGATED.items():
     if name not in owner_src:
         sys.exit(f"{name} is documented as {owner}'s, but {owner} does not read it")
 if missing:
-    print("src/preflight reads these and --help never mentions them: " + ", ".join(missing))
+    print("src/preflight-code reads these and --help never mentions them: " + ", ".join(missing))
 if advertised_but_unread:
-    print("--help names these but src/preflight never reads them: " + ", ".join(advertised_but_unread))
+    print("--help names these but src/preflight-code never reads them: " + ", ".join(advertised_but_unread))
 if missing or advertised_but_unread:
     sys.exit(2)
 if INTERNAL & helped:
@@ -997,11 +1059,31 @@ if dangling:
     sys.exit("help cites README sections that do not exist: " + ", ".join(dangling))
 print(f"help documents all {len(should_be_helped)} settings the helper reads, and no others")
 PY
+  # The resolver is sourced by the helpers, by the gate and by a bare `. scripts/settings-render.sh` in a
+  # test, so its DEFAULT caller name is what a direct source prints. The retired bare command must never be
+  # that default: it would label a refusal with a command the bundle does not install.
+  python3 - scripts/settings-render.sh <<'PY' || rc=1
+import re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+shell_default = re.search(r'__preflight_caller_name="\$\{__preflight_caller_name:-([^}]*)\}"', src)
+python_default = re.search(r'PROG = sys\.argv\[5\] if len\(sys\.argv\) > 5 else "([^"]*)"', src)
+fails = []
+for label, m in (("shell", shell_default), ("python", python_default)):
+    if not m:
+        fails.append(f"the {label} fallback for the caller name is gone; update this guard")
+    elif m.group(1) in ("preflight", ""):
+        fails.append(f"the {label} fallback is '{m.group(1)}', which names the retired command")
+    elif m.group(1) != "preflight-code":
+        fails.append(f"the {label} fallback is '{m.group(1)}', not the installed command")
+if fails:
+    sys.exit("; ".join(fails))
+print("a direct source of the resolver names preflight-code, not the retired command")
+PY
   return "$rc"
 }
 
 stage_version() {
-  # `preflight --version` and install.sh both read src/VERSION, so an installed copy can say what it is.
+  # `preflight-code --version` and install.sh both read src/VERSION, so an installed copy can say what it is.
   # Three things have to agree or the number is a lie: the file, the CHANGELOG's released heading for it,
   # and the help text's promise that -V reports it.
   #
@@ -1016,8 +1098,8 @@ stage_version() {
   esac
   grep -q "^## \[$v\]" CHANGELOG.md \
     || { echo "CHANGELOG.md has no released '## [$v]' heading" >&2; rc=1; }
-  ./src/preflight --version | grep -q "$v" \
-    || { echo "'preflight --version' does not report $v" >&2; rc=1; }
+  ./src/preflight-code --version | grep -q "$v" \
+    || { echo "'preflight-code --version' does not report $v" >&2; rc=1; }
   [ "$rc" = 0 ] && echo "version $v is consistent"
   return "$rc"
 }
@@ -1107,7 +1189,7 @@ stage_gateshapes() {
   if ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight PREFLIGHT_GATE_DOC_BLOCKS=1 bash "$gate" ) >/dev/null 2>&1; then
     echo "PREFLIGHT_GATE_DOC_BLOCKS=1 did not make a documentation finding block" >&2; rc=1
   fi
-  put '{"review":{"key_issues_to_review":[{"relevant_file":"src/preflight\n","issue_header":"bug","issue_content":"c"}],"security_concerns":"No"}}'
+  put '{"review":{"key_issues_to_review":[{"relevant_file":"src/preflight-code\n","issue_header":"bug","issue_content":"c"}],"security_concerns":"No"}}'
   if ( cd "$d" && PREFLIGHT_HOME="$d/home" PREFLIGHT_DIR=.preflight bash "$gate" ) >/dev/null 2>&1; then
     echo "a code finding passed the gate (the doc tier must not cover code)" >&2; rc=1
   fi
@@ -1118,7 +1200,7 @@ stage_gateshapes() {
 }
 
 stage_coverage() {
-  # `preflight` decides whether a review covered the whole diff by matching pr-agent's coverage footer in
+  # `preflight-code` decides whether a review covered the whole diff by matching pr-agent's coverage footer in
   # review.md. That file is model-generated prose, and a finding may discuss coverage - a review of this
   # very feature did, repeatedly. Text matching alone loses: the model can reproduce the footer's words
   # while explaining them. What the shipped check keys on is the footer AS pr-agent EMITS it - a
@@ -1137,10 +1219,10 @@ stage_coverage() {
   python3 - <<'PY'
 import re, subprocess, sys, tempfile, os
 
-src = open("src/preflight", encoding="utf-8").read()
+src = open("src/preflight-code", encoding="utf-8").read()
 blocks = re.findall(r"python3 - \"\$out_json\" \"\$out_md\" <<'PY'[^\n]*\n(.*?)\nPY\n", src, re.S)
 if not blocks:
-    sys.exit("cannot find the summary-line block in src/preflight; update this guard")
+    sys.exit("cannot find the summary-line block in src/preflight-code; update this guard")
 d = tempfile.mkdtemp()
 json_path = os.path.join(d, "review.json")
 open(json_path, "w").write('{"review":{"key_issues_to_review":[]}}')

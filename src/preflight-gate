@@ -22,7 +22,7 @@ Usage:  preflight-gate [review.json]
 Exit:   0  pass
         1  key issues present
         2  security concerns present
-        3  no review yet (run 'preflight review' first)
+        3  no review yet (run 'preflight-code review' first)
 
 Environment:
   PREFLIGHT_GATE_ALLOW_ISSUES=1   ignore key issues (security concerns still fail). Waived findings are
@@ -49,7 +49,7 @@ EOF
     exit 0 ;;
 esac
 
-if [ ! -f "$json" ]; then echo "preflight-gate: no review at $json (run 'preflight review' first)" >&2; exit 3; fi
+if [ ! -f "$json" ]; then echo "preflight-gate: no review at $json (run 'preflight-code review' first)" >&2; exit 3; fi
 python3 - "$json" <<'PY'
 import json, os, re, sys
 
@@ -80,7 +80,7 @@ DEFAULTS = {
 
 def _repo_local():
     # The repository's file is resolved at its ROOT, so the gate finds the same file whether it is run
-    # from the root or a subdirectory - and `preflight review` already runs it from the root. Outside a
+    # from the root or a subdirectory - and `preflight-code review` already runs it from the root. Outside a
     # repository there is nothing to override, and the cwd is the honest fallback.
     try:
         import subprocess
@@ -261,7 +261,7 @@ def load_policy():
 
 # The review is model output, so each field's JSON type is whatever the model chose. Coerce every
 # field to text: a crash here is not a neutral failure - the hook reads any non-zero exit as "did not
-# pass" and `preflight review` records it as the sidecar verdict, so a type quirk becomes a blocked
+# pass" and `preflight-code review` records it as the sidecar verdict, so a type quirk becomes a blocked
 # commit for a clean review.
 def as_text(v):
     if v is None:

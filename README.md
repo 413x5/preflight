@@ -11,7 +11,7 @@ install.
 
 | Command | What it does |
 |---|---|
-| `preflight review` | Reviews the **pending commit** — `HEAD` → working tree, untracked files included; writes `.preflight/review.md` + `.preflight/review.json` |
+| `preflight-code review` | Reviews the **pending commit** — `HEAD` → working tree, untracked files included; writes `.preflight/review.md` + `.preflight/review.json` |
 | `preflight-gate` | Machine check over `review.json` (exit 0 = pass) |
 | `preflight-pr …` | PR-Agent with the global config (hosted/PR mode, needs a token) |
 
@@ -38,7 +38,7 @@ one.
 - [`uv`](https://astral.sh/uv) — installs PR-Agent in an isolated venv:
   `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Python 3.13 (the installer's default; `PREFLIGHT_PY` overrides it, and uv can fetch one) for PR-Agent,
-  **and a `python3` 3.11+ on `PATH`** - `preflight` reads `settings.toml` with the standard library's
+  **and a `python3` 3.11+ on `PATH`** - `preflight-code` reads `settings.toml` with the standard library's
   `tomllib`, which entered it in 3.11. `install.sh` warns when the one it finds is older or absent.
 - Network access to an OpenAI-compatible endpoint of your own.
 
@@ -100,7 +100,7 @@ Two settings in a profile are worth knowing about:
   endpoint's own ceiling applies and a reasoning model can spend all of it thinking, returning truncated
   output pr-agent treats as a failed call.
 - **`stream = true`** on the *provider*, for an endpoint whose non-streaming reply LiteLLM cannot parse.
-  preflight forces streaming **for that provider's own host only**; every other endpoint gets an empty
+  preflight-code forces streaming **for that provider's own host only**; every other endpoint gets an empty
   pair, so the workaround never engages there.
 
 ### More than one endpoint
@@ -179,7 +179,7 @@ belongs in `settings.toml` when the value is the same for every model.
 
 One catch, reported rather than refused: because pr-agent holds one config per run, the assigned profile's
 budgets govern every model in the chain, including a fallback that answers. A fallback's own budgets
-therefore cannot take effect while it is a fallback — `preflight` warns when it sees them, and they apply
+therefore cannot take effect while it is a fallback — `preflight-code` warns when it sees them, and they apply
 the moment that profile is assigned as `main`.
 
 A profile name is a TOML key, and a bare key cannot contain a dot: `[profiles.v4.1-flash]` splits into a
@@ -189,7 +189,7 @@ table `v4` with a child `1-flash`. Name profiles without dots, or quote the name
 Switching endpoints is then one line — `main = "work"` — and the model id needs no provider prefix, because
 the provider is named on its own line instead of being spelled inside the id.
 
-Before each run, `preflight` renders those two files into **one** config for pr-agent, 600-mode, outside the
+Before each run, `preflight-code` renders those two files into **one** config for pr-agent, 600-mode, outside the
 repository, and overwrites it before every run. Nothing about this is per-run bookkeeping you have to do: an
 install with no assignment in `settings.toml` refuses rather than reviewing: there is no fallback config, so
 a file that assigns no profile has no model at all.
@@ -226,18 +226,18 @@ environment variable and carries only its key here.
 
 A run holds **one** endpoint, so `main` and its fallbacks must name the same provider: pr-agent pins one
 transport per process, and a chain spanning two would be answered by whichever one is pinned — a different
-host, with that provider's key. `preflight` refuses that instead, naming the provider, and refuses a `provider`
+host, with that provider's key. `preflight-code` refuses that instead, naming the provider, and refuses a `provider`
 that no `[providers.*]` table defines rather than letting pr-agent fall back to another section's host.
 
 ## Use
 
 ```sh
 cd /any/repo
-preflight review       # -> .preflight/review.md + .preflight/review.json
+preflight-code review  # -> .preflight/review.md + .preflight/review.json
 preflight-gate         # exit 0 = pass; 1 = key issues; 2 = security concerns; 3 = no review
-preflight describe     # or: preflight improve ; preflight ask "<question>"
-preflight --help       # every command and environment variable
-preflight --version    # the installed bundle version
+preflight-code describe # or: preflight-code improve ; preflight-code ask "<question>"
+preflight-code --help  # every command and environment variable
+preflight-code --version # the installed bundle version
 ```
 
 Those paths always hold the **latest** run. Each run that succeeds and produces output is also archived
@@ -250,7 +250,7 @@ The default scope is `commit`: the review diffs `HEAD` against the working tree,
 and needs no remote, no base and no fetch. `PREFLIGHT_SCOPE=worktree` reviews the
 whole branch instead (default branch → working tree); only that scope resolves a base, trying `origin/HEAD`,
 then the remote's own `HEAD`, then `origin/main|master`, then `main|master`. Set `PREFLIGHT_BASE=<ref>` to
-target something else (a release branch, a fork's trunk); if nothing resolves, `preflight` says so and exits 4
+target something else (a release branch, a fork's trunk); if nothing resolves, `preflight-code` says so and exits 4
 rather than guessing a ref that does not exist.
 
 One review is meant to report **everything** it was shown, so the loop converges instead of re-discovering
@@ -299,7 +299,7 @@ file was installed. Git **ignores a hook that is not executable** - it prints a 
 so a repo whose hooks lost that bit enforces nothing while looking fully installed. Confirm with
 `git ls-files -s .githooks/` (both lines must read `100755`).
 
-- It **verifies** that the content being committed is exactly what `preflight review` reviewed; an edit
+- It **verifies** that the content being committed is exactly what `preflight-code review` reviewed; an edit
   after the review, or a newly staged unreviewed file, blocks the commit and names the paths.
 - It is **content-based, not time-based** - a review counts only while it still covers what you commit.
 - It **never runs a review** and is **strictly read-only** (index, `HEAD` and working tree untouched).
@@ -307,7 +307,7 @@ so a repo whose hooks lost that bit enforces nothing while looking fully install
 - Deleting a reviewed file is blocked too (`git rm` included) - the review must cover the removal. A
   submodule gitlink counts as a reviewed entry like any other, so removing one is blocked as well.
 - Renaming a reviewed file (`git mv`) or swapping one for a symlink is blocked as well.
-- The first commit in a repo with no history is allowed but not enforced; `preflight review` needs `HEAD`.
+- The first commit in a repo with no history is allowed but not enforced; `preflight-code review` needs `HEAD`.
 - `PREFLIGHT_SCOPE=head` reviews cannot be enforced; the default `commit` scope can.
 - `post-commit` is advisory and cannot block: it warns when the last review used `head` scope (so no commit
   was actually verified), and when it cannot read the review sidecar at all - a missing `python3`, or a
@@ -321,8 +321,8 @@ Use the **relative** hooks path - an absolute one breaks git worktrees. See
 
 ## What install.sh writes
 
-- `~/.local/bin/{preflight,preflight-pr,preflight-gate}` — the helpers.
-- `~/.config/preflight/VERSION` — the installed bundle version (`preflight --version` reads it).
+- `~/.local/bin/{preflight-code,preflight-pr,preflight-gate}` — the helpers.
+- `~/.config/preflight/VERSION` — the installed bundle version (`preflight-code --version` reads it).
 - `~/.config/preflight/{settings-render.sh,AGENTS-review-snippet.md,preflight-hook}` — helpers and the shipped snippet.
 - `~/.config/preflight/settings.toml.example` also carries the gate's policy as a commented `[gate]` table: one file for everything preflight can be told, and the renderer strips the table before pr-agent sees it.
 - `~/.config/preflight/{settings,providers}.toml.example` — the two reference files, 600-mode for the one that shows where the key goes. `install.sh` never creates `settings.toml` or `providers.toml`: they are yours, created by copying the references, and a reinstall leaves them alone (tightening `providers.toml` to 600 if it finds it looser).
@@ -361,7 +361,7 @@ want to copy into `providers.toml`) and migrate it by hand.
 
 ## Notes
 
-- `preflight` adds `.preflight/` to each repo's `.git/info/exclude` automatically, so review output is never
+- `preflight-code` adds `.preflight/` to each repo's `.git/info/exclude` automatically, so review output is never
   committed.
 - Runs are append-only under `.preflight/runs/` and nothing deletes them; remove a directory to drop that
   run. The top-level `review.md`/`review.json`/`review.meta.json` stay as they are, because the commit

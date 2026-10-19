@@ -10,7 +10,7 @@
 #
 # Deliberate one-off bypasses: `git commit --no-verify`, or `PREFLIGHT_SKIP=1 git commit`.
 #
-# The helper is read-only: it verifies the content being committed against what `preflight review`
+# The helper is read-only: it verifies the content being committed against what `preflight-code review`
 # reviewed, and never runs a review, stages anything, or touches the index. See docs/architecture.md.
 set -u
 
@@ -20,9 +20,9 @@ set -u
 # for.
 helper="${PREFLIGHT_HOOK:-${HOME:-}/.config/preflight/preflight-hook}"
 if [ ! -x "$helper" ]; then
-  printf 'preflight: commit blocked: the preflight helper is missing (%s).\n' "$helper" >&2
-  printf "preflight: install the preflight bundle (its install.sh), then commit again.\n" >&2
-  printf "preflight: to bypass this one commit deliberately: git commit --no-verify\n" >&2
+  printf 'preflight-code: commit blocked: the preflight helper is missing (%s).\n' "$helper" >&2
+  printf "preflight-code: install the preflight bundle (its install.sh), then commit again.\n" >&2
+  printf "preflight-code: to bypass this one commit deliberately: git commit --no-verify\n" >&2
   exit 1
 fi
 

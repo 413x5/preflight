@@ -28,6 +28,12 @@
 # render was produced, which the caller treats as a refusal (settings.toml missing, or assigning no profile).
 PREFLIGHT_RENDERED_CONFIG=''
 
+# The command that sourced this file, for the messages below: the two helpers share this resolver, and a
+# refusal has to name the command the operator actually ran. Set by the caller before sourcing. The
+# fallback is the bundle's own command, because the gate and a direct `. scripts/settings-render.sh`
+# source this file without one - and the retired bare name must never appear in output.
+__preflight_caller_name="${__preflight_caller_name:-preflight-code}"
+
 # The rendered path is PER RUN: `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`. Two runs sharing one config
 # dir therefore never touch the same file, so no lock is needed - and a lock was the wrong shape anyway,
 # because it made correctness depend on every caller releasing it (the gate and a direct call to
@@ -63,17 +69,17 @@ __preflight_refuse_in_repo_config() {
     _prefix="$(git -C "$_abs" rev-parse --show-prefix 2>/dev/null)"
     _untracked="$(git -C "$_abs" ls-files -o --exclude-standard -- . 2>/dev/null | sed "s|^| $_prefix|")"
     if [ -n "$_untracked" ]; then
-      printf 'preflight: %s is inside the repository being reviewed, and these are not ignored there:%s\n' \
+      printf '%s: %s is inside the repository being reviewed, and these are not ignored there:%s\n' "$__preflight_caller_name" \
         "$cfgdir" "$_untracked" >&2
-      printf 'preflight: they carry the model configuration and the API key, and this review stages the\n' >&2
-      printf 'preflight: working tree - so they would be handed to the model. Ignore the whole directory\n' >&2
+      printf '%s: they carry the model configuration and the API key, and this review stages the\n' "$__preflight_caller_name" >&2
+      printf '%s: working tree - so they would be handed to the model. Ignore the whole directory\n' "$__preflight_caller_name" >&2
       if [ -n "$_prefix" ]; then
-        printf 'preflight: (%s), or move PREFLIGHT_HOME (default ~/.config/preflight) outside it\n' \
+        printf '%s: (%s), or move PREFLIGHT_HOME (default ~/.config/preflight) outside it\n' "$__preflight_caller_name" \
           "$_prefix" >&2
       else
-        printf 'preflight: - it is the repository root here, so no directory rule can cover it, and no\n' >&2
-        printf 'preflight: .gitignore rule names every file the directory may ever hold. Move\n' >&2
-        printf 'preflight: PREFLIGHT_HOME (default ~/.config/preflight) outside the repository\n' >&2
+        printf '%s: - it is the repository root here, so no directory rule can cover it, and no\n' "$__preflight_caller_name" >&2
+        printf '%s: .gitignore rule names every file the directory may ever hold. Move\n' "$__preflight_caller_name" >&2
+        printf '%s: PREFLIGHT_HOME (default ~/.config/preflight) outside the repository\n' "$__preflight_caller_name" >&2
       fi
       return 2
     fi
@@ -85,7 +91,7 @@ __preflight_render_settings() {
   local cfgdir="${1:-${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}}"
   local settings="$cfgdir/settings.toml" out rc=0
   # The repository whose `.preflight.toml` may override the machine settings. Passed by the caller, never
-  # guessed here: `preflight` has already resolved the reviewed repository's root, and this function is
+  # guessed here: `preflight-code` has already resolved the reviewed repository's root, and this function is
   # also called with fixtures that must not pick up the checkout's own file.
   local repo_root="${2:-}" repo_override=''
   if [ -n "$repo_root" ]; then
@@ -94,15 +100,15 @@ __preflight_render_settings() {
 
   # No settings.toml means no model, and there is no other config to fall back to.
   if [ ! -f "$settings" ]; then
-    printf 'preflight: %s was not found\n' "$settings" >&2
-    printf 'preflight: it names the profiles to review with, and %s defines them\n' "$cfgdir/providers.toml" >&2
-    printf 'preflight: create it from the example installed beside it:\n' >&2
-    printf 'preflight:   cp "%s/settings.toml.example"  "%s/settings.toml"\n' "$cfgdir" "$cfgdir" >&2
+    printf '%s: %s was not found\n' "$__preflight_caller_name" "$settings" >&2
+    printf '%s: it names the profiles to review with, and %s defines them\n' "$__preflight_caller_name" "$cfgdir/providers.toml" >&2
+    printf '%s: create it from the example installed beside it:\n' "$__preflight_caller_name" >&2
+    printf '%s:   cp "%s/settings.toml.example"  "%s/settings.toml"\n' "$__preflight_caller_name" "$cfgdir" "$cfgdir" >&2
     # Named only when it is also absent: copying it over an existing providers.toml would replace a keyed
     # file with the empty-key template, so this line is a remedy only in the state it applies to.
     if [ ! -f "$cfgdir/providers.toml" ]; then
-      printf 'preflight: %s is missing too, and nothing defines the profiles without it:\n' "$cfgdir/providers.toml" >&2
-      printf 'preflight:   cp "%s/providers.toml.example" "%s/providers.toml"   # then chmod 600\n' "$cfgdir" "$cfgdir" >&2
+      printf '%s: %s is missing too, and nothing defines the profiles without it:\n' "$__preflight_caller_name" "$cfgdir/providers.toml" >&2
+      printf '%s:   cp "%s/providers.toml.example" "%s/providers.toml"   # then chmod 600\n' "$__preflight_caller_name" "$cfgdir" "$cfgdir" >&2
     fi
     return 2
   fi
@@ -112,8 +118,8 @@ __preflight_render_settings() {
   # would review on some other model while the user's configuration sat there ignored, which is the
   # silent-wrong-model failure this whole resolver exists to prevent.
   if [ ! -r "$settings" ]; then
-    printf 'preflight: %s is present but cannot be read, so its assignment cannot be applied\n' "$settings" >&2
-    printf 'preflight: refusing to review with a model configuration that was not applied\n' >&2
+    printf '%s: %s is present but cannot be read, so its assignment cannot be applied\n' "$__preflight_caller_name" "$settings" >&2
+    printf '%s: refusing to review with a model configuration that was not applied\n' "$__preflight_caller_name" >&2
     return 2
   fi
 
@@ -126,16 +132,16 @@ __preflight_render_settings() {
   # one-directional - a line is "content" unless its first non-blank character is `#` - so a `#` inside a
   # quoted value can never make a real assignment look like a comment.
   if ! grep -qE '^[[:space:]]*[^[:space:]#]' "$settings"; then
-    printf 'preflight: %s assigns no model profile (every line is blank or a comment)\n' "$settings" >&2
-    printf 'preflight: set [%s] main to a [profiles.<name>] table in %s\n' \
+    printf '%s: %s assigns no model profile (every line is blank or a comment)\n' "$__preflight_caller_name" "$settings" >&2
+    printf '%s: set [%s] main to a [profiles.<name>] table in %s\n' "$__preflight_caller_name" \
       "selection" "$cfgdir/providers.toml" >&2
-    printf 'preflight: refusing to review on pr-agent default settings\n' >&2
+    printf '%s: refusing to review on pr-agent default settings\n' "$__preflight_caller_name" >&2
     return 2
   fi
 
   if ! command -v python3 >/dev/null 2>&1; then
-    printf 'preflight: %s is present, but python3 is not on PATH to read it\n' "$settings" >&2
-    printf 'preflight: refusing to review with a model configuration that was not applied\n' >&2
+    printf '%s: %s is present, but python3 is not on PATH to read it\n' "$__preflight_caller_name" "$settings" >&2
+    printf '%s: refusing to review with a model configuration that was not applied\n' "$__preflight_caller_name" >&2
     return 2
   fi
 
@@ -163,8 +169,8 @@ __preflight_render_settings() {
   # the old file had, and a file restored from a backup at 0644 is exactly the case that matters.
   rm -f "$out"
   if ! ( umask 077; : > "$out" ) 2>/dev/null; then
-    printf 'preflight: could not create %s to render the model configuration into\n' "$out" >&2
-    printf 'preflight: refusing to review with a model configuration that was not applied\n' >&2
+    printf '%s: could not create %s to render the model configuration into\n' "$__preflight_caller_name" "$out" >&2
+    printf '%s: refusing to review with a model configuration that was not applied\n' "$__preflight_caller_name" >&2
     return 2
   fi
   chmod 600 "$out" 2>/dev/null || true
@@ -180,15 +186,19 @@ __preflight_render_settings() {
   # The repository's own override file, resolved at the repository root so a review started from a
   # subdirectory finds the same file the commit does. Empty outside a repository, where there is nothing
   # to override.
-  if ! python3 - "$settings" "$cfgdir/providers.toml" "$out" "$repo_override" <<'PY'
+  if ! python3 - "$settings" "$cfgdir/providers.toml" "$out" "$repo_override" "$__preflight_caller_name" <<'PY'
 import copy, json, os, re, sys
+
+# The command that sourced this file (`preflight-code` or `preflight-pr`); every message below names
+# it, because a refusal has to identify the command the operator actually ran.
+PROG = sys.argv[5] if len(sys.argv) > 5 else "preflight-code"
 
 try:
     import tomllib
 except ModuleNotFoundError:
     sys.stderr.write(
-        "preflight: this python3 has no tomllib (Python 3.11+), so settings.toml cannot be read\n"
-        "preflight: refusing to review with a model configuration that was not applied\n"
+        f"{PROG}: this python3 has no tomllib (Python 3.11+), so settings.toml cannot be read\n"
+        f"{PROG}: refusing to review with a model configuration that was not applied\n"
     )
     sys.exit(2)
 
@@ -276,7 +286,7 @@ ASSIGNMENT_KEYS = ("model", "fallback_models")
 
 def refuse(*lines):
     for line in lines:
-        print(f"preflight: {line}", file=sys.stderr)
+        print(f"{PROG}: {line}", file=sys.stderr)
     sys.exit(2)
 
 
@@ -433,8 +443,8 @@ if os.path.exists(providers_path):
         try:
             os.chmod(providers_path, 0o600)
             sys.stderr.write(
-                f"preflight: warning: providers.toml was {oct(_mode)}, so its API key was readable by other "
-                f"users\npreflight: warning: it is now 600; set that mode yourself when you restore the file\n")
+                f"{PROG}: warning: providers.toml was {oct(_mode)}, so its API key was readable by other "
+                f"users\n{PROG}: warning: it is now 600; set that mode yourself when you restore the file\n")
         except OSError as _exc:
             refuse(f"providers.toml is mode {oct(_mode)}, readable by other users, and could not be tightened ({_exc})",
                    "it holds the API key, so refusing rather than rendering a credential that stays exposed")
@@ -556,11 +566,11 @@ for name in [n for n in fallback_names if supplier and n != supplier]:
     )
     if declared:
         print(
-            f"preflight: warning: [profiles.{name}] sets {', '.join(declared)}, but pr-agent holds one "
+            f"{PROG}: warning: [profiles.{name}] sets {', '.join(declared)}, but pr-agent holds one "
             f"config per run\n"
-            f"preflight: warning: so this run uses [profiles.{supplier}]'s values for every model, "
+            f"{PROG}: warning: so this run uses [profiles.{supplier}]'s values for every model, "
             f"including when '{name}' answers the\n"
-            f"preflight: warning: fallback. Assign '{name}' as [selection] main to review with its own "
+            f"{PROG}: warning: fallback. Assign '{name}' as [selection] main to review with its own "
             f"settings.",
             file=sys.stderr,
         )
@@ -826,7 +836,7 @@ if fallback_names:
 shown.append(f"provider={chosen_provider}")
 sections = len([k for k in rendered if isinstance(rendered[k], dict) and rendered[k]])
 tail = f" ({sections} sections)" if sections else ""
-print(f"preflight: settings: {' '.join(shown)}{tail}", file=sys.stderr)
+print(f"{PROG}: settings: {' '.join(shown)}{tail}", file=sys.stderr)
 PY
   then
     # The `if` around the invocation is what keeps this cleanup reachable: the helpers run under
@@ -840,7 +850,7 @@ PY
   # empty file, silently changing nothing. Checked here as well as inside the parser, because this is the
   # last point before the path is used.
   if [ ! -s "$out" ]; then
-    printf 'preflight: the rendered model configuration is empty; refusing to review with it\n' >&2
+    printf '%s: the rendered model configuration is empty; refusing to review with it\n' "$__preflight_caller_name" >&2
     rm -f "$out"
     return 2
   fi
@@ -851,7 +861,7 @@ PY
   case "$out" in
     *.toml) ;;
     *)
-      printf 'preflight: the rendered configuration is named %s, which pr-agent will not load (it skips non-.toml files)\n' "$out" >&2
+      printf '%s: the rendered configuration is named %s, which pr-agent will not load (it skips non-.toml files)\n' "$__preflight_caller_name" "$out" >&2
       rm -f "$out"
       return 2
       ;;
@@ -867,7 +877,7 @@ PY
     chmod 600 "$_latest" 2>/dev/null || true
   else
     rm -f "$_tmp_latest" 2>/dev/null
-    printf 'preflight: could not update %s (the run uses %s)\n' "$_latest" "$out" >&2
+    printf '%s: could not update %s (the run uses %s)\n' "$__preflight_caller_name" "$_latest" "$out" >&2
   fi
   PREFLIGHT_RENDERED_CONFIG="$out"
   return 0

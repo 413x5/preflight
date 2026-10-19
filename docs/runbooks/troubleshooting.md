@@ -3,7 +3,7 @@
 Symptoms we actually hit, and the fix. Every one applies to any OpenAI-compatible endpoint unless the
 heading says otherwise.
 
-## `preflight review` fails with a 401 / authentication error
+## `preflight-code review` fails with a 401 / authentication error
 
 The key is missing, or under the wrong provider. It belongs in `~/.config/preflight/providers.toml`, in
 the `[providers.<name>]` entry the assigned profile names, as `key = "..."` (the setting is **`key`, not
@@ -19,7 +19,7 @@ provider = "mine"                         # and settings.toml must name this pro
 model    = "your-model-id"
 ```
 
-Then check that `settings.toml`'s `[selection] main` names a profile that actually exists <!-- doc-path-ok: [selection] is preflight's own table, not a pr-agent section --> — `preflight`
+Then check that `settings.toml`'s `[selection] main` names a profile that actually exists <!-- doc-path-ok: [selection] is preflight's own table, not a pr-agent section --> — `preflight-code`
 refuses a provider no `[providers.*]` table defines, and a profile the assignment does not resolve, so a
 typo is reported by name instead of surfacing here as an authentication error.
 
@@ -43,7 +43,7 @@ The streaming workaround is opt-in per provider (`stream = true`), and its subst
 same provider's `api_base`, so switching endpoints switches it off automatically - there is nothing to
 delete.
 
-## `preflight review` fails with a model id the endpoint rejects
+## `preflight-code review` fails with a model id the endpoint rejects
 
 The **fallback** model can be the culprit even when the primary one looks fine. An endpoint may reject a
 bare OpenAI-style id outright - ids must be in `provider/model` form - with
@@ -74,13 +74,13 @@ omitted files. Treat that as "there may be more here" and do **not** read a low 
 partial review as "the change is nearly clean". Raise `config.max_model_tokens` / `custom_model_max_tokens`
 if you want the whole diff in a single call.
 
-## `preflight review` says the repository has no commits yet
+## `preflight-code review` says the repository has no commits yet
 
-`preflight` snapshots from `HEAD`, and an empty repo has none. Make one commit first.
+`preflight-code` snapshots from `HEAD`, and an empty repo has none. Make one commit first.
 
 ## The review includes my `.preflight/` output
 
-`preflight` adds `.preflight/` to the repo's `.git/info/exclude`. If you changed `PREFLIGHT_DIR`, the new dir is
+`preflight-code` adds `.preflight/` to the repo's `.git/info/exclude`. If you changed `PREFLIGHT_DIR`, the new dir is
 added on the next run. If you set `PREFLIGHT_DIR` to an absolute or escaping path, the exclude is skipped
 on purpose.
 
@@ -109,7 +109,7 @@ already knows, `custom_model_max_tokens = 0` lets LiteLLM declare the real windo
 
 ## A review is clean but the run was slow, and a different model answered
 
-Symptom: `preflight review` reports a low `issues=` count, takes far longer than usual, and finishing well
+Symptom: `preflight-code review` reports a low `issues=` count, takes far longer than usual, and finishing well
 over the token figure a review normally costs. It may also print nothing unusual at all - which is the
 point.
 
@@ -137,18 +137,18 @@ provider's, and re-running is reasonable. The measured ceiling that led to this 
 
 ## `git commit-tree` fails with a GPG error
 
-A global `commit.gpgsign = true` was applied to the synthetic snapshot commit. `preflight` passes
-`-c commit.gpgsign=false`; make sure you are running the bundled `preflight`, not a modified copy.
+A global `commit.gpgsign = true` was applied to the synthetic snapshot commit. `preflight-code` passes
+`-c commit.gpgsign=false`; make sure you are running the bundled `preflight-code`, not a modified copy.
 
 ## `git commit` says "commit blocked: no review found for this repo"
 
-The commit hook is doing its job: nothing has been reviewed yet. Run `preflight review`, fix what it
+The commit hook is doing its job: nothing has been reviewed yet. Run `preflight-code review`, fix what it
 finds, and commit again. The hook never runs the review for you - it only verifies one that already ran.
 
 ## `git commit` says "these paths changed after the review"
 
 You edited (or staged) content after the last review. The named paths are the ones being committed that
-the reviewer never saw. Re-run `preflight review` so the review covers the current content, then commit.
+the reviewer never saw. Re-run `preflight-code review` so the review covers the current content, then commit.
 
 This is the normal consequence of iterating: the review is bound to the exact content it covered, so any
 later edit invalidates it. It is not a bug and there is no time-based expiry to wait out.
@@ -171,11 +171,11 @@ are ignored - lives in a `[gate]` table in `$PREFLIGHT_HOME/settings.toml`; a re
 in its own `.preflight.toml`, and the `PREFLIGHT_GATE_*` variables still override both.
 
 If you disagree with a finding, opt out deliberately rather than defeating the hook. The recorded verdict
-comes from the gate and is written **only** by `preflight review`, so to turn it into a pass you must
+comes from the gate and is written **only** by `preflight-code review`, so to turn it into a pass you must
 re-run the review with the gate's opt-out exported:
 
 ```sh
-PREFLIGHT_GATE_ALLOW_ISSUES=1 preflight review
+PREFLIGHT_GATE_ALLOW_ISSUES=1 preflight-code review
 ```
 
 Running `preflight-gate` on its own only prints an exit code - it never rewrites
@@ -223,21 +223,21 @@ whichever checkout the path names, instead of its own. Use the relative form:
 git config core.hooksPath .githooks
 ```
 
-## `preflight review` says "cannot tell which branch to diff against" (exit 4)
+## `preflight-code review` says "cannot tell which branch to diff against" (exit 4)
 
 No candidate base resolved. That is deliberate rather than a fallback: diffing a branch that does not
 exist is a fatal git error, and the old code reduced the resulting empty review to a bare `main` guess
 that failed far from its cause. Name the base explicitly:
 
 ```sh
-PREFLIGHT_BASE=origin/develop preflight review
+PREFLIGHT_BASE=origin/develop preflight-code review
 ```
 
 If the repository has no remote at all, any local ref works (`PREFLIGHT_BASE=main`). If it does have one,
 `git fetch` first - the base is resolved from refs you actually have, and a branch that only exists on the
 remote is not one of them until it is fetched.
 
-## `preflight review` leaves `.preflight/` empty and every commit is blocked
+## `preflight-code review` leaves `.preflight/` empty and every commit is blocked
 
 The old symptom of the failure above: pr-agent never ran, so no `review.json` or `review.meta.json` was
 written, and the hook reports a missing sidecar as "no review found for this repo" - so *every* commit is
@@ -245,14 +245,14 @@ blocked, however small. Check the review command's own output for the real cause
 or a provider error) rather than the hook's message, which can only see that the artifacts are absent.
 Fixed in this version: an unresolvable base now fails with exit 4 before pr-agent is invoked.
 
-## `preflight --version` says "unknown"
+## `preflight-code --version` says "unknown"
 
 The helper could not find `src/VERSION` next to itself or in the config dir (`PREFLIGHT_HOME`, default
 `~/.config/preflight`). Re-run the bundle's `install.sh`. The version is used to answer "is this machine's
 bundle current?", so if it matters, re-install rather than guessing from file mtimes.
 
 
-## `preflight review` prints nothing more and never exits
+## `preflight-code review` prints nothing more and never exits
 
 **As of this version the helper handles this itself, so you should not have to.** It reports the counts
 from `.preflight/review.json` as soon as the artifact exists - before waiting for pr-agent - and if
@@ -302,7 +302,7 @@ itself the reason the fix above is a bound rather than a diagnosis.
    has **not** been confirmed to stop the hang; treat it as a lever to test, not a known fix. The model
    *request* is bounded separately by `config.ai_timeout` (default 120s), which does not cover this wait.
 
-## `preflight review` keeps printing "still running" and never writes a review
+## `preflight-code review` keeps printing "still running" and never writes a review
 
 **Symptom.** stderr repeats the note below at `PREFLIGHT_PROGRESS_EVERY` intervals (default 30s), and
 `.preflight/review.json` never appears:
@@ -335,7 +335,7 @@ that governs the credential.
 exists so the run announces itself while it waits, not so the wait can grow. `PREFLIGHT_PROGRESS_EVERY`
 controls only how often it speaks - set it to `0` to silence it, or leave it alone.
 
-## `preflight review` is slow, and the output looks tiny for it
+## `preflight-code review` is slow, and the output looks tiny for it
 
 Check the run-details footer in `.preflight/review.md`:
 

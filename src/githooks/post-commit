@@ -26,8 +26,8 @@ meta="$dir/review.meta.json"
 [ -f "$meta" ] || exit 0
 
 warn_unreadable() {
-  printf 'preflight: advisory: cannot read %s (%s), so this commit was NOT verified by the hook.\n' "$meta" "$1" >&2
-  printf "preflight: run 'preflight review' with the default scope to make the hook enforce commits.\n" >&2
+  printf 'preflight-code: advisory: cannot read %s (%s), so this commit was NOT verified by the hook.\n' "$meta" "$1" >&2
+  printf "preflight-code: run 'preflight-code review' with the default scope to make the hook enforce commits.\n" >&2
   exit 0
 }
 
@@ -52,6 +52,6 @@ case "$scope" in
   commit|worktree) exit 0 ;;
 esac
 
-printf 'preflight: advisory: the last review used scope=%s, so this commit was NOT verified by the hook.\n' "$scope" >&2
-printf "preflight: run 'preflight review' with the default scope to make the hook enforce commits.\n" >&2
+printf 'preflight-code: advisory: the last review used scope=%s, so this commit was NOT verified by the hook.\n' "$scope" >&2
+printf "preflight-code: run 'preflight-code review' with the default scope to make the hook enforce commits.\n" >&2
 exit 0

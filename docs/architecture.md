@@ -7,10 +7,10 @@ How the bundle works, and why each non-obvious decision was made.
 Review a change **before** it becomes a pull request, without a commit and without a GitHub round
 trip, and hand the findings back to whatever coding agent is editing the code.
 
-## `preflight` - reviewing the working tree
+## `preflight-code` - reviewing the working tree
 
 PR-Agent's plain-diff mode only sees what you hand it as a diff. To review *uncommitted* work,
-`preflight` builds a throwaway snapshot of the working tree:
+`preflight-code` builds a throwaway snapshot of the working tree:
 
 1. a temporary `GIT_INDEX_FILE` is pointed at a scratch file;
 2. `git read-tree HEAD` seeds it from `HEAD`;
@@ -38,7 +38,7 @@ resolution can. Reviewing commit by commit also *covers* a multi-commit branch c
 checks each commit against the tree that was reviewed for it, so the union of the per-commit reviews
 covers the branch, and content cannot reach it unreviewed.
 
-`preflight` also fetches `origin` first, so it never diffs a stale base. The base is the first of these
+`preflight-code` also fetches `origin` first, so it never diffs a stale base. The base is the first of these
 that resolves to a commit: `PREFLIGHT_BASE` (the explicit override), `origin/HEAD`, the remote's own
 `HEAD` (`git ls-remote --symref origin HEAD`, needed because a `--single-branch` clone and a hand-added
 remote never create the local `origin/HEAD` symref), then `origin/main`, `origin/master`, `main`,
@@ -104,7 +104,7 @@ Each run, `settings-render.sh` reads `settings.toml` and `providers.toml`, and w
 `--extra_config_url` points at. The pid in the name is what makes two runs sharing a config dir safe:
 neither can read the other's model, endpoint or key. The run deletes its own file from its `EXIT` trap,
 and a copy of the last one is left at `.pragent.settings.toml` so a run stays inspectable. It lives in the config dir, which is
-outside any repository by default, because `preflight` snapshots the working tree with `git add -A`; a
+outside any repository by default, because `preflight-code` snapshots the working tree with `git add -A`; a
 config dir inside one is accepted only when the **directory itself** is gitignored there. The unit is the
 directory rather than a list of known file names, because a backup or an editor copy of `providers.toml`
 holds the same key under a name no list can predict, and `git add -A` stages it the same. The renderer
@@ -181,18 +181,18 @@ repo commits into its own `.githooks/` and enables with `git config core.hooksPa
 
 ### It verifies; it does not review
 
-The hook **never runs `preflight review`**. It cannot: `pre-commit` runs *before* the commit exists, so a
+The hook **never runs `preflight-code review`**. It cannot: `pre-commit` runs *before* the commit exists, so a
 worktree-scope review would hash content that only *becomes* the commit, and a head-scope review hashes the
 *parent*. There is also no way to invoke a run and then return to grade it, and review flags change the
 result without changing any hash. So the hook only checks a review that already happened.
 
-It also never reads `preflight review`'s exit code as a verdict: in plain-diff mode `review` exits `0` even
+It also never reads `preflight-code review`'s exit code as a verdict: in plain-diff mode `review` exits `0` even
 when it finds 20 issues (it returns `1` only for a tool failure). The verdict comes from `preflight-gate`'s
-rules, which `preflight` records in `review.meta.json` at review time.
+rules, which `preflight-code` records in `review.meta.json` at review time.
 
 ### What it compares, and why content and not time
 
-`preflight review` snapshots the **worktree** (`read-tree HEAD` + `add -A` in a temporary index) and hands
+`preflight-code review` snapshots the **worktree** (`read-tree HEAD` + `add -A` in a temporary index) and hands
 that diff to the model. It records the tree of exactly that snapshot in `review.meta.json` as
 `reviewed_tree`, captured on the same temp index - so it is a true record of what the model saw, rather than
 a later recomputation.
@@ -286,7 +286,7 @@ passes normally - re-reviewing is the intended way to accept a removal.
 ### The first commit is not enforced
 
 A repository with no commits has nothing to protect: the commit being made *is* the initial content, and
-`preflight review` cannot run at all before a first commit exists (it needs `HEAD` to diff against, and
+`preflight-code review` cannot run at all before a first commit exists (it needs `HEAD` to diff against, and
 exits 3). Blocking there would deadlock adoption - the hook could never be installed before the commit
 that installs it. So with no `HEAD` the hook allows the commit and says it is not enforced.
 
@@ -299,7 +299,7 @@ and if they change nothing the recorded verdict was already `fail`.
 
 ### The run history, and why it is additive
 
-A run destroys its predecessor's output: `preflight` removes `review.json`/`review.md` before launching
+A run destroys its predecessor's output: `preflight-code` removes `review.json`/`review.md` before launching
 pr-agent, because phase 1 of the review wait polls for `review.json` and a stale file would make that wait
 return immediately with the **previous** run's counts. That removal is load-bearing, so the run it removes
 is preserved beside the fixed paths instead - each run is archived under `runs/<UTC start>-<pid>/`, with a
@@ -393,8 +393,8 @@ else, including a finding with no file, is **blocking**. The path is normalised 
 those as code).
 
 The gate decides on `security_concerns` and blocking findings, and on nothing else. `risk_level` and
-`estimated_effort_to_review` are **reported** - `preflight-gate` prints them and `preflight review` repeats
-them - but no verdict depends on them; `merge_recommendation` is reported on `preflight`'s summary line
+`estimated_effort_to_review` are **reported** - `preflight-gate` prints them and `preflight-code review` repeats
+them - but no verdict depends on them; `merge_recommendation` is reported on `preflight-code`'s summary line
 only, because the gate has no field to print it from. `risk_level` measured unstable across
 identical content (the figures are in [`measurements.md`](measurements.md)), and a gate that fails a commit
 on an unstable value is a loop that re-runs a full model call to get a different answer rather than a
@@ -457,7 +457,7 @@ the two wrong behaviours - dropping the key to a hardcoded default, or applying 
 chosen so that each row's exit code differs from both. A new key needs a row there rather than another
 bespoke assertion.
 
-`preflight review` runs the same check to record `gate.verdict` in `review.meta.json`, so the commit hook
+`preflight-code review` runs the same check to record `gate.verdict` in `review.meta.json`, so the commit hook
 and the gate can never disagree about what counts as a pass.
 
 ## Reviewer context: the `Code review` section of AGENTS.md
@@ -581,12 +581,12 @@ chunked branch), so the footer arrives whether or not the diff was split.
 
 The other fields the bundle leaves off are in the same family, because asking for a field changes the
 schema the model is sent. `require_merge_recommendation` gates `merge_recommendation` in pr-agent's reviewer
-prompt, and the bundle leaves it off, so a review carries no merge recommendation to read. `preflight`'s
+prompt, and the bundle leaves it off, so a review carries no merge recommendation to read. `preflight-code`'s
 summary line therefore reports `merge=n/a`, and the gate never decides on it: what it decides on is
 `security_concerns` and the blocking key-issue count.
 
 Whatever is left uncovered after that is reported rather than hidden. pr-agent appends a coverage footer
-to `review.md`, and `preflight` repeats it on the summary line as `coverage=PARTIAL ...`. That line exists
+to `review.md`, and `preflight-code` repeats it on the summary line as `coverage=PARTIAL ...`. That line exists
 because the summary is what an agent actually reads: `issues=1` on a partial review means "the other files
 were not looked at", not "the change is nearly clean". Silent partial coverage is the failure this whole
 section guards against - the same shape as the base-resolution and gate failures above, where an
@@ -640,7 +640,7 @@ then each entry in `fallback_models`, recording the winner in the run details - 
 `usage`). So the bundle reads the line pr-agent writes and repeats it on the summary line:
 
 ```
-preflight: issues=0 security=No risk=n/a merge=n/a effort=3 tokens=84055 model=FALLBACK (the configured model did not answer - see review.md)
+preflight-code: issues=0 security=No risk=n/a merge=n/a effort=3 tokens=84055 model=FALLBACK (the configured model did not answer - see review.md)
 ```
 
 This exists because the failure it reports is invisible in every other way. A review produced by the
@@ -677,7 +677,7 @@ compares its findings against the previous run's (saved before the artifacts are
 how many are new:
 
 ```
-preflight: issues=2 security=No risk=low merge=review carefully effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
+preflight-code: issues=2 security=No risk=low merge=review carefully effort=3 tokens=71791 new=0/2 (unchanged since the previous review: judge each, do not re-fix blind)
 ```
 
 `new=N/M` means N of the M findings were not in the previous review. Identity is the tuple pr-agent
@@ -713,12 +713,12 @@ signal is only as good as the reviewer's wording being stable - a provider whose
 gets less from it, which is why the identity key is the reviewer's own rather than a fuzzy match we
 invented.
 
-A related hazard, and the reason the loop must not be driven blindly: `preflight review` has been observed
+A related hazard, and the reason the loop must not be driven blindly: `preflight-code review` has been observed
 completing a review and writing its artifacts, then **never exiting** because pr-agent's post-run
 callback drain blocked on a stalled socket. The artifacts are complete and correct - only the exit hangs -
 so a scripted loop that waits for the process would stall forever.
 
-`preflight` handles that itself rather than leaving it to the reader. The review runs as a background job,
+`preflight-code` handles that itself rather than leaving it to the reader. The review runs as a background job,
 and the counts are read from `review.json` as soon as it exists - *before* waiting for pr-agent - so a hang
 cannot hide `issues=`/`new=`/`coverage=`, which is the signal the loop stops on. The wait is then split:
 `PREFLIGHT_SHUTDOWN_WAIT` (default 120s) bounds only the tail *after* the artifact was written, and when

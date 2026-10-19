@@ -9,7 +9,7 @@
 
 The commit hook's whole job is to refuse a commit whose content was never reviewed, so it needs a rule
 for "the content being committed is the content that was reviewed". The reviewed content is not the
-committed content: `preflight review` snapshots the **worktree**, and that snapshot includes untracked
+committed content: `preflight-code review` snapshots the **worktree**, and that snapshot includes untracked
 files, while a commit contains only what is staged. Any rule has to bridge that gap without either
 letting unreviewed content through or refusing an ordinary workflow.
 

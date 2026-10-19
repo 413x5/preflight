@@ -87,7 +87,7 @@ git update-index --chmod=+x .githooks/pre-commit .githooks/post-commit   # git I
 git config core.hooksPath .githooks
 
 git -c commit.gpgsign=false commit --allow-empty -m should-block   # no review -> blocked
-preflight review && preflight-gate                                  # must be a pass
+preflight-code review && preflight-gate                             # must be a pass
 git -c commit.gpgsign=false commit -m "feat: ok"                    # now accepted
 ```
 

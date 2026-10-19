@@ -23,7 +23,7 @@
 #   token/temperature/       properties of a MODEL - two models have different windows and habits, which
 #   thinking settings        is what profiles exist for. They go in providers.toml, under
 #                            [profiles.<name>.config], beside the model they describe.
-#   git_provider, publish_*  hosted-PR settings. `preflight review` runs plain-diff mode from your working
+#   git_provider, publish_*  hosted-PR settings. `preflight-code review` runs plain-diff mode from your working
 #   reaction_*, ignore_pr_*  tree and posts nothing, so these do nothing here. (preflight-pr does post;
 #                            its keys are pr-agent's own and documented there.)
 #

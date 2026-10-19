@@ -28,7 +28,7 @@ scripts="$here/scripts"
 cfg="${PREFLIGHT_HOME:-$HOME/.config/preflight}"
 bindir="${PREFLIGHT_BIN_DIR:-$HOME/.local/bin}"
 py="${PREFLIGHT_PY:-3.13}"
-# Pinned, because `preflight` reads pr-agent's own output structure: the coverage marker matches the
+# Pinned, because `preflight-code` reads pr-agent's own output structure: the coverage marker matches the
 # exact wording of pr-agent's "files were not included" footer, so an unpinned upgrade can stop
 # coverage=PARTIAL from printing - a silently partial review, the failure this bundle exists to prevent.
 # Override to test a new release; the gate asserts this pin (scripts/verify, the `install` stage).
@@ -43,12 +43,12 @@ command -v git >/dev/null 2>&1 || { say "install: 'git' is required"; exit 1; }
 # install that succeeds and then refuses every review. A warning, not a hard stop: the bundle's other
 # helpers run on an older interpreter, so this only affects the model configuration.
 if ! command -v python3 >/dev/null 2>&1; then
-  say "!! python3 is not on PATH - 'preflight review' needs it (3.11+) to read settings.toml"
+  say "!! python3 is not on PATH - 'preflight-code review' needs it (3.11+) to read settings.toml"
 elif ! python3 -c 'import tomllib' >/dev/null 2>&1; then
-  say "!! this python3 ($(python3 -V 2>&1 | cut -d' ' -f2)) has no tomllib - 'preflight review' needs 3.11+"
+  say "!! this python3 ($(python3 -V 2>&1 | cut -d' ' -f2)) has no tomllib - 'preflight-code review' needs 3.11+"
   # NOT PREFLIGHT_PY: that pins the interpreter uv installs pr-agent into, while the helper invokes
   # whatever `python3` is on PATH - so suggesting it here would send the user down a path that cannot work.
-  say "   put a python3 3.11 or newer first on PATH (this is the interpreter 'preflight' runs, not PREFLIGHT_PY)"
+  say "   put a python3 3.11 or newer first on PATH (this is the interpreter 'preflight-code' runs, not PREFLIGHT_PY)"
 fi
 
 if [ "${PREFLIGHT_SKIP_TOOL_INSTALL:-0}" != "1" ]; then
@@ -100,7 +100,7 @@ fi
 
 say "==> installing helpers into $bindir"
 install -m 0755 "$src/preflight-pr"   "$bindir/preflight-pr"
-install -m 0755 "$src/preflight"      "$bindir/preflight"
+install -m 0755 "$src/preflight-code" "$bindir/preflight-code"
 install -m 0755 "$src/preflight-gate" "$bindir/preflight-gate"
 install -m 0644 "$src/VERSION"        "$cfg/VERSION"
 # The model-configuration resolver, sourced by both helpers. Installed unconditionally, unlike the
@@ -157,9 +157,22 @@ fi
 # The old names are gone; warn if a previous install left them behind (uninstall.sh removes them).
 for stale in pra pral pral-gate; do
   if [ -e "$bindir/$stale" ]; then
-    say "!! stale helper from the old name found: $bindir/$stale (remove it; the new command is 'preflight*')"
+    say "!! stale helper from the old name found: $bindir/$stale (remove it; the commands are 'preflight-code', 'preflight-gate' and 'preflight-pr')"
   fi
 done
+# `preflight` was this bundle's command until it was renamed, and that name is also used by an unrelated
+# project (a Rust secret-inspection proxy). Only OUR old helper is reported as stale; anything else at
+# that path is left alone and named, because deleting another project's executable would be worse than
+# the collision the rename exists to avoid. Ours is a shell script whose second line describes this bundle.
+if [ -e "$bindir/preflight" ]; then
+  if [ -f "$bindir/preflight" ] && [ ! -L "$bindir/preflight" ] \
+     && head -n1 "$bindir/preflight" 2>/dev/null | grep -q '^#!' \
+     && grep -q 'local PR-style review of the pending change' "$bindir/preflight" 2>/dev/null; then
+    say "!! stale helper from the old name found: $bindir/preflight (remove that one file; the command is now 'preflight-code')"
+  else
+    say "!! $bindir/preflight belongs to another project, not this bundle; left untouched"
+  fi
+fi
 if [ -d "$HOME/.config/pr-agent" ]; then
   say "!! old config dir $HOME/.config/pr-agent still exists - migrate its key by hand, then remove it"
 fi
@@ -192,7 +205,7 @@ if [ ! -f "$cfg/settings.toml" ] || [ ! -f "$cfg/providers.toml" ]; then
   say "      In providers.toml set the endpoint, the API key and the model id; copy its table name into"
   say "      [selection] main in settings.toml. Nothing runs until both files exist."
 fi
-say "TRY:  cd <repo> && preflight review"
+say "TRY:  cd <repo> && preflight-code review"
 say ""
 say "To make a repo REFUSE a commit that was not reviewed, commit the hooks and point git at them:"
 say "  mkdir -p .githooks && install -m 0755 $cfg/githooks/* .githooks/ && git add .githooks"

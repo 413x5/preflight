@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# preflight — local PR-style review of the pending change (or, optionally, the whole branch).
+# preflight-code — local PR-style review of the pending change (or, optionally, the whole branch).
 #
-# Usage:  preflight [command] [args...]
+# Usage:  preflight-code [command] [args...]
 #   command : review (default) | describe | improve | ask "<question>" | hook
 #             --help / -h and --version / -V are handled before anything else.
 #
@@ -48,7 +48,7 @@ cfgdir="${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}"
 #
 # ${HOME:-} and not $HOME: bash expands every word of the `for` list before the loop starts, so a bare
 # $HOME is evaluated even when the FIRST candidate would have matched - and under `set -u` an unset HOME
-# (`env -u HOME preflight --version`) would abort instead of printing a version. The example hook guards
+# (`env -u HOME preflight-code --version`) would abort instead of printing a version. The example hook guards
 # HOME for the same reason (REQ-HOOK-26).
 bundle_version() {
   local cand
@@ -63,9 +63,9 @@ bundle_version() {
 
 usage() {
   cat <<'EOF'
-preflight — review the pending change (no commit, no GitHub round trip).
+preflight-code — review the pending change (no commit, no GitHub round trip).
 
-Usage:  preflight [command] [args...]
+Usage:  preflight-code [command] [args...]
 
 Commands:
   review (default)     review the pending change (HEAD -> working tree, no base)
@@ -109,10 +109,10 @@ Config:  <dir>/settings.toml + <dir>/providers.toml, where <dir> is PREFLIGHT_HO
          ~/.config/preflight
          (any OpenAI-compatible endpoint; see README "Using a different endpoint")
          <dir>/settings.toml names model configurations; <dir>/providers.toml holds the
-         endpoints and keys they name. When one is assigned, `preflight` renders both
+         endpoints and keys they name. When one is assigned, `preflight-code` renders both
          into the config pr-agent reads. A repository may override review and [gate]
          settings in its own ./.preflight.toml. See README "Per-repository settings, and the gate's policy".
-Loop:    preflight review && preflight-gate   (exit 0 = pass)
+Loop:    preflight-code review && preflight-gate   (exit 0 = pass)
          preflight-gate --help                for the gate's exits and options
 Docs:    https://github.com/413x5/preflight
 EOF
@@ -122,10 +122,10 @@ cmd="review"
 if [ "$#" -gt 0 ]; then cmd="$1"; shift; fi
 
 # Answered before anything touches git or the config below, so
-# `preflight --help` works outside a repository and does not depend on the config being readable.
+# `preflight-code --help` works outside a repository and does not depend on the config being readable.
 case "$cmd" in
   -h|--help|help)          usage; exit 0 ;;
-  -V|--version|version)    printf 'preflight %s\n' "$(bundle_version)"; exit 0 ;;
+  -V|--version|version)    printf 'preflight-code %s\n' "$(bundle_version)"; exit 0 ;;
 esac
 
 # The model configuration. Sourced from beside the script first (a checkout or vendored copy), then from
@@ -134,6 +134,9 @@ esac
 # refuses when it cannot parse the file at all.
 __preflight_load_settings_render() {
   local cand
+  # Names this command in the renderer's refusals. Set before sourcing so the shared resolver never has
+  # to guess which of the two helpers is speaking.
+  __preflight_caller_name='preflight-code'
   for cand in "$here/settings-render.sh" "$here/../scripts/settings-render.sh" "${cfgdir}/settings-render.sh"; do
     if [ -f "$cand" ]; then
       . "$cand"
@@ -141,13 +144,13 @@ __preflight_load_settings_render() {
     fi
   done
   if [ -f "${cfgdir}/settings.toml" ]; then
-    printf 'preflight: %s is present, but settings-render.sh was not found (looked beside this script and in %s)\n' \
+    printf 'preflight-code: %s is present, but settings-render.sh was not found (looked beside this script and in %s)\n' \
       "${cfgdir}/settings.toml" "$cfgdir" >&2
-    printf 'preflight: refusing to review with a model configuration that was not applied\n' >&2
+    printf 'preflight-code: refusing to review with a model configuration that was not applied\n' >&2
   else
-    printf 'preflight: neither settings-render.sh nor %s was found (looked beside this script and in %s)\n' \
+    printf 'preflight-code: neither settings-render.sh nor %s was found (looked beside this script and in %s)\n' \
       "${cfgdir}/settings.toml" "$cfgdir" >&2
-    printf 'preflight: install.sh writes both; re-run it, or point PREFLIGHT_HOME at an install that has them\n' >&2
+    printf 'preflight-code: install.sh writes both; re-run it, or point PREFLIGHT_HOME at an install that has them\n' >&2
   fi
   return 2
 }
@@ -156,14 +159,14 @@ __preflight_load_settings_render() {
 # base-resolution line and possibly a fetch first, which buries the one line that matters.
 case "$cmd" in
   review|review_pr|describe|describe_pr|improve|improve_code|ask|ask_question|hook) ;;
-  *) echo "preflight: unknown command '$cmd' (use review|describe|improve|ask; 'preflight --help' for the full list)" >&2; exit 2 ;;
+  *) echo "preflight-code: unknown command '$cmd' (use review|describe|improve|ask; 'preflight-code --help' for the full list)" >&2; exit 2 ;;
 esac
 
 dir="${PREFLIGHT_DIR:-.preflight}"
 scope="${PREFLIGHT_SCOPE:-commit}"
 case "$scope" in
   commit|worktree|head) ;;
-  *) echo "preflight: unknown PREFLIGHT_SCOPE '$scope' (expected commit, worktree or head)" >&2; exit 2 ;;
+  *) echo "preflight-code: unknown PREFLIGHT_SCOPE '$scope' (expected commit, worktree or head)" >&2; exit 2 ;;
 esac
 
 # `hook` is a verifier, not a review: it must not fetch, snapshot or require a config. Dispatch it
@@ -176,18 +179,18 @@ if [ "${cmd:-review}" = "hook" ]; then
   for cand in "$here/preflight-hook" "${cfgdir}/preflight-hook"; do
     if [ -f "$cand" ]; then exec sh "$cand" "$@"; fi
   done
-  echo "preflight: hook: preflight-hook not found (looked next to this script and in ${cfgdir})" >&2
+  echo "preflight-code: hook: preflight-hook not found (looked next to this script and in ${cfgdir})" >&2
   exit 1
 fi
 
-root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo 'preflight: not inside a git repository' >&2; exit 1; }
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo 'preflight-code: not inside a git repository' >&2; exit 1; }
 cd "$root"
-git rev-parse --verify -q HEAD >/dev/null 2>&1 || { echo 'preflight: repository has no commits yet' >&2; exit 3; }
+git rev-parse --verify -q HEAD >/dev/null 2>&1 || { echo 'preflight-code: repository has no commits yet' >&2; exit 3; }
 # The branch scopes need an up-to-date base, and a remote to get it from; `commit` needs neither, so it
 # makes no network round trip and works offline. This also removes base-resolution failures from the
 # common path.
 if [ "$scope" != 'commit' ]; then
-  git fetch --quiet origin 2>/dev/null || echo 'preflight: warning: could not fetch origin' >&2
+  git fetch --quiet origin 2>/dev/null || echo 'preflight-code: warning: could not fetch origin' >&2
 fi
 
 # The base to diff against. First candidate that resolves to a commit wins:
@@ -208,7 +211,7 @@ resolve_base() {
     if git rev-parse --verify -q "${PREFLIGHT_BASE}^{commit}" >/dev/null 2>&1; then
       printf '%s\n' "${PREFLIGHT_BASE}"; return 0
     fi
-    echo "preflight: PREFLIGHT_BASE='${PREFLIGHT_BASE}' does not resolve to a commit" >&2
+    echo "preflight-code: PREFLIGHT_BASE='${PREFLIGHT_BASE}' does not resolve to a commit" >&2
     return 1
   fi
   cand="$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || true)"
@@ -234,13 +237,13 @@ if [ "$scope" = 'commit' ]; then
   base='HEAD'
 else
   base="$(resolve_base)" || {
-    echo 'preflight: cannot tell which branch to diff against.' >&2
-    echo 'preflight: looked for PREFLIGHT_BASE, origin/HEAD, the remote HEAD, then origin/main|master and main|master.' >&2
-    echo 'preflight: name it explicitly, e.g.  PREFLIGHT_BASE=origin/develop preflight review' >&2
-    echo "preflight: or use PREFLIGHT_SCOPE=commit to review only the pending change." >&2
+    echo 'preflight-code: cannot tell which branch to diff against.' >&2
+    echo 'preflight-code: looked for PREFLIGHT_BASE, origin/HEAD, the remote HEAD, then origin/main|master and main|master.' >&2
+    echo 'preflight-code: name it explicitly, e.g.  PREFLIGHT_BASE=origin/develop preflight-code review' >&2
+    echo "preflight-code: or use PREFLIGHT_SCOPE=commit to review only the pending change." >&2
     exit 4
   }
-  echo "preflight: base=${base}" >&2
+  echo "preflight-code: base=${base}" >&2
 fi
 
 # Ensure the artifact dir is git-ignored in THIS repo (per-repo git metadata, never committed),
@@ -294,7 +297,7 @@ archive_run() {
   # Checked BEFORE the directory is created: a run directory without a run.json would break the
   # documented `cat .preflight/runs/*/run.json` for that run, contradicting the warning below.
   if ! command -v python3 >/dev/null 2>&1; then
-    printf 'preflight: warning: python3 not found, so this run was not recorded under %s/runs\n' "$dir" >&2
+    printf 'preflight-code: warning: python3 not found, so this run was not recorded under %s/runs\n' "$dir" >&2
     return 0
   fi
   local now arts='' landed='' f
@@ -311,9 +314,9 @@ archive_run() {
 
   # The same "not recorded" warning as the two branches around it: a silent drop here would leave the
   # history incomplete with nothing to say so, which is the failure mode this whole record exists to
-  # avoid. Nothing about the run itself is affected - the caller still sees `preflight: wrote ...`.
+  # avoid. Nothing about the run itself is affected - the caller still sees `preflight-code: wrote ...`.
   mkdir -p "$run_dir" 2>/dev/null || {
-    printf 'preflight: warning: could not create %s; the run is not recorded in the history\n' "$run_dir" >&2
+    printf 'preflight-code: warning: could not create %s; the run is not recorded in the history\n' "$run_dir" >&2
     return 0
   }
   for f in $arts; do
@@ -363,12 +366,12 @@ with open(path, "w") as fh:
     fh.write("\n")
 PY
   then
-    printf 'preflight: warning: could not write %s; the run is not recorded in the history\n' "$run_dir/run.json" >&2
+    printf 'preflight-code: warning: could not write %s; the run is not recorded in the history\n' "$run_dir/run.json" >&2
     rm -rf "$run_dir" 2>/dev/null || true
     return 0
   fi
   [ -s "$run_dir/run.json" ] || {
-    printf 'preflight: warning: %s is missing or empty; the run is not recorded in the history\n' "$run_dir/run.json" >&2
+    printf 'preflight-code: warning: %s is missing or empty; the run is not recorded in the history\n' "$run_dir/run.json" >&2
     rm -rf "$run_dir" 2>/dev/null || true
     return 0
   }
@@ -379,7 +382,7 @@ cleanup() {
   if [ -n "$idxf" ]; then rm -f "$idxf"; fi
   if [ -n "$prev_json" ]; then rm -f "$prev_json"; fi
   # An abnormal exit (an arithmetic error under `set -e`, a signal) would otherwise leave pr-agent
-  # running. It holds the caller's stdout open, so `x="$(preflight review)"` blocks for the model call
+  # running. It holds the caller's stdout open, so `x="$(preflight-code review)"` blocks for the model call
   # even though this script is long gone - the failure looks like a hang in the wrong process.
   if [ -n "${pr_pid:-}" ] && kill -0 "$pr_pid" 2>/dev/null; then
     kill -TERM "$pr_pid" 2>/dev/null || true
@@ -442,7 +445,7 @@ case "$cmd" in
   describe|describe_pr) out_md="$dir/description.md"; out_json='' ;;
   improve|improve_code) out_md="$dir/improve.md";     out_json='' ;;
   ask|ask_question)     out_md="$dir/answer.md";      out_json='' ;;
-  *) echo "preflight: unknown command '$cmd' (use review|describe|improve|ask; 'preflight --help' for the full list)" >&2; exit 2 ;;
+  *) echo "preflight-code: unknown command '$cmd' (use review|describe|improve|ask; 'preflight-code --help' for the full list)" >&2; exit 2 ;;
 esac
 
 mkdir -p "$dir"
@@ -452,9 +455,9 @@ begin_run
 # cannot produce one, and that refusal stops the run before here.
 cfg="$rendered_cfg"
 if [ "$scope" = 'commit' ]; then
-  echo "preflight: ${cmd} (scope=commit) — pending change since HEAD -> ${dir}/" >&2
+  echo "preflight-code: ${cmd} (scope=commit) — pending change since HEAD -> ${dir}/" >&2
 else
-  echo "preflight: ${cmd} (scope=${scope}) — $(git rev-parse --abbrev-ref HEAD) vs ${base} -> ${dir}/" >&2
+  echo "preflight-code: ${cmd} (scope=${scope}) — $(git rev-parse --abbrev-ref HEAD) vs ${base} -> ${dir}/" >&2
 fi
 
 # Reviewer context from AGENTS.md. pr-agent's own `repo_context_files` cannot serve this: its
@@ -630,7 +633,7 @@ risk = as_text(r.get('risk_level'))
 rec = as_text(r.get('merge_recommendation'))
 effort = as_text(r.get('estimated_effort_to_review_[1-5]'))
 tokens = as_text(usage.get('total_tokens'))
-line = (f"preflight: issues={len(issues)} security={sec or 'n/a'}"
+line = (f"preflight-code: issues={len(issues)} security={sec or 'n/a'}"
         f" risk={risk or 'n/a'} merge={rec or 'n/a'}"
         f" effort={effort or 'n/a'} tokens={tokens or 'n/a'}")
 # Whether repository context reached the model, on the line an agent reads: a review fed the repo's own
@@ -768,7 +771,7 @@ if [ -n "$out_json" ]; then
     # and the only way to find out is to wait for the bound. This says WHICH phase it is in and how long it
     # has been there, so a stuck endpoint reads as one. stderr only - stdout is the summary the loop parses.
     if [ "$next_note" -gt 0 ] && [ "$waited" -ge "$next_note" ]; then
-      printf 'preflight: pr-agent is still running (%ss, no review written yet)\n' "$waited" >&2
+      printf 'preflight-code: pr-agent is still running (%ss, no review written yet)\n' "$waited" >&2
       next_note=$((next_note + step))
     fi
   done
@@ -791,10 +794,10 @@ if [ -n "$out_json" ]; then
     stopped=1
     run_stopped=1
     if [ -n "$complete" ]; then
-      printf 'preflight: warning: pr-agent did not exit within %ss after writing %s; stopping it (the review is complete and usable)\n' \
+      printf 'preflight-code: warning: pr-agent did not exit within %ss after writing %s; stopping it (the review is complete and usable)\n' \
         "$shutdown_limit" "$out_json" >&2
     else
-      printf 'preflight: warning: pr-agent did not exit within %ss and did not write %s; stopping it (this run produced no review)\n' \
+      printf 'preflight-code: warning: pr-agent did not exit within %ss and did not write %s; stopping it (this run produced no review)\n' \
         "$shutdown_limit" "$out_json" >&2
     fi
     kill -TERM "$pr_pid" 2>/dev/null || true
@@ -834,7 +837,7 @@ else
   [ "$rc" = 0 ] || exit "$rc"
   run_ok=1
 fi
-echo "preflight: wrote ${out_md}${out_json:+ and ${out_json}}" >&2
+echo "preflight-code: wrote ${out_md}${out_json:+ and ${out_json}}" >&2
 
 # Record what was reviewed so the commit hook can verify it later. The hook reads gate.verdict,
 # which comes from the same rules preflight-gate applies (kept in one place: the gate itself).
@@ -853,7 +856,7 @@ if [ "$cmd" = 'review' ] || [ "$cmd" = 'review_pr' ]; then
       # reason unrelated to the review. Deliberately no `|| sh` fallback, which would reintroduce that.
       PREFLIGHT_DIR="$dir" "$gate_bin" >/dev/null 2>&1 || gate_code=$?
       if [ "$gate_code" = 126 ] || [ "$gate_code" = 127 ]; then
-        echo "preflight: warning: could not execute ${gate_bin}; the gate verdict is unknown" >&2
+        echo "preflight-code: warning: could not execute ${gate_bin}; the gate verdict is unknown" >&2
       fi
     else
       gate_code=127
@@ -887,7 +890,7 @@ with open(path, "w") as fh:
     json.dump(meta, fh, indent=2, sort_keys=True)
     fh.write("\n")
 PY
-    echo "preflight: recorded reviewed content for the commit hook (${verdict})" >&2
+    echo "preflight-code: recorded reviewed content for the commit hook (${verdict})" >&2
   fi
 fi
 

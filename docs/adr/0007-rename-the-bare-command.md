@@ -59,16 +59,16 @@ messages or misattributing them.
 
 ## Consequences
 
-Good: the name is unambiguous on any machine, and the failure it caused - a review that silently ran the
-wrong tool - cannot recur. The change is confined to one identifier, so the config, the artifacts and the
-committed hooks a consumer already has all keep working; only the command name in a pasted snippet goes
-stale, and that fails loudly as `command not found` rather than passing silently.
+Good: the name is unambiguous on any machine, so a review cannot be routed to the other project at all.
+The change is confined to one identifier, so the config, the artifacts and the committed hooks a consumer
+already has all keep working; only the command name in a pasted snippet goes stale, and that fails loudly
+as `command not found` rather than passing silently.
 
 Bad, and worth naming:
 
 - **A breaking rename for consumers.** A repository whose `AGENTS.md` carries the old snippet calls a
-  command that no longer exists. The 0.6.0 entry in [`../../CHANGELOG.md`](../../CHANGELOG.md) says so, and
-  the snippet's own version check is how an operator notices the copy is stale.
+  command that no longer exists. The changelog entry records it, and the snippet's own version check is how
+  an operator notices the copy is stale.
 - **Prose gets harder.** "preflight" now means the project in some sentences and used to mean the command
   in others, so every sentence that says what to *run* needs the longer name. The distinction is real but
   it is carried by the reader.

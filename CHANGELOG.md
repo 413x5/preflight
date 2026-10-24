@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+## [0.9.0] - 2026-10-24
+
 ### Changed
 
 - **pr-agent is pinned to 0.48.0, and the coverage marker now matches the footer's shape.** 0.48 emits a
@@ -997,7 +1001,8 @@ Initial release: a deployable, machine-local PR-Agent review setup for one OpenA
   initial commits plus the `v0.1.0` tag are **GPG-signed** (the signed history replaces earlier unsigned
   commits).
 
-[Unreleased]: https://github.com/413x5/preflight/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/413x5/preflight/releases/tag/v0.9.0
 [0.8.0]: https://github.com/413x5/preflight/releases/tag/v0.8.0
 [0.7.0]: https://github.com/413x5/preflight/releases/tag/v0.7.0
 [0.6.0]: https://github.com/413x5/preflight/releases/tag/v0.6.0

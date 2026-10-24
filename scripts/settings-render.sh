@@ -223,6 +223,7 @@ TRANSPORTS = {
     "codestral": ("codestral", "key", False),
     "cohere": ("cohere", "key", False),
     "cohere_chat": ("cohere", "key", False),
+    "compactifai": ("compactifai", "key", False),
     "dashscope": ("dashscope", "key", False),
     "deepinfra": ("deepinfra", "key", False),
     "deepseek": ("deepseek", "key", False),

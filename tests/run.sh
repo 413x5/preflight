@@ -749,25 +749,49 @@ def summary(body, prev=None, current=None):
 psrc = open(reviewer, encoding="utf-8", errors="replace").read()
 anchor = psrc.index("Review coverage:")
 hr_start = psrc.rindex('"', 0, psrc.rindex("<hr>", 0, anchor))
-rm = re.match(r'((?:"[^"]*"\s*)+)', psrc[hr_start:])
-lits = re.findall(r'"([^"]*)"', rm.group(1))
+# The header is ONE f-string in the version that emits an `{explanation}` placeholder and one plain
+# string in the version that inlines the sentence, so the literal run must accept an f prefix and stop
+# at the first literal that is not part of the concatenation. Matching only `"..."` read the f-string's
+# leading quote as a closing one and rebuilt the footer as just the horizontal rule - so the case failed
+# while claiming no footer was emitted (0.48 regression).
+rm = re.match(r'(?:f?)"[^"]*"(?:\s*(?:f?)"[^"]*")*', psrc[hr_start:])
+lits = re.findall(r'(?:f)?"([^"]*)"', rm.group(0))
 # The source spells newlines as the two characters \n; turn them into real newlines. Only these escapes
-# appear here, and they are handled explicitly so the emoji is not mangled by a generic unescaper.
+# appear here, and they are handled explicitly so the emoji is not mangled by a generic unescaper. An
+# `{explanation}` placeholder is filled from the emitted text below, never left in the fixture.
 footer = "".join(lits).replace("\\n", "\n").replace('\\"', '"')
 
 # The bullet line is the most format-sensitive part of COVERAGE_RE (it requires a dash, a space and a
 # backtick), and the one part not rebuilt from pr-agent's own literals. Verify that pr-agent still emits
-# it in that shape - the emitted f-string is the source of the format - so a change there fails this
-# case loudly instead of retiring the marker while the check stays green.
-if not re.search(r'f"- `\{file\}`"', psrc):
-    sys.exit("pr-agent no longer emits coverage bullets as f\"- `{file}`\"; COVERAGE_RE's bullet pattern "
-             "must be re-derived from its new output")
+# it WRAPPED IN A CODE SPAN - which is what the marker keys on, whether the source interpolates the path
+# directly (`- `{file}``) or routes it through a helper that does the wrapping
+# (`- {_markdown_code_span(file)}`) - so a change there fails this case loudly instead of retiring the
+# marker while the check stays green.
+if not re.search(r'f"- `\{file\}`"', psrc) and not re.search(
+        r'f"- \{[a-z_]+\(file\)\}"', psrc):
+    sys.exit("pr-agent no longer emits coverage bullets wrapped in a code span; COVERAGE_RE's bullet "
+             "pattern must be re-derived from its new output")
+# An `{explanation}` placeholder arrives from the loop over the footer's explanations; fill it from the
+# text pr-agent emits for that branch rather than leaving a literal placeholder in the fixture, which
+# would exercise a shape no run produces.
+footer = footer.replace("{explanation}", "were not included in this review because of the token budget")
 footer += "- `late.py`\n"
 
 problems = []
 # The real footer, where pr-agent emits it: after the review table, introduced by a horizontal rule.
 if "PARTIAL" not in summary("<table>\n<tr><td>clean review</td></tr>\n</table>" + footer):
     problems.append("the real footer, after the table, was not detected")
+# The SECOND footer pr-agent emits for a different cause: patches clipped mid-file, rather than whole
+# files left out. It was added upstream and reworded the first one at the same time, so a marker keyed on
+# that sentence reported a clipped review as complete. Built by swapping the explanation, which is the
+# only part that differs - the rule, the header and the bullets are shared.
+_clipped = footer.replace(
+    "were not included in this review because of the token budget",
+    "had patches clipped before analysis to fit the token budget (partial input coverage)")
+if _clipped == footer:
+    sys.exit("the fixture no longer carries the not-included explanation; update this case")
+if "PARTIAL" not in summary("<table>\n<tr><td>clean review</td></tr>\n</table>" + _clipped):
+    problems.append("the clipped-patch coverage footer was not detected")
 # No table at all (a future output shape): the marker must still fire on the emitted footer.
 if "PARTIAL" not in summary(footer):
     problems.append("the footer without a table was not detected")

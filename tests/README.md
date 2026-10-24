@@ -198,6 +198,7 @@ reverted in turn and the expected case was confirmed to fail:
 | a failed run's captured output not printed, so redirecting the agent's console output into `run.log` turned a loud failure into a silent one (the `dump_run_log` call dropped from the failure path, run and watched failing the case) | REQ-HOOK-41 |
 | the `model=FALLBACK` marker removed from the summary line, so a fallback answer reads as the configured model's | REQ-HOOK-42 |
 | the coverage marker gated on `PREFLIGHT_SCOPE_IS_BRANCH` again, so a pruned commit-scope review reports a clean summary line | REQ-HOOK-43 |
+| the coverage marker keyed on the footer's literal sentence again, so the clipped-patch footer pr-agent emits for a second cause goes undetected and a partial review reads as complete (the regex widened back to the 0.47 sentence, run and watched failing the case) | REQ-HOOK-28 |
 | the rendered config's transport pin taken from the default instead of the provider entry | REQ-HOOK-44 |
 | the rendered config's endpoint taken from the pinned transport's default instead of the provider entry | REQ-HOOK-44 |
 | the provider's key left out of the rendered config | REQ-HOOK-44 |

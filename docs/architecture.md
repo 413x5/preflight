@@ -303,8 +303,8 @@ A run destroys its predecessor's output: `preflight-code` removes `review.json`/
 pr-agent, because phase 1 of the review wait polls for `review.json` and a stale file would make that wait
 return immediately with the **previous** run's counts. That removal is load-bearing, so the run it removes
 is preserved beside the fixed paths instead - each run is archived under `runs/<UTC start>-<pid>/`, with a
-`run.json` (start, finish, duration, `stopped`, artifacts, gate verdict) and copies of that run's
-artifacts. Every command is archived, not only `review`.
+`run.json` (start, finish, duration, `stopped`, artifacts, gate verdict), a `run.log` holding pr-agent's
+log records, and copies of that run's artifacts. Every command is archived, not only `review`.
 
 The fixed paths keep meaning "the latest run", and that is the point rather than a convenience: the commit
 hook reads `.preflight/review.meta.json` and `preflight-gate` reads `.preflight/review.json`, both by name,

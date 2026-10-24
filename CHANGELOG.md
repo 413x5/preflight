@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Added
+
+- **pr-agent's log records are now saved with each run as `run.log`.** The bundled agent prints progress
+  and diagnostics to the console, and a run's folder kept only its parsed artifacts (`review.md`,
+  `review.json`), so the output that explained *how* a run went was lost. Each run now captures it and
+  archives it beside `run.json` under `.preflight/runs/<id>/run.log`; the file is cleared before the
+  launch, so a log present at archive time is provably this run's, and an empty one is not archived. The
+  saved log opens with the call the bundle made (the command, the scope and the diff endpoints, with the
+  config named by role rather than path) and then holds pr-agent's own log records - the model, the token
+  decision, the warnings - with ANSI colouring stripped and the rendered review dropped, since that is
+  already `review.md`; a stream in any other shape is kept whole rather than filtered. The fixed top-level paths are unchanged.
 
 ## [0.7.0] - 2026-10-19
 

@@ -55,12 +55,17 @@ Wanted; needs design, or an experiment to settle. Two groups:
       What would settle it: for each lever, review the same content three times and compare the finding
       SETS. A lever that leaves the sets different has not fixed the thing we measured.
 
-- [ ] **Should `additional_reasoning_effort_models` come back, purely so the lever fails visibly?**
-      Mechanism and the probe: [`docs/architecture.md`](architecture.md). Adding the key is what makes a configured
-      `reasoning_effort` reach the endpoint at all, and what turns an unsupported value into a
-      provider-side error instead of a silent drop - it does not pin a budget, since pr-agent's default
-      `medium` would then be sent. So the question is: **is a visible failure worth sending a reasoning
-      budget we have not chosen?** If not, leave it out and let DESIGN keep saying the lever is inert here.
+- [x] **`additional_reasoning_effort_models` is now derived, not configured.** When a profile sets
+      `reasoning_effort`, the renderer registers that profile's model in `additional_reasoning_effort_models`
+      automatically, so a configured effort reaches the provider instead of being read, logged and dropped.
+      The key is refused by name in settings.toml, profile config and .preflight.toml (it is derived, not
+      configured). The open question ("is a visible failure worth sending a reasoning budget we have not
+      chosen?") is thereby answered in the negative for the registration itself: the bundle still sets no
+      `reasoning_effort` value, so pr-agent's `medium` default applies unless the operator opts in on a
+      profile, and the registration only makes an *opted-in* effort arrive. A provider-side error on an
+      unsupported value still surfaces, because the value is forwarded.
+      **Still open:** whether to expose `reasoning_effort` as a profile knob in the shipped example (it is
+      already listed as a knob there, commented by absence - the example does not set it).
 
 - [ ] **Does removing `extra_instructions` help or just make the model under-report?** The injected text
       was removed because capturing the literal prompt showed it arguing against pr-agent's own guidance

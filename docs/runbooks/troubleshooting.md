@@ -355,10 +355,12 @@ budget, and the same content can take ten times longer from one run to the next.
 
 `[config] reasoning_effort` is the lever, and there is a trap in it:
 
-**No `reasoning_effort` value reaches this endpoint**, which is why setting one changes nothing: the
-forwarding rule, the probe that confirmed it, and the current choice are in
-[`docs/architecture.md`](../architecture.md) under "Where a review's time goes". Set it only alongside
-`[config] additional_reasoning_effort_models`, or it is read and silently dropped.
+**No `reasoning_effort` value reaches an unknown model by itself**, which is why setting one changes
+nothing on its own: pr-agent forwards it only to a model litellm's metadata calls reasoning-capable, and the
+escape hatch is `[config] additional_reasoning_effort_models`. The bundle now registers the assigned model
+there automatically when a profile sets `reasoning_effort`, so the lever reaches the provider - but the value
+must still be set on the profile first, and the forwarding rule, the probe that confirmed the old behaviour,
+and the current choice are in [`docs/architecture.md`](../architecture.md) under "Where a review's time goes".
 
 If you do set it, measure on a real diff, interleaved, against `new=N/M` as well as wall clock. A pin of
 `low` was tried on one synthetic 525-line diff and did not survive real content - a cheaper round that

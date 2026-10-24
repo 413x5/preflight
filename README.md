@@ -17,7 +17,7 @@ install.
 
 Every run that succeeds and produces output is also kept, with its start time, finish time and
 `duration`, under `.preflight/runs/<id>/` — nothing is pruned, so the previous review survives the next
-one.
+one. pr-agent's own log records are saved there as `run.log`.
 
 - Reviews include committed **plus uncommitted and untracked** changes — a review never needs a commit.
 - Secrets live in `~/.config/preflight/providers.toml` (chmod 600), one key per endpoint.
@@ -242,9 +242,9 @@ preflight-code --version # the installed bundle version
 
 Those paths always hold the **latest** run. Each run that succeeds and produces output is also archived
 under `.preflight/runs/<id>/`, with a `run.json` recording when it started, when it finished and how long
-it took; nothing prunes them, so `ls .preflight/runs` is the history of what has been reviewed. A run
-that failed, or that finished without writing anything (an empty diff), has no entry: every entry is a
-run that produced output you can read.
+it took; nothing prunes them, so `ls .preflight/runs` is the history of what has been reviewed. Each run
+also saves pr-agent's log records as `run.log` beside `run.json`. A run that failed, or that finished
+without writing anything (an empty diff), has no entry: every entry is a run that produced output you can read.
 
 The default scope is `commit`: the review diffs `HEAD` against the working tree, untracked files included,
 and needs no remote, no base and no fetch. `PREFLIGHT_SCOPE=worktree` reviews the

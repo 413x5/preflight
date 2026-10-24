@@ -1760,6 +1760,12 @@ done
 seq=$(cat "$FAKE_SEQ" 2>/dev/null || echo 0); seq=$((seq + 1)); [ -n "$FAKE_SEQ" ] && printf '%s' "$seq" > "$FAKE_SEQ"
 [ -n "$js" ] && printf '%s\n' "{\"review\":{\"key_issues_to_review\":[{\"relevant_file\":\"a.py\",\"issue_header\":\"H\",\"issue_content\":\"run-$seq\"}],\"security_concerns\":\"No\",\"estimated_effort_to_review_[1-5]\":3},\"usage\":{\"total_tokens\":$seq}}" > "$js"
 [ -n "$out" ] && printf '<table></table>\nrun %s\n' "$seq" > "$out"
+# Two streams in one, exactly as pr-agent produces them: a colourised loguru RECORD, which is what the
+# archived log keeps, and a line of rendered review, which is also in review.md and must be dropped
+# rather than filed twice. The `stamp`/`INFO` shape is loguru's, and the non-ASCII text in the body proves
+# the filter removes escape sequences without mangling UTF-8.
+printf '\033[32m2026-10-24 17:00:00.000\033[0m | \033[1mINFO\033[0m | pr_agent.tools.pr_reviewer:run:304 - agent console output for run %s\n' "$seq"
+printf '## Preflight review body \360\237\224\215 for run %s\n' "$seq"
 exit 0
 FAKE
     chmod +x "$fake/pr-agent"
@@ -1790,7 +1796,7 @@ FAKE
         | no run directory was created under .preflight/runs/"
 
   if [ -n "$first" ]; then
-    for f in run.json review.md review.json; do
+    for f in run.json run.log review.md review.json; do
       [ -f "$d/.preflight/runs/$first/$f" ] || problems="$problems
         | the first run did not archive $f"
     done
@@ -1816,7 +1822,7 @@ if not isinstance(d.get("duration_seconds"), int):
     bad.append("duration_seconds=%r is not a number" % (d.get("duration_seconds"),))
 if d.get("command") != "review":
     bad.append("command=%r" % (d.get("command"),))
-if sorted(d.get("artifacts") or []) != ["review.json", "review.md", "review.meta.json"]:
+if sorted(d.get("artifacts") or []) != ["review.json", "review.md", "review.meta.json", "run.log"]:
     bad.append("artifacts=%r" % (d.get("artifacts"),))
 # Non-zero on a finding: `print` alone exits 0, so the `if` below would never take its else-branch and
 # every assertion in this block would be dead (found by reviewing this change with the tool).
@@ -1825,6 +1831,32 @@ if bad:
 PY
     then :; else problems="$problems
         | run.json does not record the run (diagnostic above)" ; fi
+    # The archived run.log must hold THIS run's console output, not merely exist: the first run is
+    # seq 1, so the stub prints that number. An empty or previous run's log would pass an existence
+    # check while proving nothing about the capture.
+    grep -q 'agent console output for run 1$' "$d/.preflight/runs/$first/run.log" || problems="$problems
+        | the archived run.log does not hold this run's console output"
+    # pr-agent's logger colourises even a redirected stream, and an escape sequence is not text a reader
+    # can use. The assertion is on the ESC byte itself: the stub prints ones, so a filter that is dropped
+    # leaves them in the file.
+    esc="$(printf '\033')"
+    if grep -q "$esc" "$d/.preflight/runs/$first/run.log" 2>/dev/null; then problems="$problems
+        | the archived run.log still holds ANSI escape sequences, which make it unreadable"; fi
+    # The rendered review is ALSO in review.md, so filing it in run.log duplicated the output and buried
+    # the records. Only the log record is kept. Asserted on the body line, which is what the filter drops
+    # when it recognises the stream - a filter that keeps everything would satisfy the checks above.
+    if grep -q 'Preflight review body' "$d/.preflight/runs/$first/run.log" 2>/dev/null; then problems="$problems
+        | the archived run.log still holds the rendered review, which review.md already carries"; fi
+    # The log must say what produced it: the call the bundle makes. Asserted on the command and the scope,
+    # so a header that names neither would not satisfy it - and on `--extra_config_url <rendered config>`,
+    # because naming the real path would put the provider's credential in a file people paste into issues.
+    runlog="$d/.preflight/runs/$first/run.log"
+    grep -q '^preflight-code: pr-agent ' "$runlog" 2>/dev/null || problems="$problems
+        | the archived run.log does not open with the call the bundle makes"
+    grep -q ' review (scope=commit, diff: ' "$runlog" 2>/dev/null || problems="$problems
+        | the invocation in run.log does not name the command and the scope"
+    grep -q -- '--extra_config_url <rendered config>' "$runlog" 2>/dev/null || problems="$problems
+        | the invocation in run.log does not name the rendered config by its role"
     # The old paths still mean "the latest run" - the commit hook and the gate read them by name.
     [ -f "$d/.preflight/review.meta.json" ] || problems="$problems
         | the sidecar is no longer at the fixed path the commit hook reads"
@@ -1871,8 +1903,8 @@ for name in sorted(os.listdir(runs)):
     if record.get("command") != "describe":
         continue
     found = name
-    if sorted(record.get("artifacts") or []) != ["description.md"]:
-        sys.exit("the describe run archived %r, not just its own description.md" % (record.get("artifacts"),))
+    if sorted(record.get("artifacts") or []) != ["description.md", "run.log"]:
+        sys.exit("the describe run archived %r, not just its own description.md and run.log" % (record.get("artifacts"),))
     if os.path.exists(os.path.join(runs, name, "review.meta.json")):
         sys.exit("the previous review's review.meta.json was archived into the describe run")
 if found is None:
@@ -1885,12 +1917,18 @@ PY
   # run left at the fixed paths. Archiving on "the file exists" filed the first run's description.md
   # under the failed second run (found by reviewing this change with the tool). The fixed path itself is
   # cleared before the launch, so nothing stale is left there to be mistaken for this run's output.
-  printf '#!/bin/sh\ncat >/dev/null\nexit 3\n' > "$fake/pr-agent"
+  #
+  # The stub SPEAKS, because capturing the console output must not silence a failure: with stderr in the
+  # log, a failing run that printed nothing would leave the operator the exit code alone. The assertion
+  # is on the captured text - a stub that exits silently would satisfy it either way.
+  printf '#!/bin/sh\ncat >/dev/null\necho "diagnosis: the endpoint refused the key"\nexit 3\n' > "$fake/pr-agent"
   chmod +x "$fake/pr-agent"
   before="$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')"
   rc=0; out="$(run describe)" || rc=$?
   [ "$rc" != 0 ] || problems="$problems
         | a failing describe exited 0"
+  printf '%s' "$out" | grep -q 'diagnosis: the endpoint refused the key' || problems="$problems
+        | a failing run swallowed the agent output it captured instead of printing it"
   [ "$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')" = "$before" ] || problems="$problems
         | a FAILED run was archived, so it was credited with the previous run's description.md"
   # A well-formed agent that exits non-zero AFTER writing the artifact: the output exists and is fresh,

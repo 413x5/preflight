@@ -93,6 +93,7 @@ They are all there. `review.md`/`review.json` hold the latest run, and every run
 ls -1 .preflight/runs                      # the id is <UTC start>-<pid>, sorted as text by ls
 cat .preflight/runs/*/run.json             # start, finish, duration, artifacts, gate verdict
 cat .preflight/runs/<id>/review.md         # that run's review
+cat .preflight/runs/<id>/run.log           # what pr-agent printed while it ran
 ```
 
 Only runs that succeeded AND wrote output are kept - that is what makes the history useful for "how long
@@ -301,6 +302,35 @@ itself the reason the fix above is a bound rather than a diagnosis.
    silently ignored, so an operator who "sets" the wrong one keeps hanging with no feedback. Lowering it
    has **not** been confirmed to stop the hang; treat it as a lever to test, not a known fix. The model
    *request* is bounded separately by `config.ai_timeout` (default 120s), which does not cover this wait.
+
+## I want to see what pr-agent itself printed during a run
+
+**Symptom.** A review passed, failed, or took a surprising path, and you want the agent's own output - the
+model it picked, the warnings it emitted, the error it hit - not only the parsed findings.
+
+`preflight-code` captures the agent's console output and saves it with the run, so every archived run has
+a `run.log` beside its `run.json`:
+
+```sh
+cat .preflight/runs/<id>/run.log    # pr-agent's own log records for that run
+```
+
+It opens with **the call the bundle made** and then holds the agent's **log records** - the model that
+answered, the token-budget decision, the warnings - with the colouring removed and the rendered review
+dropped, since `review.md` already has the review. A stream in any other shape is kept whole rather than
+filtered, so an unusual failure still says what happened:
+
+```
+preflight-code: pr-agent --extra_config_url <rendered config> --stdin --output .preflight/review.md --json-output .preflight/review.json review (scope=commit, diff: HEAD -> snapshot tree 4a1f...)
+2026-10-24 18:02:41.515 | INFO | pr_agent.algo.pr_processing:get_pr_diff:183 - Tokens: 16887, total tokens under limit: 1000000, returning full diff.
+```
+
+The rendered config is named by its **role**, never by its path: that path holds the provider's credential,
+and a log is a file people paste into issues.
+
+The same file is at `.preflight/run.log` for the run that just finished, and a **failed** run prints the
+captured output to stderr on its way out, so a failure is still loud rather than only recorded. A run that
+succeeded but printed nothing has no `run.log` - there is nothing to file.
 
 ## `preflight-code review` keeps printing "still running" and never writes a review
 

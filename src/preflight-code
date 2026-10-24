@@ -26,9 +26,10 @@
 #
 # Those paths always hold the LATEST run, because that is what the commit hook and preflight-gate read.
 # Every run that SUCCEEDS AND WRITES OUTPUT is also kept under runs/<UTC-start>-<pid>/ - a run.json
-# (start, finish, duration, artifacts) beside copies of that run's artifacts - so the next run cannot
-# destroy the last one. A run that failed, or that finished without writing anything, has no entry:
-# every entry is a run whose output can be read. Nothing prunes them; delete a directory to drop a run.
+# (start, finish, duration, artifacts), a run.log with pr-agent's log records, beside copies of that
+# run's artifacts - so the next run cannot destroy the last one. A run that failed, or that finished
+# without writing anything, has no entry: every entry is a run whose output can be read. Nothing prunes
+# them; delete a directory to drop a run.
 #
 # The model and endpoint come from ~/.config/preflight/settings.toml + providers.toml (any
 # OpenAI-compatible endpoint). Plain-diff mode: prints to stdout and writes the files above.
@@ -77,7 +78,8 @@ Commands:
                        repo's own .githooks/pre-commit; read-only, never runs a review)
 
   Those paths hold the latest run. Every run that succeeds and writes output is also kept, with its
-  start time, finish time and duration, under .preflight/runs/<id>/run.json (nothing prunes them).
+  start time, finish time and duration, under .preflight/runs/<id>/run.json (nothing prunes them),
+  together with pr-agent's log records as run.log.
 
 Options:
   -h, --help           this text
@@ -264,6 +266,8 @@ hook_tree=''
 diff_base=''
 run_id=''
 run_dir=''
+run_log=''
+run_invocation=''
 run_started=''
 run_ok=''
 run_stopped=''
@@ -281,6 +285,7 @@ rendered_cfg=''
 begin_run() {
   run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   run_dir="$dir/runs/$run_id"
+  run_log="$dir/run.log"
   # Epoch seconds, so `duration_seconds` is arithmetic on the same clock as `finished_at` and the two
   # cannot disagree about where the run began. Captured before the diff is built and before pr-agent is
   # launched, so the number covers the whole run rather than only the model call.
@@ -306,6 +311,10 @@ archive_run() {
   # so a name is never hardcoded here - which is also why the sidecar below needs its own guard.
   if [ -n "$out_md" ] && [ -f "$out_md" ]; then arts="$arts $(basename "$out_md")"; fi
   if [ -n "$out_json" ] && [ -f "$out_json" ]; then arts="$arts $(basename "$out_json")"; fi
+  # pr-agent's log records are captured into run.log for every command. Only archive it when it holds
+  # something - an empty file reads as a run that produced output, which is wrong for a run that wrote
+  # nothing (and for a stub that writes to output files but not to the console).
+  if [ -f "$run_log" ] && [ -s "$run_log" ]; then arts="$arts run.log"; fi
   # Only `review` writes a sidecar, so describe/improve/ask must not pick up the one a previous review
   # left at the fixed path.
   case "$cmd" in
@@ -378,6 +387,63 @@ PY
   return 0
 }
 
+# pr-agent's stream is two things interleaved: its own log records (a colourised loguru line each) and the
+# rendered review, which is also written to review.md. Keeping the raw stream files a second copy of the
+# review and buries the records in escape sequences, so the log is reduced to the records - the model
+# that answered, the token decision, the warnings - with the body dropped. Normalised from the EXIT trap
+# and before a failure dump alike, so both read the extracted text. Defined above cleanup() because the
+# trap runs on early exits too, before the script reaches a later definition.
+#
+# Fails OPEN at every step: a stream that does not match the pattern is kept as pr-agent wrote it, because
+# an unreadable log is recoverable and a discarded one is not. `sed` and `grep`, not `python3`: the run
+# history already degrades when the interpreter is absent, and a log is not worth that dependency.
+normalise_run_log() {
+  [ -s "$run_log" ] || return 0
+  local esc body records clean
+  esc="$(printf '\033')"
+  clean="$run_log.clean.$$"
+  # The invocation this script wrote is matched on its own, so pr-agent's side is judged by pr-agent's
+  # side alone: the header is always present, and counting it would make every stream look recognised.
+  body="$run_log.body.$$"
+  records="$run_log.records.$$"
+  tail -n +2 "$run_log" > "$body" 2>/dev/null || { rm -f "$body" 2>/dev/null; return 0; }
+  # pr-agent printed nothing, so there is no log to keep: the invocation alone would make a run that
+  # produced nothing look like one that did, and archive_run would file it as this run's output.
+  if [ ! -s "$body" ]; then
+    rm -f "$body" "$run_log" 2>/dev/null || true
+    return 0
+  fi
+  # -E with a bracket expression rather than the GNU/BSD `\e` spelling, and ESC carried in a variable so
+  # the pattern needs no literal escape byte. The record shape is loguru's: date, time, level, module.
+  sed "s/${esc}\[[0-9;?]*[A-Za-z]//g" "$body" 2>/dev/null \
+    | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]+ \| [A-Z]+ *\| ' \
+    > "$records" 2>/dev/null || true
+  rm -f "$body" 2>/dev/null || true
+  # Nothing matched: the stream is not the shape this recognises, so the whole of it is the better record -
+  # the invocation is worthless without the output it introduced.
+  if [ ! -s "$records" ]; then
+    rm -f "$records" 2>/dev/null || true
+    return 0
+  fi
+  { head -n 1 "$run_log"; cat "$records"; } > "$clean" 2>/dev/null || { rm -f "$records" "$clean" 2>/dev/null; return 0; }
+  rm -f "$records" 2>/dev/null || true
+  mv "$clean" "$run_log" 2>/dev/null || rm -f "$clean" 2>/dev/null || true
+  return 0
+}
+
+# A failed run's console output is its diagnosis, and redirecting it into run.log would otherwise turn a
+# loud failure into a silent one - the operator sees nothing but the exit status. Printed on stderr, the
+# stream the warnings and the summary already use, so stdout stays the machine-readable summary.
+dump_run_log() {
+  [ -s "$run_log" ] || return 0
+  normalise_run_log
+  printf 'preflight-code: pr-agent output (also saved at %s):\n' "$run_log" >&2
+  if ! sed 's/^/  /' "$run_log" >&2; then
+    cat "$run_log" >&2 || true
+  fi
+  return 0
+}
+
 cleanup() {
   if [ -n "$idxf" ]; then rm -f "$idxf"; fi
   if [ -n "$prev_json" ]; then rm -f "$prev_json"; fi
@@ -394,6 +460,7 @@ cleanup() {
   # leaving it would accumulate one credential-bearing file per run, and nothing else would ever delete it.
   # The copy at the fixed name is the only one that survives, which is what it is for.
   if [ -n "${rendered_cfg:-}" ]; then rm -f "$rendered_cfg"; fi
+  normalise_run_log
   archive_run
 }
 trap cleanup EXIT
@@ -741,14 +808,32 @@ PY
 # actually writes it, so without this a pr-agent that exits 0 having produced nothing would leave the
 # PREVIOUS run's file in place, and archive_run would file it - and `run.json` would claim it - as this
 # run's output.
-rm -f "$out_md" ${out_json:+"$out_json"} 2>/dev/null || true
+rm -f "$out_md" ${out_json:+"$out_json"} "$run_log" 2>/dev/null || true
+
+# The saved log opens with the call the bundle makes, so it explains what produced the records below it.
+# The diff is piped in rather than named, so it is described by its endpoints instead of dumped: the scope
+# and the refs it diffs. The rendered config is named by its ROLE, not its path - that path holds the
+# provider's credential, and a log is a file people paste into issues.
+run_invocation="preflight-code: pr-agent --extra_config_url <rendered config> --stdin --output $out_md"
+if [ -n "$out_json" ]; then run_invocation="$run_invocation --json-output $out_json"; fi
+run_invocation="$run_invocation $cmd"
+# `"$@"` is the caller's own extra arguments, which no scope adds for the commands this takes.
+for arg in "$@"; do run_invocation="$run_invocation $arg"; done
+if [ "$scope" = 'commit' ]; then
+  run_invocation="$run_invocation (scope=commit, diff: HEAD -> snapshot tree $hook_tree)"
+elif [ "$scope" = 'head' ]; then
+  run_invocation="$run_invocation (scope=head, diff: $diff_ref)"
+else
+  run_invocation="$run_invocation (scope=$scope, diff: $diff_ref)"
+fi
+printf '%s\n' "$run_invocation" >> "$run_log"
 
 # Run the review in the background and report its counts from the artifact, so a pr-agent that finishes
 # the review and then hangs on shutdown cannot hide `issues=`/`new=`/`coverage=`. Two bounded phases,
 # because a hang can happen before OR after the artifacts are written.
 if [ -n "$out_json" ]; then
   git diff ${diff_base:+"$diff_base"} "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
-    --output "$out_md" --json-output "$out_json" "$cmd" "$@" &
+    --output "$out_md" --json-output "$out_json" "$cmd" "$@" >> "$run_log" 2>&1 &
   pr_pid=$!
 
   # Phase 1: the review. `kill -0` tests liveness without reaping, so the exit status survives.
@@ -821,20 +906,20 @@ if [ -n "$out_json" ]; then
   fi
 
   [ -n "$complete" ] && emit_summary
-  [ "$pr_status" = 0 ] || exit "$pr_status"
+  [ "$pr_status" = 0 ] || { dump_run_log; exit "$pr_status"; }
   run_ok=1
 else
   # describe/improve/ask write no JSON artifact, so there is nothing to salvage: they are not bounded, and
   # a timeout must never cut off slow-but-valid work.
   git diff ${diff_base:+"$diff_base"} "$diff_ref" | pr-agent --extra_config_url "$cfg" --stdin \
-    --output "$out_md" "$cmd" "$@" &
+    --output "$out_md" "$cmd" "$@" >> "$run_log" 2>&1 &
   pr_pid=$!
   rc=0
   wait "$pr_pid" 2>/dev/null || rc=$?
   # Reaped: the pid is free to be reused, so cleanup() must not signal whoever gets it next. Cleared
   # before the exit, because that exit is the other path cleanup() runs on.
   pr_pid=''
-  [ "$rc" = 0 ] || exit "$rc"
+  [ "$rc" = 0 ] || { dump_run_log; exit "$rc"; }
   run_ok=1
 fi
 echo "preflight-code: wrote ${out_md}${out_json:+ and ${out_json}}" >&2

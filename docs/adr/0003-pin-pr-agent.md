@@ -30,7 +30,7 @@ The installer previously tracked the latest release.
 
 ## Decision
 
-Pin. `install.sh` installs a fixed version (default `0.47.0`) and exposes `PREFLIGHT_PR_AGENT_VERSION`
+Pin. `install.sh` installs a fixed version (default `0.48.0`) and exposes `PREFLIGHT_PR_AGENT_VERSION`
 to override it, because a pin that cannot be moved is a pin that blocks an urgent upgrade.
 
 CI asserts the pin cannot drift silently: that the `uv tool install` line carries it,

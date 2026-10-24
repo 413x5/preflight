@@ -578,9 +578,12 @@ This bundle does **not** compensate by chunking. `pr_reviewer.enable_large_pr_ch
 diff, review each chunk within `max_number_of_calls`, and merge the per-chunk results
 (`algo/review_merge.py` upstream) - but it is left off deliberately, so an over-budget diff costs exactly
 the one AI call an ordinary diff costs and the pruning is **reported** instead of hidden. That report is
-the mechanism: pr-agent appends a coverage footer whenever `remaining_files_list` is non-empty, and this is
-independent of chunking (verified against v0.47.0's `pr_reviewer.py`, which emits the footer after the
-chunked branch), so the footer arrives whether or not the diff was split.
+the mechanism: pr-agent appends a coverage footer whenever it left files out OR clipped patches mid-file,
+and this is independent of chunking (verified against `pr_reviewer.py`, which emits the footer after the
+chunked branch), so the footer arrives whether or not the diff was split. `preflight-code` matches the
+footer's SHAPE rather than its wording, because pr-agent carries one explanation per cause and rewords
+them between releases - a literal sentence retires the marker for the footer that replaced it, and a
+retired marker reports a partial review as a complete one.
 
 The other fields the bundle leaves off are in the same family, because asking for a field changes the
 schema the model is sent. `require_merge_recommendation` gates `merge_recommendation` in pr-agent's reviewer
@@ -639,7 +642,7 @@ output cap below for what it does instead.
 
 `config.model` is not necessarily the model that answered. pr-agent tries `config.model` first and only
 then each entry in `fallback_models`, recording the winner in the run details - and the run details reach
-`review.md` as prose, not as a field in `review.json` (v0.47.0's plain-diff JSON carries only `review` and
+`review.md` as prose, not as a field in `review.json` (the plain-diff JSON carries only `review` and
 `usage`). So the bundle reads the line pr-agent writes and repeats it on the summary line:
 
 ```

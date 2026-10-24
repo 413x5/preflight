@@ -300,13 +300,14 @@ stage_install() {
 
 
 
-  # The pr-agent pin is load-bearing: `preflight-code` matches the exact wording of pr-agent's own coverage
-  # footer, so an unpinned install can silently stop reporting coverage=PARTIAL. Anchor on the
-  # `uv tool install` COMMAND at line start - the pin string also appears in the `say` echo above it, so
-  # matching the bare string would pass with the install unpinned.
+  # The pr-agent pin is load-bearing: `preflight-code` matches the SHAPE of pr-agent's coverage footer
+  # (the bold header, an explanation ending in a colon, the code-span bullets), so an unpinned install can
+  # silently stop reporting coverage=PARTIAL. Anchor on the `uv tool install` COMMAND at line start - the
+  # pin string also appears in the `say` echo above it, so matching the bare string would pass with the
+  # install unpinned.
   grep -qE '^[[:space:]]*uv tool install .*pr-agent==' install.sh \
     || { echo "install.sh no longer pins pr-agent in the uv command" >&2; rc=1; }
-  grep -q 'PREFLIGHT_PR_AGENT_VERSION:-0\.47\.0' install.sh \
+  grep -q 'PREFLIGHT_PR_AGENT_VERSION:-0\.48\.0' install.sh \
     || { echo "install.sh pr-agent pin changed; re-verify the coverage footer fixture in tests/run.sh" >&2; rc=1; }
   rm -rf "$tmp"
   [ "$rc" = 0 ] && echo "installer OK"

@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Changed
+
+- **pr-agent is pinned to 0.48.0, and the coverage marker now matches the footer's shape.** 0.48 emits a
+  coverage footer for a second cause - files whose patches were clipped mid-file - and reworded the
+  sentence it already emitted for files left out. `preflight-code`'s `coverage=PARTIAL` marker matched that
+  sentence, so a 0.48 run with clipped files reported a clean summary line: exactly the silent partial
+  coverage the marker exists to prevent. The match is now structural (the `<hr>` anchor, the bold
+  `Review coverage:` header, an explanation ending in a colon, and code-span bullets), so a rewording is a
+  non-event, and `REQ-HOOK-28` asserts both footers. Three new `[pr_reviewer]` keys
+  (`require_failure_modes`, `publish_review_failure_comment`, `max_previous_findings_chars`) are listed in
+  `config/settings.toml.example` at upstream's values, and `compactifai` joins the renderer's transport
+  table - it was removed upstream, so the closed-table guard is what surfaced the table's staleness.
 
 ## [0.8.0] - 2026-10-24
 

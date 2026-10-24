@@ -32,7 +32,7 @@ py="${PREFLIGHT_PY:-3.13}"
 # exact wording of pr-agent's "files were not included" footer, so an unpinned upgrade can stop
 # coverage=PARTIAL from printing - a silently partial review, the failure this bundle exists to prevent.
 # Override to test a new release; the gate asserts this pin (scripts/verify, the `install` stage).
-pr_agent_version="${PREFLIGHT_PR_AGENT_VERSION:-0.47.0}"
+pr_agent_version="${PREFLIGHT_PR_AGENT_VERSION:-0.48.0}"
 
 
 say() { printf '%s\n' "$*" >&2; }

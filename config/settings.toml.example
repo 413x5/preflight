@@ -93,6 +93,9 @@ num_max_findings = 10
 # enable_intro_text = true
 # enable_help_text = false
 # enable_review_coverage_footer = true
+# require_failure_modes = false
+# publish_review_failure_comment = true
+# max_previous_findings_chars = 8000
 # enable_large_pr_chunking = false  # the bundle reports partial coverage instead of chunking
 # max_number_of_calls = 3  # does nothing unless chunking is on
 

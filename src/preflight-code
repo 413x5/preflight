@@ -711,17 +711,21 @@ if context_note != 'none':
 # Coverage belongs on the line an agent actually reads: a pruned diff means the model saw part of the
 # tree, so `issues=1` does NOT mean "one problem in the change". Reported only for the branch scopes.
 #
-# The match is against pr-agent's FOOTER BLOCK as it EMITS it - the `<hr>` anchor, the bold header, the
-# sentence and the generated `- \`file\`` bullets - not any single sentence, which a finding can quote
-# verbatim by accident. A byte-faithful reproduction is indistinguishable from the footer; a miss
-# degrades to the plain summary line, which is the safer error (a spurious PARTIAL teaches the reader
-# to ignore the marker).
+# The match is against pr-agent's FOOTER BLOCK as it EMITS it - the `<hr>` anchor, the bold header, an
+# explanation ending in a colon, and the generated bullets - not any single sentence, which a finding can
+# quote verbatim by accident. The explanation is NOT matched on its wording: pr-agent emits several of
+# them (files left out, patches clipped mid-file) and reworded the first between releases, so a literal
+# sentence silently disables the marker for the footer that replaced it - turning a partial review into a
+# clean summary line, which is the failure this marker exists to prevent. Covering both footers in one
+# alternative would not close that; matching the shape is what makes a rewording a non-event.
 COVERAGE_RE = re.compile(
     # `[^\n]*` rather than the emoji, which the lenient read below may have replaced with U+FFFD: requiring
     # the emoji would make the marker unable to fire on exactly the file it was written to tolerate, and
     # would make pr-agent's choice of pictograph load-bearing.
-    r"<hr>\s*\n\s*[^\n]*\*\*Review coverage:\*\*\s*The following files were not included in this "
-    r"review because of the token budget:\s*\n\s*-\s*`",
+    #
+    # The trailing bullet is load-bearing and must keep its backtick: it is what distinguishes the footer
+    # from prose that names it, and pr-agent wraps every path in a code span.
+    r"<hr>\s*\n\s*[^\n]*\*\*Review coverage:\*\*\s*[^\n]*:\s*\n\s*-\s*`",
     re.S)
 # Whether the CONFIGURED model answered, or a fallback did. pr-agent tries `config.model` and only then
 # `fallback_models`, recording the winner in run details - which reach the review as prose, NOT as a

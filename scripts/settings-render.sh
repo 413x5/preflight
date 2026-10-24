@@ -266,6 +266,11 @@ PROVIDER_LITELLM_KEYS = (
 DERIVED_LITELLM_KEYS = (
     "custom_llm_provider", "force_streaming_custom_llm_provider", "force_streaming_api_base_substrings",
 )
+# Config keys the renderer DERIVES from a configured reasoning_effort, so a value written here (or in a
+# profile, or in a repo override) would be a second answer that the render overwrites silently. Refused
+# by name in every position, then derived when reasoning_effort is actually set - which is what makes a
+# configured effort reach the provider instead of being dropped.
+DERIVED_CONFIG_KEYS = ("additional_reasoning_effort_models",)
 # settings.toml is the ONLY general source: it IS the config pr-agent receives,
 # through a render that adds the model, its endpoint and the litellm keys derived from the provider. So its
 # sections are pr-agent's own, passed through unchanged - there is no allow-list to keep in step with
@@ -370,6 +375,12 @@ if repo_path and os.path.exists(repo_path):
                    "and a committed file choosing one would spend that key on every machine that clones it",
                    "override review settings and the [gate] policy here; keep the models in "
                    "settings.toml/providers.toml")
+    for _dk in DERIVED_CONFIG_KEYS:
+        if isinstance(repo_data.get("config"), dict) and _dk in repo_data["config"]:
+            refuse(f".preflight.toml [config] sets '{_dk}', which preflight derives",
+                   "it is derived from the assigned profile's reasoning_effort, so a value here would be",
+                   "overwritten and silently ignored",
+                   "remove it from .preflight.toml [config]")
     for section, values in repo_data.items():
         base = data.get(section)
         if base is None:
@@ -413,6 +424,16 @@ for key in ASSIGNMENT_KEYS:
     if key in (data.get("config") or {}):
         refuse(f"settings.toml [config] sets '{key}', which [{SELECTION_SECTION}] decides",
                "which model answers is the assignment's job; a second place to name it is a second answer")
+
+# A [config] value for any of these would be overwritten by the render's derivation, so it is refused
+# rather than silently ignored: the reader would otherwise think they registered the model, while the
+# render replaces it with the model that is actually being asked.
+for key in DERIVED_CONFIG_KEYS:
+    if key in (data.get("config") or {}):
+        refuse(f"settings.toml [config] sets '{key}', which preflight derives",
+               "it is derived from the assigned profile's reasoning_effort, so a value here would be",
+               "overwritten and silently ignored",
+               "remove it from settings.toml [config] and set reasoning_effort on the profile instead")
 
 main_name = root_config.get("main", "")
 if not isinstance(main_name, str):
@@ -529,6 +550,13 @@ for name, body in sorted(profiles.items()):
         if section == "config" and "fallback_models" in contents:
             refuse(f"providers.toml {where}.config sets 'fallback_models'; the fallback chain comes from [selection] fallback",
                    "and a second place to name it is a second answer to the same question")
+        if section == "config":
+            for _dk in DERIVED_CONFIG_KEYS:
+                if _dk in contents:
+                    refuse(f"providers.toml {where}.config sets '{_dk}', which preflight derives",
+                           "it is derived from this profile's reasoning_effort, so a value here would be",
+                           "overwritten and silently ignored",
+                           "remove it and rely on reasoning_effort instead")
         # Each key is written as the name of a pr-agent setting, so a key that is not a setting name would
         # sit in the rendered file looking configured and be read by nothing.
         for key in sorted(contents):
@@ -724,11 +752,49 @@ for section in PROFILE_SECTIONS:
                    "doing nothing",
                    f"keep it in [profiles.{supplier}.{section}] - it describes the model - and remove it",
                    f"from settings.toml [{section}]" + (f"; {where}" if where else ""))
+    # DERIVED_CONFIG_KEYS are refused here too: a profile that sets one would have it copied into
+    # the rendered [config] and then silently replaced by the derivation block below. Only the primary
+    # profile's settings are merged here (supplier == main_name), so a fallback profile's setting
+    # would never be copied - but refusing it keeps the claim "refused in every position" honest.
+    if section == "config":
+        for _dk in DERIVED_CONFIG_KEYS:
+            if _dk in profile_settings:
+                refuse(f"settings.toml [profiles.{supplier}.config] sets '{_dk}', which preflight derives",
+                       "it is derived from this profile's reasoning_effort, so a value here would be",
+                       "overwritten and silently ignored",
+                       "remove it and rely on reasoning_effort instead")
     for key, value in profile_settings.items():
         target = rendered.setdefault(section, {})
         if not isinstance(target, dict):
             refuse(f"settings.toml [{section}] is not a table")
         target[key] = value
+
+# Derive additional_reasoning_effort_models from the configured reasoning_effort: pr-agent
+# forwards config.reasoning_effort to the provider ONLY for models it considers reasoning-capable
+# (litellm metadata or this list), so a configured effort on a model litellm does not know is
+# otherwise silently dropped. Registering the assigned model here makes the lever reach the provider.
+# Only the primary profile's reasoning_effort can trigger this: pr-agent holds one config per process,
+# so only the primary profile's settings are merged into the rendered [config] (fallback profiles'
+# settings are reported but never applied while they are fallbacks). A fallback profile that sets
+# reasoning_effort therefore cannot make it reach the provider while it is a fallback - consistent with
+# every other profile knob, and it applies the moment that profile is assigned as `main`.
+# Derived, not configured: a value written anywhere is refused by name above, and the render's value wins.
+_rendered_cfg = rendered.setdefault("config", {})
+if isinstance(_rendered_cfg, dict) and _rendered_cfg.get("reasoning_effort") not in (None, ""):
+    _existing = _rendered_cfg.get("additional_reasoning_effort_models")
+    if not isinstance(_existing, list):
+        _existing = []
+    # Register every model that can actually answer this run: the primary AND any fallback named in
+    # [selection] fallback. pr-agent retries the fallback models on a primary failure, and those calls
+    # use the same rendered [config] (one config per process), so a fallback that litellm does not
+    # consider reasoning-capable would otherwise drop the configured effort on the fallback call.
+    # Only the primary profile's reasoning_effort can trigger this (fallback profiles' settings are
+    # never merged), but the registration covers all models the run may use.
+    for _name in ([primary] + fallback_names):
+        _mid = model_by_profile.get(_name)
+        if isinstance(_mid, str) and _mid.strip() and _mid not in _existing:
+            _existing = list(_existing) + [_mid.strip()]
+    _rendered_cfg["additional_reasoning_effort_models"] = _existing
 
 entry = provider_entry[chosen_provider]
 transport = entry["transport"]

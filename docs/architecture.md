@@ -361,10 +361,13 @@ metadata calls reasoning-capable. An id that table does not know is read, logged
 escape hatch is `[config] additional_reasoning_effort_models`, naming the id explicitly, and the two are
 only useful together.
 
-`config/settings.toml.example` sets **neither**, so the practical effect is that **no** effort reaches this endpoint
-- not pr-agent's `medium` default either. A probe of the constructed request confirmed it: adding
-`reasoning_effort` produced a byte-identical payload. `docs/roadmap.md` carries the open decision on this;
-`docs/runbooks/troubleshooting.md` carries the measurements and the symptom.
+The bundle does not set `reasoning_effort` (it stays pr-agent's `medium` default), but it no longer lets
+the lever go inert: when a profile sets `reasoning_effort`, the renderer registers that profile's model in
+`additional_reasoning_effort_models` automatically, so a configured effort reaches the provider instead of
+being read, logged and dropped. `additional_reasoning_effort_models` is a derived key - set anywhere, it is
+refused by name and the render's value wins. A probe of the constructed request confirmed the previous
+behaviour: without the registration, adding `reasoning_effort` produced a byte-identical payload. The
+measurements and the symptom are in `docs/runbooks/troubleshooting.md`.
 
 There is deliberately **no sampling pin**, and it is inert anyway: `config.temperature` (upstream default
 0.2) and `config.seed` (default -1, i.e. unset) are left alone, and the endpoint measured here ignored

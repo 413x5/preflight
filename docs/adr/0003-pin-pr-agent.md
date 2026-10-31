@@ -30,12 +30,21 @@ The installer previously tracked the latest release.
 
 ## Decision
 
-Pin. `install.sh` installs a fixed version (default `0.48.0`) and exposes `PREFLIGHT_PR_AGENT_VERSION`
+Pin. `install.sh` installs a fixed version (default `0.49.0`) and exposes `PREFLIGHT_PR_AGENT_VERSION`
 to override it, because a pin that cannot be moved is a pin that blocks an urgent upgrade.
 
 CI asserts the pin cannot drift silently: that the `uv tool install` line carries it,
-and that its value is the version the coverage-footer fixture in `tests/run.sh` was copied from. A bump
-therefore has to come with a re-check of that fixture rather than a silent edit.
+that the spec names the `github` extra, and that its value is the version the coverage-footer fixture in
+`tests/run.sh` was copied from. A bump therefore has to come with a re-check of that fixture rather than a
+silent edit. `install.sh` also *verifies* the version that landed, and fails with the exact re-run command
+if the installed package is not the pin: trusting the installer's own command is how a machine ends up
+running a pr-agent this bundle was never checked against.
+
+`uv tool install` on an existing install converges on the spec - it upgrades AND downgrades to match - so
+the pin is enforced on every reinstall, not only on a fresh machine. What it will not do is add an extra
+that the spec does not name: it prints `already installed` for an identical spec, and re-running a plain
+pin after an extra was added prunes that extra again. The extra therefore belongs in the SAME spec as the
+version, which is what makes the install idempotent in both directions.
 
 ## Consequences
 
@@ -44,9 +53,13 @@ upstream's output format is explicit and checked, rather than discovered when a 
 partial coverage.
 
 Bad: bug fixes and model support from upstream arrive only when someone bumps the pin and re-verifies the
-fixture. Note also that `uv tool install` on an existing install reports "already installed" and does not
-upgrade, so installations predating this change were already effectively frozen - the pin closes the gap
-for fresh installs rather than changing behaviour for existing ones.
+fixture.
+
+**Corrected 2026-10-31.** An earlier version of this record claimed `uv tool install` on an existing
+install "reports already installed and does not upgrade". That is false for the uv versions this bundle
+supports (measured on uv 0.12.23, both directions): a reinstall moves to the pinned version, so the pin
+reaches machines that installed an earlier release. The *decision* to pin is unchanged; only that claim
+about the installer was wrong, and it was wrong in the direction that made the pin look weaker than it is.
 
 **What enforces it:** the `install` stage of [`../../scripts/verify`](../../scripts/verify), which fails if
 the pin line changes without the fixture being re-checked. CI runs that stage through the gate rather than

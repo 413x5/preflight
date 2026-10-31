@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Turn $PREFLIGHT_HOME/settings.toml + providers.toml into the ONE config file pr-agent is launched with,
-# written to $PREFLIGHT_HOME/.pragent.settings.<pid>.toml (600-mode, one per run).
+# written to $PREFLIGHT_HOME/.pragent.settings.<pid>.toml (600-mode, one per run) - or to
+# $PREFLIGHT_RENDER_DIR, or to a per-run temp dir when the config dir cannot be written.
 # Sourced by BOTH helpers, so `preflight` and `preflight-pr` resolve the same files the same way and
 # cannot disagree about which model answers.
 #
@@ -12,8 +13,8 @@
 # the section pr-agent reads them from, and the transport can only be PINNED by a settings key
 # (`litellm.custom_llm_provider`). Deriving both from one provider entry is what makes a pin that
 # disagrees with the endpoint - which LiteLLM resolves silently, to the wrong host - unrepresentable.
-# The rendered file is 600-mode at $PREFLIGHT_HOME/.pragent.settings.<pid>.toml, one per run. Mechanism:
-# docs/architecture.md.
+# The rendered file is 600-mode, one per run, in the config dir unless PREFLIGHT_RENDER_DIR moves it.
+# Mechanism: docs/architecture.md.
 #
 # Nothing here puts a credential in the environment: the key goes into the rendered file only.
 
@@ -28,15 +29,21 @@
 # render was produced, which the caller treats as a refusal (settings.toml missing, or assigning no profile).
 PREFLIGHT_RENDERED_CONFIG=''
 
+# INTERNAL, like PREFLIGHT_RENDERED_CONFIG: set when the per-run file went into a directory THIS render
+# created (the read-only fallback), so a caller removes that directory with the file. A directory the
+# operator named is never removed - it is theirs, and it may hold other runs' files.
+__preflight_render_dir_ephemeral=''
+
 # The command that sourced this file, for the messages below: the two helpers share this resolver, and a
 # refusal has to name the command the operator actually ran. Set by the caller before sourcing. The
 # fallback is the bundle's own command, because the gate and a direct `. scripts/settings-render.sh`
 # source this file without one - and the retired bare name must never appear in output.
 __preflight_caller_name="${__preflight_caller_name:-preflight-code}"
 
-# The rendered path is PER RUN: `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`. Two runs sharing one config
-# dir therefore never touch the same file, so no lock is needed - and a lock was the wrong shape anyway,
-# because it made correctness depend on every caller releasing it (the gate and a direct call to
+# The rendered path is PER RUN: `.pragent.settings.<pid>.toml` in the config dir - or in
+# `PREFLIGHT_RENDER_DIR` when it is set, or in a per-run temp dir when the config dir cannot be written.
+# Two runs therefore never touch the same file, so no lock is needed - and a lock was the wrong shape
+# anyway, because it made correctness depend on every caller releasing it (the gate and a direct call to
 # `__preflight_render_settings` do not, which left a lock the next run waited out).
 #
 # The suffix is the SHELL's pid (`$$`), so it is unique per run without `mktemp`, and the name still ends
@@ -87,9 +94,33 @@ __preflight_refuse_in_repo_config() {
   return 0
 }
 
+# The render DESTINATION, when it lies inside the repository being reviewed: the file this run is about to
+# write has to be ignored there, because the snapshot is `git add -A` and an unignored file is a key handed
+# to the model. The check above covers a config dir by listing what it holds - right for `providers.toml`,
+# whose neighbouring names no list can predict - but a PREFLIGHT_RENDER_DIR may be an empty scratch
+# directory, so "nothing unignored in here" stays true right up to the moment the credential lands. This
+# asks git about the exact file instead, which is the question that has an answer before it is written.
+__preflight_refuse_unignored_render() {
+  local dir="$1" name="$2" abs root reviewed
+  reviewed="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
+  [ -n "$reviewed" ] || return 0
+  abs="$(cd "$dir" 2>/dev/null && pwd -P)" || return 0
+  root="$(git -C "$abs" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  [ "$root" = "$reviewed" ] || return 0
+  git -C "$abs" check-ignore -q -- "$abs/$name" 2>/dev/null && return 0
+  printf '%s: %s is inside the repository being reviewed, and %s would not be ignored there\n' \
+    "$__preflight_caller_name" "$dir" "$name" >&2
+  printf '%s: it holds the model configuration and the API key, and this review stages the working tree\n' \
+    "$__preflight_caller_name" >&2
+  printf '%s: ignore %s there, or point PREFLIGHT_RENDER_DIR outside the repository\n' \
+    "$__preflight_caller_name" "$name" >&2
+  return 2
+}
+
 __preflight_render_settings() {
   local cfgdir="${1:-${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}}"
   local settings="$cfgdir/settings.toml" out rc=0
+  local render_dir=''
   # The repository whose `.preflight.toml` may override the machine settings. Passed by the caller, never
   # guessed here: `preflight-code` has already resolved the reviewed repository's root, and this function is
   # also called with fixtures that must not pick up the checkout's own file.
@@ -161,9 +192,56 @@ __preflight_render_settings() {
   # accepted as `--extra_config_url` and then silently ignored - the run answering on another model while
   # everything looked normal.
   # PER RUN, from the shell's pid: no two runs share a file, so there is nothing to serialise.
-  out="$cfgdir/.pragent.settings.$$.toml"
+  #
+  # The DIRECTORY is the config dir unless `PREFLIGHT_RENDER_DIR` names another. The config is still READ
+  # from the config dir either way: this variable moves where the ONE credential-bearing file is written,
+  # not where the model is configured. That is what lets a read-only config dir (a sandboxed
+  # `~/.config/preflight`, a Nix store, a shared dotfiles checkout) run a review at all.
+  render_dir="${PREFLIGHT_RENDER_DIR:-$cfgdir}"
+  if ! ( umask 077; mkdir -p "$render_dir" ) 2>/dev/null || [ ! -w "$render_dir" ]; then
+    if [ -n "${PREFLIGHT_RENDER_DIR:-}" ]; then
+      # An EXPLICIT directory that cannot be written is a REFUSAL, not a candidate for the fallback: the
+      # operator asked for that location (a private tmpfs, an encrypted mount), and quietly writing
+      # somewhere else would put the credential where they did not choose.
+      printf '%s: PREFLIGHT_RENDER_DIR=%s cannot be written, so the model configuration cannot be rendered there\n' \
+        "$__preflight_caller_name" "$render_dir" >&2
+      printf '%s: refusing to review with a model configuration that was not applied\n' "$__preflight_caller_name" >&2
+      return 2
+    fi
+    # The config dir is not writable, which is a normal state (a sandboxed `~/.config`, a shared dotfiles
+    # checkout) and not a reason to refuse a review: render into a per-run directory under the system temp
+    # dir instead. ANNOUNCED, never silent - a credential-bearing file now lives somewhere other than
+    # beside the config it came from, and `PREFLIGHT_RENDER_DIR` is how to make that choice explicit.
+    render_dir="${TMPDIR:-/tmp}/preflight-render.$$"
+    __preflight_render_dir_ephemeral="$render_dir"
+    if ! ( umask 077; mkdir -p "$render_dir" ) 2>/dev/null || [ ! -w "$render_dir" ]; then
+      printf '%s: %s is not writable and %s could not be created either\n' \
+        "$__preflight_caller_name" "$cfgdir" "$render_dir" >&2
+      printf '%s: refusing to review with a model configuration that was not applied\n' "$__preflight_caller_name" >&2
+      return 2
+    fi
+    # The temp dir is a real location, and it can be inside the reviewed repository (`TMPDIR` pointed at a
+    # scratch dir there, which a build system does), so the in-repo refusal covers it too. Only for the
+    # fallback: the config dir's own check runs below, over the config dir.
+    __preflight_refuse_in_repo_config "$render_dir" || return 2
+    # Where the file went, and the variable that would have chosen it. Both named, because the operator
+    # needs the directory to find the run's config and the variable to stop the fallback happening at all.
+    printf '%s: %s is not writable; rendering the model configuration into %s for this run\n' \
+      "$__preflight_caller_name" "$cfgdir" "$render_dir" >&2
+    printf '%s: set PREFLIGHT_RENDER_DIR to choose that location deliberately (the config is still read from %s)\n' \
+      "$__preflight_caller_name" "$cfgdir" >&2
+  fi
+  out="$render_dir/.pragent.settings.$$.toml"
 
   __preflight_refuse_in_repo_config "$cfgdir" || return 2
+  # A render directory this renderer CREATED is removed again when the refusal below fires: an empty
+  # directory left inside the reviewed tree is harmless, but leaving litter in someone's repository for a
+  # run that refused is not. Empty-only `rmdir`, and only when it is not the config dir, so a directory the
+  # operator set up is never touched.
+  if ! __preflight_refuse_unignored_render "$render_dir" ".pragent.settings.$$.toml"; then
+    if [ "$render_dir" != "$cfgdir" ]; then rmdir "$render_dir" 2>/dev/null || true; fi
+    return 2
+  fi
 
   # Removed first, then created 600 by the redirect below: overwriting in place would keep whatever mode
   # the old file had, and a file restored from a backup at 0644 is exactly the case that matters.
@@ -938,13 +1016,19 @@ PY
   # atomically (temp + rename inside the same dir), so a reader never sees a half-written config, and
   # 600-mode like the source. A failure here is reported but not fatal: the run's own config is already
   # complete, and refusing a valid run over a convenience copy would be the wrong trade.
+  #
+  # It stays in the CONFIG dir even when the render went elsewhere: the copy is for a human looking where
+  # the config lives, and a credential-bearing copy dropped into the temp dir a run is about to remove
+  # would be either useless or a leak. When the config dir is the unwritable thing, the message says so
+  # and names the run's own file, which is gone once the run ends.
   _latest="$cfgdir/.pragent.settings.toml"
   _tmp_latest="$cfgdir/.pragent.settings.part.$$.toml"
   if ( umask 077; cp "$out" "$_tmp_latest" && mv -f "$_tmp_latest" "$_latest" ) 2>/dev/null; then
     chmod 600 "$_latest" 2>/dev/null || true
   else
     rm -f "$_tmp_latest" 2>/dev/null
-    printf '%s: could not update %s (the run uses %s)\n' "$__preflight_caller_name" "$_latest" "$out" >&2
+    printf '%s: could not leave a copy of the render at %s for inspection (this run uses %s, removed when it ends)\n' \
+      "$__preflight_caller_name" "$_latest" "$out" >&2
   fi
   PREFLIGHT_RENDERED_CONFIG="$out"
   return 0

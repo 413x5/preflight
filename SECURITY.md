@@ -50,6 +50,12 @@ That framing decides what counts as a vulnerability here, so it is stated plainl
   editor copy, which is why the check is the directory and not a list of file names. The renderer refuses
   that layout and names the unignored files, and the resolver also refuses a key in any shadowed or
   derived position.
+- **Where that per-run file is written does not widen the trust model.** `PREFLIGHT_RENDER_DIR` moves it,
+  and a read-only config dir falls back to a per-run directory under the system temp dir (announced on
+  stderr). In every case the file is 600-mode from the moment it exists, removed by the run that wrote it,
+  and refused when it would land inside the reviewed repository - the check is made against the exact file,
+  so an empty scratch render dir cannot slip past it. An unwritable `PREFLIGHT_RENDER_DIR` refuses the run
+  rather than falling back, so the key is never written somewhere the operator did not choose.
 
 ## Outbound traffic
 

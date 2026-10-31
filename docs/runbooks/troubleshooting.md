@@ -27,6 +27,16 @@ The config pr-agent receives is rendered from `settings.toml` + `providers.toml`
 never "somewhere else" — the one in the named provider's entry is the one that is sent. There is no other
 file to look in.
 
+pr-agent 0.49 ships a `doctor` subcommand, and `preflight-pr` forwards subcommands to pr-agent, so
+`preflight-pr doctor` runs. **It does not answer this question**: pr-agent merges `--extra_config_url` as
+part of a run, after `doctor` has already read its own defaults, so what it reports is pr-agent's default
+model and no key from `providers.toml` - not the configuration a review would use. A `✗ no API key` line
+there is therefore expected on a correctly configured bundle.
+
+The check that does answer it is a review: `preflight-code review` renders the config, so a bad key or an
+unreachable endpoint fails with the endpoint's own error. The profile's token budgets are the next thing to
+look at (see "Using a different provider" below).
+
 ## Using a different provider
 
 Configuration is not an install-time variable: edit `~/.config/preflight/providers.toml` and point
@@ -77,6 +87,38 @@ if you want the whole diff in a single call.
 ## `preflight-code review` says the repository has no commits yet
 
 `preflight-code` snapshots from `HEAD`, and an empty repo has none. Make one commit first.
+
+## `preflight-code review` says the config dir "is not writable" (or renders into a temp dir)
+
+That is not an error: the run continues, and the two lines on stderr say where the rendered config went and
+that `PREFLIGHT_RENDER_DIR` is how to choose that location instead of letting the fallback decide. It
+happens when `~/.config/preflight` cannot be written - a sandbox that mounts it read-only, a shared or
+dotfiles checkout, an immutable package store.
+
+```sh
+mkdir -p "$TMPDIR/preflight-render"                      # anywhere you can write
+PREFLIGHT_RENDER_DIR="$TMPDIR/preflight-render" preflight-code review
+```
+
+`settings.toml` and `providers.toml` are still read from `PREFLIGHT_HOME`, so the review is the same
+review. Do **not** copy the config directory somewhere writable and point `PREFLIGHT_HOME` at the copy:
+the two then drift, and the next edit lands in the one nobody reviews with. Keep the render dir outside the
+repository being reviewed - one inside it is refused unless that exact path is gitignored there, because
+the review's `git add -A` snapshot would otherwise hand the key to the model. The run removes its own file
+when it ends; the copy kept for inspection stays in the config dir, or the run says where it could not be
+written.
+
+## `preflight-code review` says pr-agent "exited 0 without writing" a review
+
+Every changed file was filtered out before the model was called - a pending change that touches only
+lockfiles, assets or ignored paths. pr-agent logs `PR has no analyzable files ... skipping review` and
+exits with success, and writes neither `review.md` nor `review.json`; the helper treats that as a failed run
+(exit 1) rather than reporting files it did not write, because the commit hook would otherwise block with
+"no review found" for a review that never existed.
+
+There is nothing to review, so there is nothing to fix: the change carries no analyzable content. If a file
+you *did* mean to review is missing from the diff, the cause is pr-agent's file filter (`ignore.toml` in
+its package, or a `.gitignore`/`.pr_agent.toml` ignore rule) rather than this bundle.
 
 ## The review includes my `.preflight/` output
 

@@ -32,7 +32,13 @@ py="${PREFLIGHT_PY:-3.13}"
 # exact wording of pr-agent's "files were not included" footer, so an unpinned upgrade can stop
 # coverage=PARTIAL from printing - a silently partial review, the failure this bundle exists to prevent.
 # Override to test a new release; the gate asserts this pin (scripts/verify, the `install` stage).
-pr_agent_version="${PREFLIGHT_PR_AGENT_VERSION:-0.48.0}"
+pr_agent_version="${PREFLIGHT_PR_AGENT_VERSION:-0.49.0}"
+# The `github` extra is part of the spec, not an afterthought: pr-agent's git-provider SDKs (PyGithub and
+# the rest) are extras rather than base dependencies, so a plain pin installs a `preflight-pr` that fails
+# at the first hosted review with "Git provider 'github' could not be loaded". Naming the extra in the SAME
+# spec as the version is also what keeps `uv tool install` idempotent: a bare re-install prunes an extra
+# added separately, and the extra on its own would flip the venv back the other way.
+pr_agent_spec="pr-agent[github]==$pr_agent_version"
 
 
 say() { printf '%s\n' "$*" >&2; }
@@ -53,8 +59,26 @@ fi
 
 if [ "${PREFLIGHT_SKIP_TOOL_INSTALL:-0}" != "1" ]; then
   command -v uv >/dev/null 2>&1 || { say "install: 'uv' not found - install it first:"; say "  curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
-  say "==> uv tool install --python $py pr-agent==$pr_agent_version"
-  uv tool install --python "$py" "pr-agent==$pr_agent_version" >/dev/null
+  say "==> uv tool install --python $py $pr_agent_spec"
+  uv tool install --python "$py" "$pr_agent_spec" >/dev/null
+  # An install that quietly landed on a DIFFERENT pr-agent is the same failure as an unpinned one: every
+  # marker that reads pr-agent's output would be measuring a version this bundle was not verified
+  # against, and nothing above would say so. `uv tool install` is expected to converge on the spec, but
+  # the package that answers the command is what matters, so it is asked. Read from the installed
+  # package's own metadata rather than from `pr-agent --version`, which imports the whole handler stack
+  # and prints log warnings on a successful call.
+  _tool_env="$(uv tool dir 2>/dev/null || true)"
+  _installed=''
+  if [ -n "$_tool_env" ] && [ -x "$_tool_env/pr-agent/bin/python3" ]; then
+    _installed="$("$_tool_env/pr-agent/bin/python3" -c 'import importlib.metadata as m; print(m.version("pr-agent"))' 2>/dev/null || true)"
+  fi
+  if [ -z "$_installed" ] || [ "$_installed" != "$pr_agent_version" ]; then
+    say "!! pr-agent is ${_installed:-not installed} after the install, but this bundle pins $pr_agent_version"
+    say "   every marker that reads pr-agent's output was verified against $pr_agent_version"
+    say "   re-run:  uv tool install --python $py $pr_agent_spec"
+    exit 1
+  fi
+  say "==> pr-agent $_installed (with the github extra)"
 else
   say "==> skipping pr-agent install (PREFLIGHT_SKIP_TOOL_INSTALL=1)"
 fi

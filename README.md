@@ -13,7 +13,8 @@ install.
 |---|---|
 | `preflight-code review` | Reviews the **pending commit** — `HEAD` → working tree, untracked files included; writes `.preflight/review.md` + `.preflight/review.json` |
 | `preflight-gate` | Machine check over `review.json` (exit 0 = pass) |
-| `preflight-pr …` | PR-Agent with the global config (hosted/PR mode, needs a token) |
+| `preflight-pr …` | PR-Agent with the global config, in **hosted (PR) mode** — posts to the pull request, so it needs a token. `install.sh` installs pr-agent with its `github` extra for this; without that extra pr-agent refuses to load the provider ("Git provider 'github' could not be loaded"). Note the local loop does not use it: `preflight-code` runs pr-agent in plain-diff mode, which needs no git-provider SDK. Hosted mode is **not** covered end to end by this repo's tests (CI has no token), so treat it as the upstream path with this bundle's config, not as a verified one |
+| `preflight-pr doctor` | pr-agent's own deployment check (model configured, provider key present, a one-token completion succeeds). `preflight-pr` forwards subcommands to pr-agent, so it runs - but it reports **pr-agent's own** settings, not this bundle's: pr-agent merges `--extra_config_url` later in the run, after the doctor check has already read its defaults, so the model and key it prints are not the ones `preflight-code` would use. Treat it as a check of pr-agent, not of your `providers.toml` |
 
 Every run that succeeds and produces output is also kept, with its start time, finish time and
 `duration`, under `.preflight/runs/<id>/` — nothing is pruned, so the previous review survives the next
@@ -228,6 +229,26 @@ A run holds **one** endpoint, so `main` and its fallbacks must name the same pro
 transport per process, and a chain spanning two would be answered by whichever one is pinned — a different
 host, with that provider's key. `preflight-code` refuses that instead, naming the provider, and refuses a `provider`
 that no `[providers.*]` table defines rather than letting pr-agent fall back to another section's host.
+
+### A read-only config directory
+
+`settings.toml` and `providers.toml` are always **read** from `PREFLIGHT_HOME`. Each run also *writes* one
+file there - the rendered config pr-agent is launched with, 600-mode and named for the run's pid. When that
+directory cannot be written (a sandbox that mounts `~/.config` read-only, a shared dotfiles checkout), the
+run does not refuse:
+
+- it renders into a per-run directory under the system temp dir, and **says so on stderr**, naming that
+  directory and `PREFLIGHT_RENDER_DIR` - so the fallback is never silent;
+- `PREFLIGHT_RENDER_DIR=<dir>` makes the location deliberate instead of automatic. The config is still read
+  from `PREFLIGHT_HOME`; only the one credential-bearing file moves;
+- an **unwritable** `PREFLIGHT_RENDER_DIR` refuses the run rather than falling back, because writing the key
+  somewhere you did not choose is worse than not reviewing;
+- a render directory inside the repository being reviewed is refused unless that file path is gitignored
+  there - the same reason the config dir is: the review's snapshot is `git add -A`, so an unignored file
+  holding the key would be handed to the model.
+
+The copy kept for inspection (`.pragent.settings.toml`) stays in the config dir and is best-effort: if it
+cannot be written, the run says which file it used instead, and never fails over it.
 
 ## Use
 

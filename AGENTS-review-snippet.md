@@ -110,6 +110,10 @@ Every round is a full model call that re-reads the whole diff, so these habits a
 ### Operating invariants
 
 - **Do not commit to be reviewed.** The loop runs in the working tree; commit once, for the pull request.
+- **Never skip the gate on your own initiative.** Neither `git commit --no-verify` nor `PREFLIGHT_SKIP=1`
+  is yours to reach for: a skip is granted by the human asking for it, never assumed because a check is
+  inconvenient, slow, or looks unrelated to your change. Report the block and what it says instead - the
+  hook names the paths that changed since the review, and the fix is normally another review.
 - **The review supplements your test/lint gate, it does not replace it.** A clean review says nothing about
   types, lint or the tests.
 - **`.preflight/` is gitignored and per worktree.** The exclude lives in `.git/info/exclude`, so review

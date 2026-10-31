@@ -22,7 +22,14 @@ cleanup_pr() {
     while kill -0 "$pr_pid" 2>/dev/null && [ "$hold" -lt 5 ]; do sleep 1; hold=$((hold + 1)); done
     kill -KILL "$pr_pid" 2>/dev/null || true
   fi
-  if [ -n "${rendered_cfg:-}" ]; then rm -f "$rendered_cfg"; fi
+  if [ -n "${rendered_cfg:-}" ]; then
+    rm -f "$rendered_cfg"
+    # Only a directory the renderer CREATED for this run; one the operator named is theirs, and `rmdir`
+    # refuses a non-empty one anyway.
+    if [ -n "${__preflight_render_dir_ephemeral:-}" ]; then
+      rmdir "$__preflight_render_dir_ephemeral" 2>/dev/null || true
+    fi
+  fi
   return 0
 }
 trap cleanup_pr EXIT

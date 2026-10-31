@@ -95,6 +95,11 @@ Environment:
   PREFLIGHT_DIR        artifact dir (default .preflight)
   PREFLIGHT_HOME       config dir (default ~/.config/preflight) - settings.toml,
                        providers.toml and the hook helper are all read from here
+  PREFLIGHT_RENDER_DIR where the per-run rendered config is WRITTEN (default: PREFLIGHT_HOME).
+                       The config is still READ from PREFLIGHT_HOME; this only moves the one
+                       file that holds the key. Use it when the config dir is read-only (a
+                       sandbox, a shared checkout) - the run otherwise renders into a
+                       per-run directory under the system temp dir and says so on stderr
   PREFLIGHT_CONTEXT_FILE  file whose "Code review" section is sent as reviewer context
                        (default AGENTS.md; a repo-local file, relative to the repo root)
   PREFLIGHT_SKIP=1     (hook only) bypass the commit check once
@@ -437,6 +442,10 @@ normalise_run_log() {
 dump_run_log() {
   [ -s "$run_log" ] || return 0
   normalise_run_log
+  # normalise_run_log deletes a log that held nothing but the invocation, which is exactly what a run
+  # with no output leaves - so re-tested here rather than assumed, because reading the path it just
+  # removed would print a shell error instead of staying quiet about an empty log.
+  [ -s "$run_log" ] || return 0
   printf 'preflight-code: pr-agent output (also saved at %s):\n' "$run_log" >&2
   if ! sed 's/^/  /' "$run_log" >&2; then
     cat "$run_log" >&2 || true
@@ -459,7 +468,15 @@ cleanup() {
   # The rendered config is PER RUN (`.pragent.settings.<pid>.toml`), so this run owns it and removes it:
   # leaving it would accumulate one credential-bearing file per run, and nothing else would ever delete it.
   # The copy at the fixed name is the only one that survives, which is what it is for.
-  if [ -n "${rendered_cfg:-}" ]; then rm -f "$rendered_cfg"; fi
+  if [ -n "${rendered_cfg:-}" ]; then
+    rm -f "$rendered_cfg"
+    # Only a directory the renderer CREATED for this run is removed with the file - a read-only config dir
+    # would otherwise leave one empty temp directory per run. A directory the operator named is theirs and
+    # is left alone, even when this run happened to empty it. `rmdir` still refuses a non-empty one.
+    if [ -n "${__preflight_render_dir_ephemeral:-}" ]; then
+      rmdir "$__preflight_render_dir_ephemeral" 2>/dev/null || true
+    fi
+  fi
   normalise_run_log
   archive_run
 }
@@ -727,9 +744,26 @@ COVERAGE_RE = re.compile(
     # from prose that names it, and pr-agent wraps every path in a code span.
     r"<hr>\s*\n\s*[^\n]*\*\*Review coverage:\*\*\s*[^\n]*:\s*\n\s*-\s*`",
     re.S)
+# COVERAGE, in order of authority. review.json carries a structured `coverage` object in pr-agent 0.49
+# (`files_not_reviewed` / `files_partially_reviewed`), which is the list the footer is rendered FROM - so it
+# cannot be forged by prose and does not move when the footer is reworded. The footer match below stays as
+# the fallback for a package that does not write the object (0.48 and earlier), and because that older
+# package's only signal IS the prose. A `coverage` key that is present but malformed is treated as absent:
+# it cannot prove full coverage, and the footer still can.
+def coverage_lists(value):
+    if not isinstance(value, dict):
+        return None
+    for key in ('files_not_reviewed', 'files_partially_reviewed'):
+        if key in value and not isinstance(value[key], list):
+            return None
+    return (value.get('files_not_reviewed') or [], value.get('files_partially_reviewed') or [])
+
+structured_coverage = coverage_lists(d.get('coverage'))
+
 # Whether the CONFIGURED model answered, or a fallback did. pr-agent tries `config.model` and only then
 # `fallback_models`, recording the winner in run details - which reach the review as prose, NOT as a
-# field in review.json (checked against v0.47.0: the JSON carries only `review` and `usage`). So this is
+# field in review.json (the JSON carries `review`, `usage` and, from 0.49, `coverage` - no model field).
+# So this is
 # read from review.md, and the line it reads is the one pr-agent writes for every review, not a shape
 # invented here. It matters because a fallback answer is a different model's judgement presented as the
 # configured one - a run that looked at home in the bundle's own output while the model it was set up
@@ -754,7 +788,15 @@ tail = md[md.rfind('</table>') + len('</table>'):] if '</table>' in md else md
 # bundle does not chunk, pruning is what pr-agent does to an over-budget diff, so the marker is the only
 # thing that says a commit-scope review covered a slice. Suppressing it there would hide exactly the
 # partial review the marker exists to announce.
-if COVERAGE_RE.search(tail):
+#
+# EITHER signal fires it, deliberately: the two normally agree (pr-agent renders that footer FROM these
+# two lists), and where they disagree a missed partial review is the failure that matters - a review
+# covering a slice of the tree reads exactly like a clean one - so the marker cannot be talked out of
+# firing by a signal that says "complete". What the structured object adds is a signal that does not
+# depend on prose at all, so the marker survives a reworded footer and still fires when the footer is
+# switched off (`enable_review_coverage_footer = false`).
+_partial_structured = bool(structured_coverage and any(structured_coverage))
+if _partial_structured or COVERAGE_RE.search(tail):
     line += " coverage=PARTIAL (token budget left files out - see review.md)"
 # A fallback model answering is not the same review as the configured one answering, and nothing else on
 # this line says which happened - `context=` tells an agent the repository facts reached the model, so
@@ -911,6 +953,19 @@ if [ -n "$out_json" ]; then
 
   [ -n "$complete" ] && emit_summary
   [ "$pr_status" = 0 ] || { dump_run_log; exit "$pr_status"; }
+  # pr-agent exits 0 having written NEITHER artifact when every changed file was filtered out - a change
+  # that touches only a lockfile, an asset or an ignore rule. It logs "PR has no analyzable files ...
+  # skipping review" and returns success, so its own status cannot be the deciding signal: a caller would
+  # read exit 0 as a review, and the commit hook would then block with "no review found" - an unexplained
+  # block after a run that looked clean. A review that does not exist is a failed run, and the message
+  # names the cause so the operator does not go looking for a model problem.
+  if [ -z "$complete" ]; then
+    dump_run_log
+    printf 'preflight-code: pr-agent exited 0 without writing %s\n' "$out_json" >&2
+    printf 'preflight-code: the change has no files left to review after pr-agent filters lockfiles, assets and ignored paths\n' >&2
+    printf 'preflight-code: so this run produced no review; there is nothing for preflight-gate or the commit hook to read\n' >&2
+    exit 1
+  fi
   run_ok=1
 else
   # describe/improve/ask write no JSON artifact, so there is nothing to salvage: they are not bounded, and
@@ -926,7 +981,14 @@ else
   [ "$rc" = 0 ] || { dump_run_log; exit "$rc"; }
   run_ok=1
 fi
-echo "preflight-code: wrote ${out_md}${out_json:+ and ${out_json}}" >&2
+# Only a path that EXISTS is reported as written. pr-agent can exit 0 having written nothing (the same
+# no-analyzable-files path as above, for a command that has no artifact to check), and a "wrote ..." line
+# for a missing file is a claim the reader cannot verify and the next step trips over.
+if [ -f "$out_md" ]; then
+  echo "preflight-code: wrote ${out_md}${out_json:+ and ${out_json}}" >&2
+else
+  echo "preflight-code: pr-agent exited 0 without writing ${out_md}; this run produced no output" >&2
+fi
 
 # Record what was reviewed so the commit hook can verify it later. The hook reads gate.verdict,
 # which comes from the same rules preflight-gate applies (kept in one place: the gate itself).

@@ -112,6 +112,22 @@ asks `git ls-files -o --exclude-standard` over that dir and refuses with any fil
 that check *before* the snapshot as well as at the render: `git add -A` writes a blob for whatever it
 stages, so a refusal that only came afterwards would leave the key in `.git/objects`.
 
+**The render's directory is movable; the config's is not.** `settings.toml` and `providers.toml` are always
+read from `PREFLIGHT_HOME`. The one file that holds the key is written to `PREFLIGHT_RENDER_DIR` when that
+is set, and to a per-run directory under the system temp dir when the config dir cannot be written at all -
+a sandboxed `~/.config/preflight` is the case that produced this, and the workaround before it was to copy
+the whole config dir somewhere writable, which let the copy drift from the real one. The fallback is
+announced on stderr, never silent: it moves a credential-bearing file away from the config it came from.
+An explicitly named directory is never a candidate for the fallback - if it cannot be written the run
+refuses, because writing the key somewhere the operator did not choose is worse than not reviewing. Every
+other property is unchanged: 600-mode, one file per run, removed by the run, and refused when it would land
+inside the reviewed repository. That last check asks git about the exact file rather than about the
+directory, because a render dir can be an empty scratch directory, and "nothing unignored in here" is true
+of it right up to the moment the credential is written into it.
+
+The inspection copy stays in the config dir. When that directory is the unwritable thing, the renderer says
+so and names the run's own file instead - the copy is best-effort by design and never fails a run.
+
 **Two files, and nothing else.** `settings.toml` says what the *review* does — which profiles are assigned,
 and the review's own pr-agent settings — and `providers.toml` says which *models* exist, what each needs, and
 where its endpoint is. They are the only two files: the render starts from a copy of
@@ -166,9 +182,10 @@ name, which is why naming the provider on its own line is the supported way to c
 ## Secrets
 
 - Live in `~/.config/preflight/providers.toml` (`chmod 600`), one `key` per `[providers.*]` entry.
-- They reach pr-agent only through the per-run rendered config at `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`,
-  which is 600-mode; the copy left at `.pragent.settings.toml` is the same content, and both sit outside
-  any repository by default (see above for the gitignored-in-repo case).
+- They reach pr-agent only through the per-run rendered config, which is 600-mode and one file per run:
+  `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`, or the same name in `PREFLIGHT_RENDER_DIR`, or in a
+  per-run temp directory when the config dir is read-only. The copy left at `.pragent.settings.toml` is the
+  same content. All of these are outside any repository, or the renderer refuses (see above).
 - Nothing is written into the pr-agent package: the rendered config carries the section pr-agent reads, so
   no file is edited there.
 
@@ -628,11 +645,20 @@ both are tested: a miss retires the marker and a partial review reads as complet
 `PARTIAL` fires it on a complete one and teaches the reader to ignore it. Treat the summary line as a
 pointer to the authoritative signal, which is the footer in `review.md` itself.
 
-pr-agent's structured `remaining_files_list` is not exposed in plain-diff JSON, so there is no exact
-signal to use instead. CI checks the marker against the footer literal from pr-agent's source and against
-the near-miss shapes that must not fire, and `tests/run.sh` `REQ-HOOK-28` re-checks it against the
-**installed** pr-agent's own footer source (skipping where the tool is absent), which is also where the
-table assumption is exercised against real output.
+pr-agent 0.49 also writes a structured `coverage` object into `review.json` -
+`{files_not_reviewed, files_partially_reviewed}`, the two lists the footer is rendered FROM - and the
+marker reads it as a second signal. Either signal fires it: they normally agree, and where they disagree a
+missed partial review is the failure that matters, so a "complete" answer from one cannot veto the other.
+The object is what makes the marker survive a reworded footer, and it still works with
+`enable_review_coverage_footer = false`. A package that writes no object (0.48 and earlier) is unaffected:
+the footer is then the only signal, which is why it stays. `REQ-HOOK-52` checks that the keys pr-agent
+emits are the keys the summary block reads, so a rename upstream fails a case instead of retiring half the
+marker.
+
+CI checks the marker against the footer literal from pr-agent's source and against the near-miss shapes
+that must not fire, and `tests/run.sh` `REQ-HOOK-28` re-checks it against the **installed** pr-agent's own
+footer source (skipping where the tool is absent), which is also where the table assumption is exercised
+against real output.
 
 The real budget lever is `config.max_model_tokens` / `custom_model_max_tokens`: raise those and the whole
 diff fits in a single call. The bundle does not chunk the diff to reach that; see the section on the
@@ -642,8 +668,9 @@ output cap below for what it does instead.
 
 `config.model` is not necessarily the model that answered. pr-agent tries `config.model` first and only
 then each entry in `fallback_models`, recording the winner in the run details - and the run details reach
-`review.md` as prose, not as a field in `review.json` (the plain-diff JSON carries only `review` and
-`usage`). So the bundle reads the line pr-agent writes and repeats it on the summary line:
+`review.md` as prose, not as a field in `review.json` (the plain-diff JSON carries `review`, `usage` and,
+from 0.49, `coverage` - no model field). So the bundle reads the line pr-agent writes and repeats it on the
+summary line:
 
 ```
 preflight-code: issues=0 security=No risk=n/a merge=n/a effort=3 tokens=84055 model=FALLBACK (the configured model did not answer - see review.md)

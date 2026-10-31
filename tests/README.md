@@ -88,6 +88,9 @@ the selfcheck itself is `REQ-SELF-nn`, listed in its own table below.
 | REQ-HOOK-44 | A named model configuration is rendered into the single config pr-agent is launched with: driven through the real `src/preflight-code` with a stubbed `pr-agent` that copies the config it was handed, the case asserts the file is the rendered one and not empty, that it carries the named provider's endpoint, key and derived transport pin, that an unrelated provider's streaming workaround does not survive, and that the per-run file is 600-mode and deleted by the run that wrote it, with a 600-mode copy left at the fixed name for inspection | a run launched with no config at all looks identical in the output, and would answer on pr-agent's own defaults; a pin taken from anywhere but the provider entry routes the request to the wrong host, which LiteLLM resolves silently; an inherited streaming pair fires on a host the user never connected to it; a config dir inside a repository, with the rendered path not ignored, leaves the provider's credential in the diff the review is handed |
 | REQ-HOOK-45 | Every configuration that cannot be applied is refused **by name**, and no review runs: a chain spanning two providers, a provider no `[providers.*]` table defines, a profile naming no provider, a profile-level `litellm` section, a transport pr-agent cannot route, an `api_base` on a transport that reads none, and an assignment with no resolver installed | each of these is answered by pr-agent without an error - the pinned provider's host serves the other model's request, or the profile's settings are dropped - so a run that proceeds is a review the user cannot tell apart from a correct one |
 | REQ-HOOK-46 | `preflight-pr` removes the per-run rendered config its own EXIT trap owns, reports pr-agent's exit status rather than a cleanup failure, and passes the caller's stdin through to pr-agent - driven against a stub `pr-agent` that reads stdin and then exits 3 | the renderer's cases drive `src/preflight-code` and the renderer directly, so a trap in this helper that called a function the renderer no longer defines, or dropped its `rm`, leaked one credential-bearing 600-mode file per run and hid the real exit status behind 127, with the suite green |
+| REQ-HOOK-50 | The per-run rendered config can be written outside a read-only config dir: with `PREFLIGHT_HOME` at mode 0555 the review still completes, the file pr-agent is handed is under a per-run temp directory, both the directory and `PREFLIGHT_RENDER_DIR` are named on stderr, the file is 600-mode and removed by the run; `PREFLIGHT_RENDER_DIR` is honoured and the config is still read from `PREFLIGHT_HOME`; an unwritable explicit render dir REFUSES rather than falling back; and a render dir inside the reviewed repository is refused unless that exact file is gitignored there | a read-only config dir (a sandbox, a shared checkout) failed every review, and the operator workaround was to copy the whole config dir somewhere writable - which lets the copy drift from the one being edited. The move must not reopen the key-leak either: a render dir inside the reviewed tree is handed to the model by the `git add -A` snapshot, and a DIRECTORY-level ignore check cannot see it, because an empty scratch dir holds nothing to find until the credential is written into it - so the check asks git about the file itself |
+| REQ-HOOK-51 | A review pr-agent exits 0 having written nothing for is a FAILED run that names the cause and never claims to have written a file that is not there, while an ordinary run still reports the artifacts it wrote | pr-agent 0.49 returns success and writes neither artifact when every changed file is filtered out ("PR has no analyzable files ... skipping review"). The helper printed `wrote .preflight/review.md and .preflight/review.json` over files that did not exist, and the commit hook then blocked with "no review found" - an unexplained block after a run that looked clean. 0.47 raised on the same input instead of skipping it, so the upgrade had turned a loud failure into a false success. Both directions are asserted, because "never says wrote" is satisfied by a helper that says nothing at all |
+| REQ-HOOK-52 | pr-agent's structured `coverage` object carries the two keys the helper reads (`files_not_reviewed`, `files_partially_reviewed`), and the shipped summary block still reads `review.json`'s `coverage` object - checked against the INSTALLED package's own emitter, and SKIPPED with a reason on a package that writes no object (0.48 and earlier) | pr-agent 0.49 added the object and the helper reads those two names, so a rename upstream would silently retire the structured half of `coverage=PARTIAL`; the footer fallback would keep this suite green, which is exactly the drift the case exists to catch |
 | REQ-HOOK-47 | A review that has written nothing yet says so on stderr at `PREFLIGHT_PROGRESS_EVERY` intervals, and stays quiet once the artifact exists - a stub `pr-agent` that sleeps against one that writes its artifacts immediately | phase 1 waits up to `PREFLIGHT_REVIEW_WAIT`, so a wedged endpoint and a slow review were both an hour of silence: the operator had no output to tell them apart, and the only discovery was the bound expiring |
 | REQ-HOOK-48 | A review killed by a signal leaves no `pr-agent` behind - the stub writes its own pid to a file and `exec`s a long sleep, so the case watches the exact child; the helper is killed with `TERM` and the case asserts that pid is gone | `cleanup()` removed the per-run rendered config but never reaped the child it launched, so an abnormal exit (a signal, an arithmetic error under `set -e`) left `pr-agent` running. It holds the caller's stdout pipe open, so `x="$(preflight-code review)"` blocks for the length of a model call after the script is gone: the bug reads as a hang in the wrong process, and no test covered an exit that is not the normal one |
 | REQ-HOOK-49 | `preflight-pr` killed by a signal leaves no `pr-agent` behind - the same pid-file stub and `TERM` as REQ-HOOK-48, driven through `src/preflight-pr` | the twin leak in the sibling helper: it launched pr-agent as a child with no captured pid, and its EXIT trap removed only the rendered config, so a killed PR run blocked the caller's stdout for the length of a model call. REQ-HOOK-48 covered `preflight-code` only, and the two helpers share the launch shape, so fixing one left the other able to reproduce the same hang |
@@ -213,6 +216,13 @@ reverted in turn and the expected case was confirmed to fail:
 | the `api_base`-on-a-key-only-transport refusal removed | REQ-HOOK-45 |
 | the `rm` removed from `preflight-pr`'s EXIT trap, so the per-run render outlives the run | REQ-HOOK-46 |
 | the trap restored to calling the renderer's removed `__preflight_unlock`, so it reports 127 and masks pr-agent's status | REQ-HOOK-46 |
+| the temp-dir fallback made silent (the two stderr lines dropped), so a credential-bearing file moves without a word | REQ-HOOK-50 |
+| an unwritable `PREFLIGHT_RENDER_DIR` falling back to the temp dir instead of refusing, so the key lands where the operator did not choose | REQ-HOOK-50 |
+| the render dir's in-repo check made DIRECTORY-level (or dropped), so an empty scratch dir inside the reviewed repo is accepted and the key is staged by `git add -A` | REQ-HOOK-50 |
+| the fallback rendering kept in the config dir (the writability test inverted), so a read-only config dir fails the review again | REQ-HOOK-50 |
+| the missing-artifact exit removed, so a review pr-agent never wrote exits 0 and the "wrote ..." line claims files that do not exist | REQ-HOOK-51 |
+| the structured `coverage` reader dropped, so the marker depends on the footer text alone again | REQ-HOOK-52 |
+| a stub `pr-agent` that exits without draining stdin (the `cat >/dev/null` removed from one), so `git diff` dies of SIGPIPE and the helper reports 141 instead of the review's status - caught by the `hooktests` stub scan, which named the line | the `hooktests` stage, before the suite runs |
 | the progress note deleted, so a run that writes nothing waits silently | REQ-HOOK-47 |
 | the interval test replaced with one that always fires, so every normal review is noisy | REQ-HOOK-47 |
 | the numeric guard on `PREFLIGHT_PROGRESS_EVERY` removed, so a typo prints a shell error per iteration | REQ-HOOK-47 |
@@ -285,6 +295,28 @@ It reports the split, so drift is visible in the output:
 
 The selfcheck is itself mutation-tested: adding a temporary case that passes with the hook neutered must
 fail it while unclassified, must still fail once marked sensitive, and must pass once marked insensitive.
+
+## Every stub drains stdin
+
+`preflight-code` streams the diff into pr-agent with `git diff … | pr-agent … &` and then `wait`s on the
+**pipeline**. Under `set -o pipefail` that status is the pipeline's, so a child that exits without reading
+its stdin kills the writer with `SIGPIPE` and `wait` returns **141** — not the child's own status. The
+helper reports 141 as a failed run, and a case that expected a review then fails for a reason that has
+nothing to do with what it tests.
+
+Which side wins the race decides whether it happens at all, so the same commit passed on macOS and failed
+on Ubuntu: the writer had not yet reached the pipe when the child exited there.
+
+So **every stub that can exit must drain stdin** — `cat >/dev/null` after the argument loop, or `cat >
+"$SOME_FILE"` when the case records what it was handed. The `hooktests` stage fails, naming the line, if a
+stub in `run.sh` can exit without one; that check is a property of the file rather than a fix at the stubs
+that happened to flake, because a stub added later would reintroduce it and a one-leg flake is invisible
+locally. A stub that deliberately never exits (it `exec`s a sleep, so a case can test the wait or the reap)
+is exempt: its writer is blocked rather than dead, and every case using one asserts a **non-zero** status,
+which a `SIGPIPE` could not turn into a false pass.
+
+Do not "fix" a `SIGPIPE` by dropping `pipefail` or by retrying in `src/preflight-code`: a real pr-agent
+that exits on a closed stdin is a real condition, and the helper should keep reporting it.
 
 ## A trap worth knowing
 

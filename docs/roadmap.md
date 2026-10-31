@@ -40,7 +40,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
       are not levers for `review` at all, so running them would return "no effect" and prove nothing.
       `model_reasoning` is reached only from `pr_code_suggestions.py` (the `improve` command, which
       already self-reflects and drops by `suggestions_score_threshold`), while `pr_reviewer.py` always
-      calls with `ModelType.REGULAR`. `[config] duplicate_examples` is read by no code in v0.48.0 - it <!-- doc-path-ok: names a key that does NOT exist, in order to warn against it -->
+      calls with `ModelType.REGULAR`. `[config] duplicate_examples` is read by no code in v0.49.0 - it <!-- doc-path-ok: names a key that does NOT exist, in order to warn against it -->
       appears only in `_help_docs/usage-guide/changing_a_model.md`, not in `configuration.toml` and not in
       any `.py`.
 
@@ -173,7 +173,7 @@ Wanted; needs design, or an experiment to settle. Two groups:
       incremental, so this would re-review only what changed since the last pass.
 - [ ] **Remember the last reviewed commit** so a second `preflight-code review` can skip unchanged work.
 
-## What upstream's own docs say (checked against the installed v0.48.0)
+## What upstream's own docs say (checked against the installed v0.49.0)
 
 Read from the package's shipped `_help_docs/` rather than the website, so it matches what we run. Several
 items bear directly on the convergence problem, and one contradicts a choice this bundle made.
@@ -203,7 +203,7 @@ items bear directly on the convergence problem, and one contradicts a choice thi
   `configuration.toml`: the model generates findings, then a follow-up call scores each 0-10 and drops the
   incorrect ones. Reachable only from `improve` (`pr_code_suggestions.py`), never from `review`.
 - **`duplicate_examples`** - documented for weak/local models as duplicating prompt examples "to help the
-  model to generate structured output". **Dead in v0.48.0**: present only in
+  model to generate structured output". **Dead in v0.49.0**: present only in
   `_help_docs/usage-guide/changing_a_model.md`, read by no code and not in `configuration.toml`.
 - **`improve`'s `suggestions_score_threshold`** - a documented quality filter; the same
   self-reflection/score mechanism as `model_reasoning`.
@@ -235,3 +235,8 @@ Needs a decision or an external dependency.
 - Watch the endpoint's usage quota, where it has one - reviews are token-heavy
   (see [`measurements.md`](measurements.md)).
 - Rotate the endpoint key periodically (it lives in a `chmod 600` file, never in the environment).
+- **Can `pr-agent doctor` be given this bundle's rendered config?** Today it reports pr-agent's own defaults:
+  the doctor path runs before `apply_host_settings()`, which is where `--extra_config_url` is merged, so a
+  `✗ no API key` line is expected on a correctly configured bundle. Settling it needs either a pr-agent
+  change or a way to feed the same values in that the doctor path does read - worth knowing before pointing
+  anyone at `doctor` as a first-run self-check.

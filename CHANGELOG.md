@@ -7,7 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Changed
+
+- **pr-agent is pinned to 0.49.0, and the `github` extra ships with the pin.** The pin is verified rather
+  than edited: `pr_reviewer`'s keys are unchanged between 0.48 and 0.49 (no additions, removals or default
+  changes, checked against both packages), so the `REQ-HOOK-29` knob check and `config/settings.toml.example`
+  still apply as written, and the renderer's transport table still matches pr-agent's own
+  `PROVIDER_SETTING_PATHS`. 0.48 moved the git-provider SDKs (PyGithub and the rest) out of the base
+  dependencies into extras, so a plain pin installed a `preflight-pr` that died on its first hosted review
+  with "Git provider 'github' could not be loaded" - the local `preflight-code` loop needs no extra, and did
+  not fail, which is why this went unnoticed. The extra is named in the SAME spec as the version, because
+  `uv tool install` prunes an extra the spec does not name and prints "already installed" for an identical
+  one: naming it separately would flip the venv back and forth on every reinstall. `install.sh` now also
+  checks the version that LANDED and fails with the exact re-run command, so a stale or foreign pr-agent
+  cannot masquerade as the pinned one. `docs/adr/0003-pin-pr-agent.md` corrected its claim that
+  `uv tool install` does not upgrade an existing install - it converges in both directions on the uv
+  versions this bundle supports (the decision to pin is unchanged).
+
+- **`coverage=PARTIAL` now reads pr-agent 0.49's structured `coverage` object as well as the footer.** 0.49
+  writes `coverage: {files_not_reviewed, files_partially_reviewed}` into `review.json` - the lists the
+  footer is rendered FROM - so the marker no longer depends on prose alone: it survives a reworded footer
+  and still fires when `enable_review_coverage_footer` is off. Either signal fires it, because the failure
+  that matters is a missed partial review (a review of a slice reads exactly like a clean one), and the
+  footer match stays as the fallback for a package that writes no object. `REQ-HOOK-52` checks the two ends
+  agree on the key names, and the `coverage` stage pins the structured and footer paths in both directions.
+
+- **A read-only config dir no longer blocks a review.** `preflight-code` needs to write one rendered,
+  600-mode config per run beside `settings.toml`, which fails when `~/.config/preflight` is mounted
+  read-only - a sandbox, a shared checkout. It now renders into a per-run directory under the system temp
+  dir in that case, announced on stderr (naming the directory and `PREFLIGHT_RENDER_DIR`), and
+  `PREFLIGHT_RENDER_DIR` makes the location deliberate. Config is still READ from `PREFLIGHT_HOME`. An
+  explicitly named directory that cannot be written refuses the run rather than falling back, and a render
+  directory inside the reviewed repository is refused unless that exact file is gitignored there - the
+  check asks git about the file, not the directory, because an empty scratch dir passes a directory check
+  right up until the key is written into it. Every other property is unchanged: 600-mode, one file per
+  run, removed by the run. `REQ-HOOK-50` covers all four cases.
+
+- **A review pr-agent never wrote is reported as a failure, not a pass.** pr-agent 0.49 exits 0 having
+  written neither artifact when every changed file is filtered out (a pending change that only touches a
+  lockfile, say), logging "PR has no analyzable files ... skipping review". The helper printed
+  `wrote .preflight/review.md and .preflight/review.json` over files that did not exist, and the commit hook
+  then blocked with "no review found" - an unexplained block after a run that looked clean. That run now
+  exits non-zero, names the cause, and never claims to have written a file that is not there. 0.47 raised
+  on the same input instead of skipping it, so this restores a failure the upgrade had turned into a false
+  success.
+
+- **Guidance: an agent never skips the gate on its own initiative.** `AGENTS.md` and
+  `AGENTS-review-snippet.md` now state that `git commit --no-verify` and `PREFLIGHT_SKIP=1` are the human's
+  call, not an agent's - a skip is granted when the person asks for one, and a block is information to act
+  on rather than an obstacle to route around. The snippet section is `required` in its classification
+  table, so a consuming repository keeps it.
+
+- **`preflight-pr` is documented for what it needs and what has been verified.** README now says hosted
+  mode needs the `github` extra (which `install.sh` provides), that the local loop does not, and that
+  hosted mode is not covered end to end by this repo's tests - CI has no token. It also records what
+  `preflight-pr doctor` actually checks (pr-agent's own defaults, not this bundle's rendered config, since
+  pr-agent merges `--extra_config_url` after `doctor` has read its settings), so a `✗ no API key` line
+  there is expected rather than alarming.
 
 ## [0.9.0] - 2026-10-24
 

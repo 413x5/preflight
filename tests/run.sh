@@ -1201,6 +1201,11 @@ case_summary_wiring() {
   d="$work/wiring"; fake="$work/wiring-bin"
   mkdir -p "$d" "$fake"
   # Writes both artifacts, so the helper treats the review as complete and reads the counts from JSON.
+  #
+  # The `cat >/dev/null` is not decoration: the helper streams the diff into the child and `wait`s on the
+  # PIPELINE, so under `pipefail` a child that exits without reading makes `git diff` die of SIGPIPE and
+  # the run reports 141 instead of the review's status. Every stub here drains stdin for that reason; see
+  # "Every stub drains stdin" in tests/README.md.
   cat > "$fake/pr-agent" <<'FAKE'
 #!/bin/sh
 while [ $# -gt 0 ]; do
@@ -1210,6 +1215,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[{"relevant_file":"a.py","issue_header":"H","issue_content":"same"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3,"risk_level":"low","merge_recommendation":"review carefully"},"usage":{"total_tokens":123}}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1236,6 +1242,10 @@ FAKE
         bash "$repo_root/src/preflight-code" review ) 2>&1
   }
 
+  # The status asserted is EXACTLY 0, and the stub draining stdin is what makes that a fact rather than a
+  # race: a child that exits unread leaves `git diff` with SIGPIPE and `wait` reports the pipeline's 141, so
+  # this case would fail for a fixture reason instead of the wiring it tests. With the drain, 141 is not a
+  # status this fixture can produce.
   rc=0; out="$(run_once)" || rc=$?
   [ "$rc" = 0 ] || problems="$problems
         | the first run failed (exit $rc), so the summary was never produced: $out"
@@ -1271,6 +1281,9 @@ case_verdict_fields() {
   local d fake out rc problems=""
   d="$work/verdict"; fake="$work/verdict-bin"
   mkdir -p "$d" "$fake"
+  # Every stub below drains stdin before writing anything, for the reason the wiring case spells out: the
+  # helper waits on the pipeline, so a child that exits unread turns `git diff`'s SIGPIPE into exit 141
+  # and the assertion would read it as a failed review rather than a stub defect.
   cat > "$fake/pr-agent" <<'FAKE'
 #!/bin/sh
 while [ $# -gt 0 ]; do
@@ -1280,6 +1293,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":3,"risk_level":"low","merge_recommendation":"review carefully"},"usage":{"total_tokens":123}}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1296,6 +1310,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No"}}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1356,6 +1371,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":"text","usage":5}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1387,6 +1403,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":true},"usage":{"total_tokens":7}}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1415,6 +1432,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":"no issues","security_concerns":"No"}}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1645,6 +1663,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '{"review":{"key_issues_to_review":[{"relevant_file":"a.py","issue_header":"H","issue_content":"c"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3},"usage":{"total_tokens":123}}\n' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 [ -n "$FAKE_PID" ] && printf '%s\n' "$$" > "$FAKE_PID"
@@ -1659,6 +1678,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 sleep 6
 [ -n "$out" ] && printf 'a description\n' > "$out"
 [ -n "$FAKE_PID" ] && printf '%s\n' "$$" > "$FAKE_PID"
@@ -2600,6 +2620,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 {
   printf 'ARTIFACT_PATH=%s\n' "${ARTIFACT_PATH:-}"
   printf 'ARTIFACT_INSTRUCTIONS=%s\n' "${ARTIFACT_INSTRUCTIONS:-}"
@@ -2841,13 +2862,28 @@ MD
 # renderer that reports one thing and writes another is caught.
 
 model_stub() {
-  # $2 is the value of --extra_config_url: the config this run was pointed at.
+  # The stub RECORDS the value of --extra_config_url - the config this run was pointed at - and writes
+  # both artifacts, like a real review does. The artifacts matter: a stub that exits 0 having written
+  # nothing is the "no analyzable files" shape, which the helper reports as a failed run (REQ-HOOK-51), so
+  # leaving it silent here would make every case that only cares about the rendered config fail for an
+  # unrelated reason and hide the thing it is testing.
   local fake="$1"
   cat > "$fake/pr-agent" <<'FAKE'
 #!/bin/sh
-printf '%s\n' "$2" > "$PREFLIGHT_CFG_OUT"
-cp "$2" "$PREFLIGHT_CFG_COPY" 2>/dev/null
+cfg=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --extra_config_url) cfg="$2"; shift 2 ;;
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
 cat > /dev/null
+printf '%s\n' "$cfg" > "$PREFLIGHT_CFG_OUT"
+cp "$cfg" "$PREFLIGHT_CFG_COPY" 2>/dev/null
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No"},"usage":{"total_tokens":1}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
 FAKE
   chmod +x "$fake/pr-agent"
@@ -3080,6 +3116,7 @@ PY
   # outside the repository, and the NEXT run rewrites it rather than reusing it.
   cat > "$fake/pr-agent" <<'FAKE'
 #!/bin/sh
+cat >/dev/null
 printf '%s\n' "$2" > "$PREFLIGHT_CFG_OUT"
 exit 3
 FAKE
@@ -3745,6 +3782,294 @@ TOML
 "; fi
 }
 
+# --------------------------------------------------------------- the structured coverage object
+
+case_structured_coverage_agrees() {
+  # pr-agent 0.49 writes `coverage: {files_not_reviewed, files_partially_reviewed}` into review.json, for
+  # plain-diff mode too. The helper reads those two names, so a rename upstream would silently drop the
+  # structured half of the `coverage=PARTIAL` signal - the marker would fall back to the footer text and
+  # stay green here, which is the drift this case exists to catch. Both ends are read: the installed
+  # package's emitter, and the shipped summary block.
+  #
+  # SKIPS rather than fails on a package that does not write the object at all (0.48 and earlier), for the
+  # same reason the other pr-agent-dependent cases skip: the shape being checked does not exist there, and
+  # CI never installs pr-agent.
+  local sp
+  sp="$(ls -d "$HOME"/.local/share/uv/tools/pr-agent/lib/*/site-packages/pr_agent 2>/dev/null | head -n1)"
+  if [ -z "$sp" ] || [ ! -f "$sp/tools/pr_reviewer.py" ]; then
+    skip "the structured coverage object matches the keys the helper reads" "REQ-HOOK-52" "pr-agent not installed"
+    return
+  fi
+  python3 - "$sp/tools/pr_reviewer.py" "$repo_root/src/preflight-code" <<'PY'
+import re, sys
+
+reviewer, helper = sys.argv[1:3]
+psrc = open(reviewer, encoding="utf-8", errors="replace").read()
+anchor = psrc.find('structured_data["coverage"]')
+if anchor < 0:
+    print("SKIP this pr-agent writes no structured coverage object")
+    sys.exit(3)
+block = psrc[anchor:anchor + 400]
+emitted = set(re.findall(r'"([a-z_]+)":', block))
+wanted = {"files_not_reviewed", "files_partially_reviewed"}
+if emitted != wanted:
+    sys.exit(f"pr-agent's coverage object carries {sorted(emitted)}, not {sorted(wanted)}; "
+             "the summary-line reader must be re-derived from the new names")
+
+hsrc = open(helper, encoding="utf-8").read()
+if 'd.get(\'coverage\')' not in hsrc:
+    sys.exit("the summary block no longer reads review.json's coverage object")
+missing = sorted(wanted - set(re.findall(r"'([a-z_]+)'", hsrc)))
+if missing:
+    sys.exit("the summary block does not read these coverage keys: " + ", ".join(missing))
+PY
+  case "$?" in
+    0) ok "the structured coverage object matches the keys the helper reads" "REQ-HOOK-52" ;;
+    3) skip "the structured coverage object matches the keys the helper reads" "REQ-HOOK-52" \
+         "this pr-agent writes no structured coverage object (0.48 and earlier)" ;;
+    *) bad "the structured coverage object matches the keys the helper reads" "REQ-HOOK-52" \
+         "the two ends agree on files_not_reviewed / files_partially_reviewed" "see above" \
+         "a renamed key retires the structured half of coverage=PARTIAL while the footer fallback keeps the case green" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------- writable render dirs
+
+# `$PREFLIGHT_HOME` is not always writable: a sandboxed `~/.config/preflight` is the case that motivated
+# this, and the operator's workaround was to copy the whole config dir somewhere writable - which meant the
+# review ran against a copy that then drifted from the real one. The renderer now writes the per-run config
+# elsewhere when it cannot write beside the config, and `PREFLIGHT_RENDER_DIR` makes that choice deliberate.
+#
+# Every security property has to survive the move, so this asserts them rather than the exit status alone:
+# the file pr-agent is handed is still 600-mode, still per-run, still removed by the run, and still refused
+# when it would land inside the repository being reviewed.
+case_render_dir_selection() {
+  local d fake cfg tmpdir problems='' rc url out
+  d="$work/renderdir"; fake="$work/renderdir-bin"; cfg="$work/renderdir-cfg"
+  tmpdir="$work/renderdir-tmp"
+  mkdir -p "$fake" "$tmpdir"
+  model_repo "$d"
+  model_cfg_dir "$cfg"
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "work-main"
+
+[providers.work]
+api_base = "https://llm.internal.corp/v1"
+key = "key-two"
+
+[profiles.work-main]
+provider = "work"
+model = "their-model-id"
+TOML
+)"
+  # Writes both artifacts, so the run is a COMPLETE review: the point is that a read-only config dir does
+  # not turn a good review into a refusal, and the artifact is what proves it got that far.
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+cfg=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --extra_config_url) cfg="$2"; shift 2 ;;
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat >/dev/null
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No"},"usage":{"total_tokens":1}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+printf '%s\n' "$cfg" > "$PREFLIGHT_CFG_OUT"
+cp "$cfg" "$PREFLIGHT_CFG_COPY" 2>/dev/null || true
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent"
+  rm -f "$work/renderdir.url"
+
+  # $1 = a value for PREFLIGHT_RENDER_DIR, or '' to leave it unset. Set explicitly rather than inherited,
+  # so a value in the developer's environment cannot decide what this case exercises.
+  run_dir() {
+    rc=0
+    ( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" TMPDIR="$tmpdir" \
+        PREFLIGHT_RENDER_DIR="$1" \
+        PREFLIGHT_CFG_OUT="$work/renderdir.url" PREFLIGHT_CFG_COPY="$work/renderdir.copy" \
+        PREFLIGHT_HOME="$cfg" bash "$repo_root/src/preflight-code" review ) \
+      >"$work/renderdir.out" 2>&1 || rc=$?
+    url="$(cat "$work/renderdir.url" 2>/dev/null || true)"
+    out="$(cat "$work/renderdir.out")"
+    rm -f "$work/renderdir.url"
+  }
+
+  # (1) The config dir cannot be written. The review must still run, and the fallback must be ANNOUNCED:
+  # silently rendering elsewhere would move a credential-bearing file without saying so.
+  chmod 0555 "$cfg"
+  run_dir ''
+  chmod 0755 "$cfg"
+  [ "$rc" = 0 ] || problems="$problems
+        | (1) a read-only config dir failed the review (exit $rc): $out"
+  [ -f "$d/.preflight/review.md" ] || problems="$problems
+        | (1) a read-only config dir produced no review.md, so the run did not reach pr-agent"
+  case "$url" in
+    "$tmpdir"/*) ;;
+    *) problems="$problems
+        | (1) the per-run config was written to ${url:-nowhere}, not under the system temp dir" ;;
+  esac
+  case "$out" in
+    *"is not writable"*) ;;
+    *) problems="$problems
+        | (1) the fallback was silent: nothing on stderr said the config dir could not be written" ;;
+  esac
+  case "$out" in
+    *"PREFLIGHT_RENDER_DIR"*) ;;
+    *) problems="$problems
+        | (1) the fallback did not name PREFLIGHT_RENDER_DIR as the way to make it deliberate" ;;
+  esac
+  case "$out" in
+    *"$tmpdir/preflight-render"*) ;;
+    *) problems="$problems
+        | (1) the fallback message did not name the directory it used" ;;
+  esac
+  # The credential-carrying file is 600-mode wherever it landed, and the run removed its own.
+  [ "$(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$work/renderdir.copy" 2>/dev/null)" = "0o600" ] \
+    || problems="$problems
+        | (1) the rendered config in the fallback directory is not 600-mode, and it holds the key"
+  [ -z "$url" ] || [ ! -e "$url" ] || problems="$problems
+        | (1) the run left its per-run rendered config behind: $url (it holds the key)"
+
+  # (2) PREFLIGHT_RENDER_DIR names the directory, deliberately. Same properties, and the config is still
+  # READ from PREFLIGHT_HOME - which is what makes this usable with a read-only config dir at all.
+  mkdir -p "$work/renderdir-explicit"
+  run_dir "$work/renderdir-explicit"
+  [ "$rc" = 0 ] || problems="$problems
+        | (2) PREFLIGHT_RENDER_DIR failed the review (exit $rc): $out"
+  case "$url" in
+    "$work/renderdir-explicit"/*) ;;
+    *) problems="$problems
+        | (2) PREFLIGHT_RENDER_DIR was ignored: pr-agent was handed ${url:-nothing}" ;;
+  esac
+  case "$out" in
+    *"is not writable"*) problems="$problems
+        | (2) an explicit render dir still reported the config dir as unwritable, so the fallback ran" ;;
+  esac
+  # The inspection copy stays in the CONFIG dir - it is for a human looking where the config lives - and
+  # the run's own file is the only thing the render dir gets.
+  [ -f "$cfg/.pragent.settings.toml" ] || problems="$problems
+        | (2) no inspectable copy of the render was left in the config dir"
+  [ -z "$(ls -A "$work/renderdir-explicit" 2>/dev/null)" ] || problems="$problems
+        | (2) the render dir was left holding something after the run: $(ls -A "$work/renderdir-explicit")"
+  [ -z "$url" ] || [ ! -e "$url" ] || problems="$problems
+        | (2) the run left its per-run rendered config behind: $url (it holds the key)"
+
+  # (3) An EXPLICIT directory that cannot be written is a REFUSAL, not a candidate for the fallback:
+  # writing the credential somewhere the operator did not choose is the failure this variable exists to
+  # avoid. Falsifiable both ways - a run that fell back anyway would exit 0 here.
+  mkdir -p "$work/renderdir-closed"
+  chmod 0555 "$work/renderdir-closed"
+  run_dir "$work/renderdir-closed"
+  chmod 0755 "$work/renderdir-closed"
+  [ "$rc" != 0 ] || problems="$problems
+        | (3) an unwritable PREFLIGHT_RENDER_DIR fell back instead of refusing, putting the key where the
+        |     operator did not choose"
+  [ -z "$url" ] || [ ! -e "$url" ] || problems="$problems
+        | (3) a refused run still handed pr-agent ${url}"
+
+  # (4) A render dir INSIDE the repository being reviewed is the key-leak the in-repo guard exists for:
+  # the review snapshots the working tree with `git add -A`, so an unignored file there is handed to the
+  # model. The fallback must not reopen that door, and neither must the explicit directory.
+  run_dir "$d/scratchpad"
+  [ "$rc" != 0 ] || problems="$problems
+        | (4) a render dir inside the reviewed repository was accepted, so the key would be staged"
+  case "$out" in
+    *"would not be ignored there"*) ;;
+    *) problems="$problems
+        | (4) the refusal for a render dir inside the repository did not name the cause: $out" ;;
+  esac
+  rm -rf "$d/scratchpad"
+
+  if [ -z "$problems" ]; then ok "the per-run config can be rendered outside a read-only config dir" "REQ-HOOK-50"
+  else bad "the per-run config can be rendered outside a read-only config dir" "REQ-HOOK-50" \
+        "temp-dir fallback announced, PREFLIGHT_RENDER_DIR honoured, refused when unwritable or in-repo" \
+        "see below" "$problems
+"; fi
+}
+
+# --------------------------------------------------------------- a review that was never written
+
+case_no_analyzable_files() {
+  # pr-agent 0.49 exits 0 having written NEITHER artifact when every changed file is filtered out - a
+  # pending change that touches only a lockfile, an asset or an ignored path. It logs "PR has no analyzable
+  # files ... skipping review" and returns success, so its exit status cannot be the signal: the helper
+  # printed "wrote .preflight/review.md and .preflight/review.json" over files that did not exist, and the
+  # commit hook then blocked with "no review found" - an unexplained block after a run that looked clean.
+  #
+  # Both directions, because "never says wrote" is satisfied by a helper that never reports anything: an
+  # ordinary run must still say what it wrote.
+  local d fake problems='' rc out
+  d="$work/noanalyzable"; fake="$work/noanalyzable-bin"
+  mkdir -p "$d" "$fake"
+  model_repo "$d"
+  model_cfg_dir "$work/noanalyzable-cfg"
+  printf '#!/bin/sh\ncat >/dev/null\nexit 0\n' > "$fake/pr-agent"
+  chmod +x "$fake/pr-agent"
+  run_it() {
+    rc=0
+    out="$( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" PREFLIGHT_HOME="$work/noanalyzable-cfg" \
+              bash "$repo_root/src/preflight-code" review 2>&1 )" || rc=$?
+  }
+
+  run_it
+  [ "$rc" != 0 ] || problems="$problems
+        | a run whose pr-agent wrote no review exited 0, so a missing review reads as a pass"
+  [ ! -f "$d/.preflight/review.json" ] || problems="$problems
+        | the case is invalid: a review exists, so the missing-artifact path was never exercised"
+  case "$out" in
+    *"wrote .preflight/review.md"*) problems="$problems
+        | the run claimed it wrote files pr-agent never produced: $out" ;;
+  esac
+  case "$out" in
+    *"no files left to review"*) ;;
+    *) problems="$problems
+        | the failure did not name the cause (every file filtered out), so it reads as a model failure: $out" ;;
+  esac
+  case "$out" in
+    *review.json*) ;;
+    *) problems="$problems
+        | the failure did not name the artifact that is missing: $out" ;;
+  esac
+
+  # The counterweight: a run that DOES write its artifacts still reports them, so the assertion above
+  # cannot be satisfied by removing the message altogether.
+  cat > "$fake/pr-agent" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --json-output) js="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat >/dev/null
+[ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No"},"usage":{"total_tokens":1}}' > "$js"
+[ -n "$out" ] && printf '<table></table>\n' > "$out"
+exit 0
+FAKE
+  chmod +x "$fake/pr-agent"
+  run_it
+  [ "$rc" = 0 ] || problems="$problems
+        | an ordinary run failed (exit $rc): $out"
+  case "$out" in
+    *"wrote .preflight/review.md and .preflight/review.json"*) ;;
+    *) problems="$problems
+        | an ordinary run did not report what it wrote: $out" ;;
+  esac
+
+  if [ -z "$problems" ]; then ok "a review pr-agent never wrote is reported as a failure, not a pass" "REQ-HOOK-51"
+  else bad "a review pr-agent never wrote is reported as a failure, not a pass" "REQ-HOOK-51" \
+        "exit non-zero naming the cause, no 'wrote' claim, and an ordinary run still reports its artifacts" \
+        "see below" "$problems
+"; fi
+}
+
 # ---------------------------------------------------------------------------- preflight-pr cleanup
 
 # `preflight-pr` launches pr-agent as a child so its own EXIT trap can remove the per-run rendered config.
@@ -3895,6 +4220,7 @@ case_review_progress_note() {
   # ... and the note must not fire when the artifact arrives first, or every normal review is noisy.
   cat > "$fake/pr-agent" <<'FAKE'
 #!/bin/sh
+cat >/dev/null
 printf '{}' > .preflight/review.json
 printf 'done' > .preflight/review.md
 exit 0
@@ -4097,7 +4423,8 @@ insensitive='REQ-HOOK-07 REQ-HOOK-08 REQ-HOOK-09 REQ-HOOK-10 REQ-HOOK-14 REQ-HOO
 REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31
 REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36 REQ-HOOK-37 REQ-HOOK-38
 REQ-HOOK-39 REQ-HOOK-40 REQ-HOOK-41 REQ-HOOK-42 REQ-HOOK-43
-REQ-HOOK-44 REQ-HOOK-45 REQ-HOOK-46 REQ-HOOK-47 REQ-HOOK-48 REQ-HOOK-49'
+REQ-HOOK-44 REQ-HOOK-45 REQ-HOOK-46 REQ-HOOK-47 REQ-HOOK-48 REQ-HOOK-49
+REQ-HOOK-50 REQ-HOOK-51 REQ-HOOK-52'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -4237,6 +4564,9 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_review_context \
     case_model_configuration \
     case_model_configuration_refusals \
+    case_structured_coverage_agrees \
+    case_render_dir_selection \
+    case_no_analyzable_files \
     case_pr_rendered_config_removed \
     case_review_progress_note \
     case_abnormal_exit_reaps_child \

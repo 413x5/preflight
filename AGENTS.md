@@ -229,6 +229,12 @@ with Ruby's built-in Psych if you need to inspect config.
 
 ## Never do these
 
+- **Never skip the gate on your own initiative.** `git commit --no-verify` and `PREFLIGHT_SKIP=1` are the
+  documented escape hatches, and both are the human's call, never an agent's: a skip is granted when the
+  person you are working for asks for one. A block is information - it names the paths that changed since
+  the review - so the fix is another review, not a bypass. Running `./scripts/verify` with
+  `PREFLIGHT_VERIFY_SKIP=<stage>` is the same rule: it exists for one commit, it is named in that commit's
+  message, and it is not a way to get a green run.
 - **Never commit a secret.** Only the `config/*.toml.example` templates are committed - settings has no
   credential field, and the providers example carries a placeholder endpoint and an empty `key`. Real keys
   live in `$PREFLIGHT_HOME/providers.toml` (`~/.config/preflight` by default, chmod 600), never in the
@@ -262,7 +268,10 @@ with Ruby's built-in Psych if you need to inspect config.
   setting the render drops is a setting the run loses; and it holds a credential, so it stays 600-mode, at
   `$PREFLIGHT_HOME/.pragent.settings.<pid>.toml`, outside the repository (a review stages the working tree
   with `git add -A`). One file per run, so concurrent runs cannot read each other's key; each run deletes
-  its own, and a copy of the last is left at `.pragent.settings.toml` for inspection.
+  its own, and a copy of the last is left at `.pragent.settings.toml` for inspection. The DIRECTORY is
+  movable - `PREFLIGHT_RENDER_DIR`, or a per-run temp dir when the config dir cannot be written, announced
+  on stderr - and the move never relaxes the rest: the in-repo guard applies to the render file itself,
+  because a render dir can be an empty scratch directory that a directory-listing check would clear.
 - **Never make the `post-commit` advisory exit 0 on a sidecar it cannot read.** It is the only thing that
   reports silent non-enforcement, so a malformed sidecar or a missing `python3` must warn. An *absent*
   sidecar stays quiet (no review has run, and `pre-commit` refuses first).

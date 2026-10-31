@@ -305,10 +305,59 @@ stage_install() {
   # silently stop reporting coverage=PARTIAL. Anchor on the `uv tool install` COMMAND at line start - the
   # pin string also appears in the `say` echo above it, so matching the bare string would pass with the
   # install unpinned.
-  grep -qE '^[[:space:]]*uv tool install .*pr-agent==' install.sh \
-    || { echo "install.sh no longer pins pr-agent in the uv command" >&2; rc=1; }
-  grep -q 'PREFLIGHT_PR_AGENT_VERSION:-0\.48\.0' install.sh \
+  grep -qE '^[[:space:]]*uv tool install .*"\$pr_agent_spec"' install.sh \
+    || { echo "install.sh no longer installs the pinned spec in the uv command" >&2; rc=1; }
+  grep -q 'PREFLIGHT_PR_AGENT_VERSION:-0\.49\.0' install.sh \
     || { echo "install.sh pr-agent pin changed; re-verify the coverage footer fixture in tests/run.sh" >&2; rc=1; }
+  # The `github` extra is what makes `preflight-pr` work at all: pr-agent moved its git-provider SDKs out
+  # of the base dependencies, so a plain pin installs a hosted mode that fails on its first review with
+  # "Git provider 'github' could not be loaded". Asserted on the SPEC, because naming it in a second
+  # command would be undone by the next re-install and leave the extra half-present.
+  grep -q 'pr_agent_spec="pr-agent\[github\]==\$pr_agent_version"' install.sh \
+    || { echo "install.sh no longer installs the github extra, so preflight-pr cannot load a git provider" >&2; rc=1; }
+  # And the install must CHECK what landed rather than trust uv: an install that left a different version
+  # in place would run every review against a pr-agent the bundle was never verified against.
+  grep -q 'importlib.metadata as m; print(m.version("pr-agent"))' install.sh \
+    || { echo "install.sh no longer verifies the installed pr-agent version against the pin" >&2; rc=1; }
+  # The check above only proves the code is present; a check that cannot fail is the same false result as
+  # no check. Both directions are driven through a stub `uv` that installs nothing, so neither the network
+  # nor this machine's real pr-agent is involved: a tool dir with no package must FAIL the install, one
+  # reporting a different version must fail and name it, and one reporting the pin must pass.
+  mkdir -p "$tmp/uvb/bin" "$tmp/uvb/tools/pr-agent/bin" "$tmp/uvb/cfg" "$tmp/uvb/binout"
+  cat > "$tmp/uvb/bin/uv" <<'UVSTUB'
+#!/bin/sh
+case "$1 $2" in
+  "tool install") exit 0 ;;
+  "tool dir") printf '%s\n' "$UV_TOOL_DIR"; exit 0 ;;
+esac
+exit 0
+UVSTUB
+  chmod +x "$tmp/uvb/bin/uv"
+  # The version a machine would report, written as a shell stub so the installer's own probe reads it.
+  write_reported_version() {
+    printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$1" > "$tmp/uvb/tools/pr-agent/bin/python3"
+    chmod +x "$tmp/uvb/tools/pr-agent/bin/python3"
+  }
+  run_uvb() {
+    PATH="$tmp/uvb/bin:$PATH" UV_TOOL_DIR="$tmp/uvb/tools" \
+    PREFLIGHT_HOME="$tmp/uvb/cfg" PREFLIGHT_BIN_DIR="$tmp/uvb/binout" \
+      ./install.sh >"$tmp/uvb/$1.out" 2>&1
+  }
+  rm -f "$tmp/uvb/tools/pr-agent/bin/python3"
+  run_uvb missing && { echo "installer accepted a machine where no pr-agent landed" >&2; rc=1; }
+  grep -q 'after the install, but this bundle pins' "$tmp/uvb/missing.out" \
+    || { echo "installer did not report a missing pr-agent after the install" >&2; rc=1; }
+  write_reported_version 0.1.0
+  run_uvb wrong && { echo "installer accepted a pr-agent that is not the pin" >&2; rc=1; }
+  grep -q 'is 0.1.0 after the install' "$tmp/uvb/wrong.out" \
+    || { echo "installer did not name the version it found" >&2; rc=1; }
+  # The pin is read FROM install.sh rather than repeated here, so a bump does not also edit this stage.
+  _pin="$(sed -n 's/.*PREFLIGHT_PR_AGENT_VERSION:-\([0-9][0-9.]*\).*/\1/p' install.sh)"
+  [ -n "$_pin" ] || { echo "cannot read the pr-agent pin out of install.sh" >&2; rc=1; }
+  write_reported_version "$_pin"
+  run_uvb right || { echo "installer refused a machine that has the pin installed" >&2; rc=1; }
+  grep -q "pr-agent $_pin (with the github extra)" "$tmp/uvb/right.out" \
+    || { echo "installer did not confirm the pinned pr-agent" >&2; rc=1; }
   rm -rf "$tmp"
   [ "$rc" = 0 ] && echo "installer OK"
   return "$rc"
@@ -1024,7 +1073,10 @@ read = set(re.findall(r"\$\{?(PREFLIGHT_[A-Z_]+)", src))
 INTERNAL = {"PREFLIGHT_RENDERED_CONFIG"}
 # Read by a DIFFERENT helper in the bundle, and documented here because `preflight-code --help` is the bundle's
 # one help page - the hook has no `--help` of its own. Checked against that file so the claim stays true.
-DELEGATED = {"PREFLIGHT_SKIP": "src/preflight-hook"}
+# PREFLIGHT_RENDER_DIR belongs to the shared renderer, which both helpers source; documenting it on the
+# helper a user runs is what makes it findable, and the renderer is where it is read.
+DELEGATED = {"PREFLIGHT_SKIP": "src/preflight-hook",
+             "PREFLIGHT_RENDER_DIR": "scripts/settings-render.sh"}
 should_be_helped = read - INTERNAL
 missing = sorted(should_be_helped - helped)
 advertised_but_unread = sorted(helped - read - set(DELEGATED))
@@ -1230,12 +1282,11 @@ open(json_path, "w").write('{"review":{"key_issues_to_review":[]}}')
 script = os.path.join(d, "summary.py")
 open(script, "w").write(blocks[-1])
 
-def summary(body):
+def summary(body, current=None):
     md = os.path.join(d, "review.md")
     open(md, "w", encoding="utf-8").write(body)
-    # The marker only fires for the branch scopes: a pending-commit diff is far below the token budget,
-    # so pr-agent never prunes it. This exercises the marker's matching, so it runs in the scope where
-    # the marker can appear at all.
+    if current is not None:
+        open(json_path, "w", encoding="utf-8").write(current)
     env = dict(os.environ)
     env["PREFLIGHT_SCOPE_IS_BRANCH"] = "1"
     return subprocess.run([sys.executable, script, json_path, md],
@@ -1267,6 +1318,33 @@ for label, body in (
 # The plain line always carries its counts, whatever the verdict.
 if "issues=0" not in summary(footer):
     fails.append("the summary line lost its counts")
+# The STRUCTURED object pr-agent 0.49 writes into review.json. It is the list the footer is rendered
+# from, so it fires the marker with no footer text at all - which is what makes the marker survive a
+# reworded footer, and what keeps it working when the footer is switched off.
+clean_table = "<table>\n<tr><td>clean</td></tr>\n</table>\n"
+if "PARTIAL" not in summary(clean_table, '{"review":{"key_issues_to_review":[]},'
+                                          '"coverage":{"files_not_reviewed":["late.py"],'
+                                          '"files_partially_reviewed":[]}}'):
+    fails.append("a structured coverage object naming an un-reviewed file was not detected")
+if "PARTIAL" not in summary(clean_table, '{"review":{"key_issues_to_review":[]},'
+                                          '"coverage":{"files_not_reviewed":[],'
+                                          '"files_partially_reviewed":["clipped.py"]}}'):
+    fails.append("a structured coverage object naming a partially-reviewed file was not detected")
+# Both empty is a complete review, so the marker must stay off - the object is not a free PARTIAL.
+if "PARTIAL" in summary(clean_table, '{"review":{"key_issues_to_review":[]},'
+                                     '"coverage":{"files_not_reviewed":[],'
+                                     '"files_partially_reviewed":[]}}'):
+    fails.append("an empty structured coverage object was misread as coverage")
+# A malformed object must not crash the line, and must not silence a footer that does say partial: the
+# object is a signal, not a veto, so a string where a list belongs falls back to the text match.
+if "PARTIAL" not in summary(clean_table + footer, '{"review":{"key_issues_to_review":[]},'
+                                                  '"coverage":{"files_not_reviewed":"late.py"}}'):
+    fails.append("a malformed structured coverage object suppressed the footer match")
+if "PARTIAL" in summary(clean_table, '{"review":{"key_issues_to_review":[]},"coverage":"none"}'):
+    fails.append("a non-object coverage field was read as partial coverage")
+# pr-agent 0.48 and earlier write no coverage key at all, so the footer stays the only signal.
+if "PARTIAL" not in summary(clean_table + footer, '{"review":{"key_issues_to_review":[]}}'):
+    fails.append("a review.json without a coverage key lost the footer fallback")
 # A review.md that is not valid UTF-8 (the footer holds an emoji) must still print the counts:
 # UnicodeDecodeError is a ValueError, so a read guarded only by `except OSError` would drop the whole
 # line, not just the marker.
@@ -1364,6 +1442,62 @@ PY
 
 stage_hooktests() {
   # Offline cases only: the live-endpoint case needs a paid key, and the gate must never depend on one.
+  #
+  # Before the suite runs, the fixture invariant that made it flake on one CI leg. `preflight-code` streams
+  # the diff into the child and `wait`s on the PIPELINE, so under `pipefail` a stub that exits without
+  # reading turns `git diff`'s SIGPIPE into exit 141 - the helper then reports 141 instead of the review's
+  # status, and a case reads that as a failed run. Which side wins the race decides it, so the same commit
+  # passed on macOS and failed on Ubuntu.
+  #
+  # Checked as a PROPERTY of the file rather than fixed at the stubs that happened to fail: a stub added
+  # later would reintroduce it, and a one-leg flake is invisible to a local run.
+  python3 - tests/run.sh <<'STUBSCAN' || return 1
+import re, sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().split("\n")
+
+# Every stub written to a `...pr-agent` path, as (line number, body lines). Two shapes: a heredoc
+# (`cat > "$fake/pr-agent" <<'FAKE'`) and a one-liner (`printf '...' > "$fake/pr-agent"`).
+stubs, i = [], 0
+while i < len(lines):
+    line = lines[i]
+    if "pr-agent" in line and "<<" in line and re.search(r"cat > \S*pr-agent", line):
+        delim = line.split("<<", 1)[1].strip().strip("'\"")
+        j, body = i + 1, []
+        while j < len(lines) and lines[j].strip() != delim:
+            body.append(lines[j])
+            j += 1
+        stubs.append((i + 1, body))
+        i = j
+    elif "pr-agent" in line and re.search(r"printf .* > \"\$\w+/pr-agent\"", line):
+        stubs.append((i + 1, [line]))
+    i += 1
+
+if not stubs:
+    sys.exit("found no pr-agent stubs in tests/run.sh; the scan is broken, not the file")
+
+# A stub that EXITS must drain stdin first. One that never exits on its own (a deliberate hang, so the case
+# can test the wait and the reap) is exempt: its writer is blocked rather than dead, and every case using
+# one asserts a NON-ZERO status, which a SIGPIPE could not turn into a false pass.
+#
+# Any `cat` with no file operand drains: the fixtures that record the diff use `cat > "$SCOPE_DIFF_OUT"`,
+# and only the ones that want no record use `/dev/null`. `<&0` is the other shape (read one line).
+DRAIN = re.compile(r"cat >|<&0")
+bad = []
+for lineno, body in stubs:
+    text = "\n".join(body)
+    if "exec sleep" in text and not re.search(r"(?m)^\s*exit\s", text):
+        continue
+    if not DRAIN.search(text):
+        bad.append(lineno)
+if bad:
+    print("these pr-agent stubs can exit without draining stdin, so `git diff` dies of SIGPIPE and the "
+          "helper reports 141 instead of the review's status: " + ", ".join(f"tests/run.sh:{n}" for n in bad))
+    print("add `cat >/dev/null` after the argument loop - see tests/README.md, 'Every stub drains stdin'")
+    sys.exit(2)
+print(f"every one of the {len(stubs)} pr-agent stubs drains stdin before it can exit")
+STUBSCAN
   ./tests/run.sh hook
 }
 

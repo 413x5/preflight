@@ -1442,6 +1442,62 @@ PY
 
 stage_hooktests() {
   # Offline cases only: the live-endpoint case needs a paid key, and the gate must never depend on one.
+  #
+  # Before the suite runs, the fixture invariant that made it flake on one CI leg. `preflight-code` streams
+  # the diff into the child and `wait`s on the PIPELINE, so under `pipefail` a stub that exits without
+  # reading turns `git diff`'s SIGPIPE into exit 141 - the helper then reports 141 instead of the review's
+  # status, and a case reads that as a failed run. Which side wins the race decides it, so the same commit
+  # passed on macOS and failed on Ubuntu.
+  #
+  # Checked as a PROPERTY of the file rather than fixed at the stubs that happened to fail: a stub added
+  # later would reintroduce it, and a one-leg flake is invisible to a local run.
+  python3 - tests/run.sh <<'STUBSCAN' || return 1
+import re, sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().split("\n")
+
+# Every stub written to a `...pr-agent` path, as (line number, body lines). Two shapes: a heredoc
+# (`cat > "$fake/pr-agent" <<'FAKE'`) and a one-liner (`printf '...' > "$fake/pr-agent"`).
+stubs, i = [], 0
+while i < len(lines):
+    line = lines[i]
+    if "pr-agent" in line and "<<" in line and re.search(r"cat > \S*pr-agent", line):
+        delim = line.split("<<", 1)[1].strip().strip("'\"")
+        j, body = i + 1, []
+        while j < len(lines) and lines[j].strip() != delim:
+            body.append(lines[j])
+            j += 1
+        stubs.append((i + 1, body))
+        i = j
+    elif "pr-agent" in line and re.search(r"printf .* > \"\$\w+/pr-agent\"", line):
+        stubs.append((i + 1, [line]))
+    i += 1
+
+if not stubs:
+    sys.exit("found no pr-agent stubs in tests/run.sh; the scan is broken, not the file")
+
+# A stub that EXITS must drain stdin first. One that never exits on its own (a deliberate hang, so the case
+# can test the wait and the reap) is exempt: its writer is blocked rather than dead, and every case using
+# one asserts a NON-ZERO status, which a SIGPIPE could not turn into a false pass.
+#
+# Any `cat` with no file operand drains: the fixtures that record the diff use `cat > "$SCOPE_DIFF_OUT"`,
+# and only the ones that want no record use `/dev/null`. `<&0` is the other shape (read one line).
+DRAIN = re.compile(r"cat >|<&0")
+bad = []
+for lineno, body in stubs:
+    text = "\n".join(body)
+    if "exec sleep" in text and not re.search(r"(?m)^\s*exit\s", text):
+        continue
+    if not DRAIN.search(text):
+        bad.append(lineno)
+if bad:
+    print("these pr-agent stubs can exit without draining stdin, so `git diff` dies of SIGPIPE and the "
+          "helper reports 141 instead of the review's status: " + ", ".join(f"tests/run.sh:{n}" for n in bad))
+    print("add `cat >/dev/null` after the argument loop - see tests/README.md, 'Every stub drains stdin'")
+    sys.exit(2)
+print(f"every one of the {len(stubs)} pr-agent stubs drains stdin before it can exit")
+STUBSCAN
   ./tests/run.sh hook
 }
 

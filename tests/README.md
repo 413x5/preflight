@@ -222,6 +222,7 @@ reverted in turn and the expected case was confirmed to fail:
 | the fallback rendering kept in the config dir (the writability test inverted), so a read-only config dir fails the review again | REQ-HOOK-50 |
 | the missing-artifact exit removed, so a review pr-agent never wrote exits 0 and the "wrote ..." line claims files that do not exist | REQ-HOOK-51 |
 | the structured `coverage` reader dropped, so the marker depends on the footer text alone again | REQ-HOOK-52 |
+| a stub `pr-agent` that exits without draining stdin (the `cat >/dev/null` removed from one), so `git diff` dies of SIGPIPE and the helper reports 141 instead of the review's status - caught by the `hooktests` stub scan, which named the line | the `hooktests` stage, before the suite runs |
 | the progress note deleted, so a run that writes nothing waits silently | REQ-HOOK-47 |
 | the interval test replaced with one that always fires, so every normal review is noisy | REQ-HOOK-47 |
 | the numeric guard on `PREFLIGHT_PROGRESS_EVERY` removed, so a typo prints a shell error per iteration | REQ-HOOK-47 |
@@ -294,6 +295,28 @@ It reports the split, so drift is visible in the output:
 
 The selfcheck is itself mutation-tested: adding a temporary case that passes with the hook neutered must
 fail it while unclassified, must still fail once marked sensitive, and must pass once marked insensitive.
+
+## Every stub drains stdin
+
+`preflight-code` streams the diff into pr-agent with `git diff … | pr-agent … &` and then `wait`s on the
+**pipeline**. Under `set -o pipefail` that status is the pipeline's, so a child that exits without reading
+its stdin kills the writer with `SIGPIPE` and `wait` returns **141** — not the child's own status. The
+helper reports 141 as a failed run, and a case that expected a review then fails for a reason that has
+nothing to do with what it tests.
+
+Which side wins the race decides whether it happens at all, so the same commit passed on macOS and failed
+on Ubuntu: the writer had not yet reached the pipe when the child exited there.
+
+So **every stub that can exit must drain stdin** — `cat >/dev/null` after the argument loop, or `cat >
+"$SOME_FILE"` when the case records what it was handed. The `hooktests` stage fails, naming the line, if a
+stub in `run.sh` can exit without one; that check is a property of the file rather than a fix at the stubs
+that happened to flake, because a stub added later would reintroduce it and a one-leg flake is invisible
+locally. A stub that deliberately never exits (it `exec`s a sleep, so a case can test the wait or the reap)
+is exempt: its writer is blocked rather than dead, and every case using one asserts a **non-zero** status,
+which a `SIGPIPE` could not turn into a false pass.
+
+Do not "fix" a `SIGPIPE` by dropping `pipefail` or by retrying in `src/preflight-code`: a real pr-agent
+that exits on a closed stdin is a real condition, and the helper should keep reporting it.
 
 ## A trap worth knowing
 

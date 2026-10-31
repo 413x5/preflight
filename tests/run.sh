@@ -1201,6 +1201,11 @@ case_summary_wiring() {
   d="$work/wiring"; fake="$work/wiring-bin"
   mkdir -p "$d" "$fake"
   # Writes both artifacts, so the helper treats the review as complete and reads the counts from JSON.
+  #
+  # The `cat >/dev/null` is not decoration: the helper streams the diff into the child and `wait`s on the
+  # PIPELINE, so under `pipefail` a child that exits without reading makes `git diff` die of SIGPIPE and
+  # the run reports 141 instead of the review's status. Every stub here drains stdin for that reason; see
+  # "Every stub drains stdin" in tests/README.md.
   cat > "$fake/pr-agent" <<'FAKE'
 #!/bin/sh
 while [ $# -gt 0 ]; do
@@ -1210,6 +1215,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[{"relevant_file":"a.py","issue_header":"H","issue_content":"same"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3,"risk_level":"low","merge_recommendation":"review carefully"},"usage":{"total_tokens":123}}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1236,6 +1242,10 @@ FAKE
         bash "$repo_root/src/preflight-code" review ) 2>&1
   }
 
+  # The status asserted is EXACTLY 0, and the stub draining stdin is what makes that a fact rather than a
+  # race: a child that exits unread leaves `git diff` with SIGPIPE and `wait` reports the pipeline's 141, so
+  # this case would fail for a fixture reason instead of the wiring it tests. With the drain, 141 is not a
+  # status this fixture can produce.
   rc=0; out="$(run_once)" || rc=$?
   [ "$rc" = 0 ] || problems="$problems
         | the first run failed (exit $rc), so the summary was never produced: $out"
@@ -1271,6 +1281,9 @@ case_verdict_fields() {
   local d fake out rc problems=""
   d="$work/verdict"; fake="$work/verdict-bin"
   mkdir -p "$d" "$fake"
+  # Every stub below drains stdin before writing anything, for the reason the wiring case spells out: the
+  # helper waits on the pipeline, so a child that exits unread turns `git diff`'s SIGPIPE into exit 141
+  # and the assertion would read it as a failed review rather than a stub defect.
   cat > "$fake/pr-agent" <<'FAKE'
 #!/bin/sh
 while [ $# -gt 0 ]; do
@@ -1280,6 +1293,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No","estimated_effort_to_review_[1-5]":3,"risk_level":"low","merge_recommendation":"review carefully"},"usage":{"total_tokens":123}}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1296,6 +1310,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":"No"}}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1356,6 +1371,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":"text","usage":5}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1387,6 +1403,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":[],"security_concerns":true},"usage":{"total_tokens":7}}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1415,6 +1432,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '%s\n' '{"review":{"key_issues_to_review":"no issues","security_concerns":"No"}}' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 exit 0
@@ -1645,6 +1663,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 [ -n "$js" ] && printf '{"review":{"key_issues_to_review":[{"relevant_file":"a.py","issue_header":"H","issue_content":"c"}],"security_concerns":"No","estimated_effort_to_review_[1-5]":3},"usage":{"total_tokens":123}}\n' > "$js"
 [ -n "$out" ] && printf '<table></table>\n' > "$out"
 [ -n "$FAKE_PID" ] && printf '%s\n' "$$" > "$FAKE_PID"
@@ -1659,6 +1678,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 sleep 6
 [ -n "$out" ] && printf 'a description\n' > "$out"
 [ -n "$FAKE_PID" ] && printf '%s\n' "$$" > "$FAKE_PID"
@@ -2600,6 +2620,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+cat >/dev/null
 {
   printf 'ARTIFACT_PATH=%s\n' "${ARTIFACT_PATH:-}"
   printf 'ARTIFACT_INSTRUCTIONS=%s\n' "${ARTIFACT_INSTRUCTIONS:-}"
@@ -3095,6 +3116,7 @@ PY
   # outside the repository, and the NEXT run rewrites it rather than reusing it.
   cat > "$fake/pr-agent" <<'FAKE'
 #!/bin/sh
+cat >/dev/null
 printf '%s\n' "$2" > "$PREFLIGHT_CFG_OUT"
 exit 3
 FAKE
@@ -4198,6 +4220,7 @@ case_review_progress_note() {
   # ... and the note must not fire when the artifact arrives first, or every normal review is noisy.
   cat > "$fake/pr-agent" <<'FAKE'
 #!/bin/sh
+cat >/dev/null
 printf '{}' > .preflight/review.json
 printf 'done' > .preflight/review.md
 exit 0

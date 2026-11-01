@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+## [0.10.1] - 2026-11-01
+
 ### Changed
 
 - **Every refusal in the config renderer ends with the command that fixes it.** "Set
@@ -1077,7 +1081,8 @@ Initial release: a deployable, machine-local PR-Agent review setup for one OpenA
   initial commits plus the `v0.1.0` tag are **GPG-signed** (the signed history replaces earlier unsigned
   commits).
 
-[Unreleased]: https://github.com/413x5/preflight/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/413x5/preflight/releases/tag/v0.10.1
 [0.10.0]: https://github.com/413x5/preflight/releases/tag/v0.10.0
 [0.9.0]: https://github.com/413x5/preflight/releases/tag/v0.9.0
 [0.8.0]: https://github.com/413x5/preflight/releases/tag/v0.8.0

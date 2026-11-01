@@ -172,6 +172,16 @@ Wanted; needs design, or an experiment to settle. Two groups:
 - [ ] **`preflight-code --since <ref>`** for a pseudo-incremental review - plain-diff mode has no true
       incremental, so this would re-review only what changed since the last pass.
 - [ ] **Remember the last reviewed commit** so a second `preflight-code review` can skip unchanged work.
+- [ ] **What should refuse a config dir that is COMMITTED inside the reviewed repository?** The in-repo
+      guard covers untracked, unignored files there, and `git add -A` stages a *tracked* file whatever
+      `.gitignore` says - so a committed `providers.toml` reaches the model while the guard reports nothing.
+      The invariant to decide is which tracked files are a refusal, since an ignore rule cannot be the
+      answer and the remedy differs (untrack, or move the config out). A name list cannot be the unit: a
+      `providers.toml.bak` or an editor copy holds the same key under a name no list predicts, which is the
+      reasoning the untracked half already applies to the directory. Two rounds of reviewing a draft
+      implementation with the tool surfaced the shape of the difficulty - a directory-wide rule names
+      unrelated tracked files and would untrack them, while a name rule misses backups - so this needs a
+      decision about the unit before any code, not another enumeration.
 
 ## What upstream's own docs say (checked against the installed v0.49.0)
 

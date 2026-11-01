@@ -55,7 +55,8 @@ That framing decides what counts as a vulnerability here, so it is stated plainl
   stderr). In every case the file is 600-mode from the moment it exists, removed by the run that wrote it,
   and refused when it would land inside the reviewed repository - the check is made against the exact file,
   so an empty scratch render dir cannot slip past it. An unwritable `PREFLIGHT_RENDER_DIR` refuses the run
-  rather than falling back, so the key is never written somewhere the operator did not choose.
+  rather than falling back, so the key is never written somewhere the operator did not choose. The
+  inspection copy follows a directory the operator named, never the automatic temp fallback.
 
 ## Outbound traffic
 

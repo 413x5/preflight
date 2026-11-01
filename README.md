@@ -237,18 +237,18 @@ file there - the rendered config pr-agent is launched with, 600-mode and named f
 directory cannot be written (a sandbox that mounts `~/.config` read-only, a shared dotfiles checkout), the
 run does not refuse:
 
-- it renders into a per-run directory under the system temp dir, and **says so on stderr**, naming that
-  directory and `PREFLIGHT_RENDER_DIR` - so the fallback is never silent;
+- it renders into a per-run directory under the system temp dir and **says so on stderr**, naming that
+  directory and the command form that would choose one deliberately;
 - `PREFLIGHT_RENDER_DIR=<dir>` makes the location deliberate instead of automatic. The config is still read
-  from `PREFLIGHT_HOME`; only the one credential-bearing file moves;
+  from `PREFLIGHT_HOME`; only the rendered config moves, plus the inspection copy when you name a directory;
 - an **unwritable** `PREFLIGHT_RENDER_DIR` refuses the run rather than falling back, because writing the key
   somewhere you did not choose is worse than not reviewing;
-- a render directory inside the repository being reviewed is refused unless that file path is gitignored
-  there - the same reason the config dir is: the review's snapshot is `git add -A`, so an unignored file
-  holding the key would be handed to the model.
+- a render directory inside the repository being reviewed is refused unless every file written there is
+  gitignored - the per-run config always, and the inspection copy when you named the directory: the review's
+  snapshot is `git add -A`, so an unignored file holding the key would be handed to the model.
 
-The copy kept for inspection (`.pragent.settings.toml`) stays in the config dir and is best-effort: if it
-cannot be written, the run says which file it used instead, and never fails over it.
+The copy kept for inspection (`.pragent.settings.toml`) goes in the config dir, or in a
+`PREFLIGHT_RENDER_DIR` you named. It is best-effort and never fails a run.
 
 ## Use
 

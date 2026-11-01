@@ -61,60 +61,87 @@ __preflight_caller_name="${__preflight_caller_name:-preflight-code}"
 # Scoped to the repo under review deliberately: the config dir living in SOME git tree (a `$HOME` kept
 # in version control, a shared dotfiles checkout) is not the same hazard, because the reviewed repo's
 # snapshot never sees it. Comparing the two roots is what keeps that from blocking every review.
+# A path printed for pasting must survive the paste: single-quote it and escape embedded quotes, so a
+# directory containing `$(...)`, a backtick or a quote is data rather than a command.
+__preflight_q() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 __preflight_refuse_in_repo_config() {
   local cfgdir="${1:-${PREFLIGHT_HOME:-${HOME:-}/.config/preflight}}"
-  local _abs _root _reviewed _untracked _prefix
+  local _abs _root _reviewed _prefix _untracked
   _abs="$(cd "$cfgdir" 2>/dev/null && pwd -P)" || _abs=''
   _root="$(cd "$cfgdir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)" || _root=''
   _reviewed="$(git rev-parse --show-toplevel 2>/dev/null)" || _reviewed=''
-  if [ -n "$_root" ] && [ "$_root" = "$_reviewed" ]; then
-    # The DIRECTORY is the unit, never a list of known file names: the snapshot is `git add -A`, which
-    # stages whatever the directory holds, and a key survives in a backup or an editor copy
-    # (`providers.toml.bak`, `providers.toml~`, `.providers.toml.swp`) whose name no list can predict.
-    # `.` is the pathspec, not the repo-relative prefix: with `-C "$_abs"` a pathspec is resolved from
-    # _abs, so passing the prefix asks for `_abs/<prefix>` and matches nothing.
-    _prefix="$(git -C "$_abs" rev-parse --show-prefix 2>/dev/null)"
-    _untracked="$(git -C "$_abs" ls-files -o --exclude-standard -- . 2>/dev/null | sed "s|^| $_prefix|")"
-    if [ -n "$_untracked" ]; then
-      printf '%s: %s is inside the repository being reviewed, and these are not ignored there:%s\n' "$__preflight_caller_name" \
-        "$cfgdir" "$_untracked" >&2
-      printf '%s: they carry the model configuration and the API key, and this review stages the\n' "$__preflight_caller_name" >&2
-      printf '%s: working tree - so they would be handed to the model. Ignore the whole directory\n' "$__preflight_caller_name" >&2
-      if [ -n "$_prefix" ]; then
-        printf '%s: (%s), or move PREFLIGHT_HOME (default ~/.config/preflight) outside it\n' "$__preflight_caller_name" \
-          "$_prefix" >&2
-      else
-        printf '%s: - it is the repository root here, so no directory rule can cover it, and no\n' "$__preflight_caller_name" >&2
-        printf '%s: .gitignore rule names every file the directory may ever hold. Move\n' "$__preflight_caller_name" >&2
-        printf '%s: PREFLIGHT_HOME (default ~/.config/preflight) outside the repository\n' "$__preflight_caller_name" >&2
-      fi
-      return 2
-    fi
+  [ -n "$_root" ] && [ "$_root" = "$_reviewed" ] || return 0
+  # The repo-relative prefix, ending in `/`, or empty when the config dir IS the repository root.
+  _prefix="$(git -C "$_abs" rev-parse --show-prefix 2>/dev/null)"
+  # The DIRECTORY is the unit for untracked content: `git add -A` stages whatever it holds, including a
+  # backup or editor copy whose name no list can predict.
+  _untracked="$(git -C "$_abs" ls-files -o --exclude-standard -- . 2>/dev/null \
+                 | sed "s|^|$_prefix|" | tr '\n' ' ' | sed 's/ *$//')"
+  [ -n "$_untracked" ] || return 0
+  printf '%s: %s is inside the repository being reviewed, and these are not ignored there: %s\n' \
+    "$__preflight_caller_name" "$cfgdir" "$_untracked" >&2
+  printf '%s: they carry the model configuration and the API key, and this review stages the working tree\n' \
+    "$__preflight_caller_name" >&2
+  if [ -n "$_prefix" ]; then
+    # `_prefix` already ends in `/`, so no slash is added. The rule is the DIRECTORY, because it has to
+    # cover the backup and editor copies no name list can predict.
+    printf '%s: ignore the whole directory, or move PREFLIGHT_HOME outside the repository:\n' \
+      "$__preflight_caller_name" >&2
+    printf '%s:   printf "\\n%%s\\n" %s >> %s && git -C %s check-ignore --no-index -q %s && %s review\n' \
+      "$__preflight_caller_name" "$(__preflight_q "$_prefix")" "$(__preflight_q "$_reviewed/.gitignore")" \
+      "$(__preflight_q "$_reviewed")" "$(__preflight_q "$_prefix")" "$__preflight_caller_name" >&2
+  else
+    # The root: no directory rule can cover it, because the rule would have to name every file the
+    # repository may ever hold.
+    printf '%s: it is the repository root here, so no directory rule can cover it\n' "$__preflight_caller_name" >&2
+    printf '%s: move PREFLIGHT_HOME (default ~/.config/preflight) outside the repository:\n' \
+      "$__preflight_caller_name" >&2
+    printf '%s:   PREFLIGHT_HOME=<a directory outside this repository> %s review\n' \
+      "$__preflight_caller_name" "$__preflight_caller_name" >&2
   fi
-  return 0
+  printf '%s: refusing to review with a model configuration that was not applied\n' "$__preflight_caller_name" >&2
+  return 2
 }
 
-# The render DESTINATION, when it lies inside the repository being reviewed: the file this run is about to
-# write has to be ignored there, because the snapshot is `git add -A` and an unignored file is a key handed
-# to the model. The check above covers a config dir by listing what it holds - right for `providers.toml`,
-# whose neighbouring names no list can predict - but a PREFLIGHT_RENDER_DIR may be an empty scratch
-# directory, so "nothing unignored in here" stays true right up to the moment the credential lands. This
-# asks git about the exact file instead, which is the question that has an answer before it is written.
+# The render DESTINATION, when it lies inside the reviewed repository: both files this run leaves there -
+# the per-run config and the inspection copy - hold the key, and `git add -A` would stage them. Checked per
+# FILE because a render dir may be empty until the moment the credential is written into it.
 __preflight_refuse_unignored_render() {
-  local dir="$1" name="$2" abs root reviewed
+  local dir="$1" abs root reviewed name _names
   reviewed="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
   [ -n "$reviewed" ] || return 0
   abs="$(cd "$dir" 2>/dev/null && pwd -P)" || return 0
   root="$(git -C "$abs" rev-parse --show-toplevel 2>/dev/null)" || return 0
   [ "$root" = "$reviewed" ] || return 0
-  git -C "$abs" check-ignore -q -- "$abs/$name" 2>/dev/null && return 0
-  printf '%s: %s is inside the repository being reviewed, and %s would not be ignored there\n' \
-    "$__preflight_caller_name" "$dir" "$name" >&2
-  printf '%s: it holds the model configuration and the API key, and this review stages the working tree\n' \
-    "$__preflight_caller_name" >&2
-  printf '%s: ignore %s there, or point PREFLIGHT_RENDER_DIR outside the repository\n' \
-    "$__preflight_caller_name" "$name" >&2
-  return 2
+  # The inspection copy is not written into the automatic per-run temp dir (that dir is removed with the
+  # run), so requiring it to be ignored there would refuse a state that is safe.
+  _names=".pragent.settings.$$.toml"
+  if [ -z "$__preflight_render_dir_ephemeral" ]; then
+    _names="$_names .pragent.settings.toml"
+  fi
+  for name in $_names; do
+    # `--no-index` asks about the RULE; a plain check reports a tracked path as unignored whatever the rules
+    # say, and the ignore remedy printed below would then loop.
+    git -C "$abs" check-ignore --no-index -q -- "$abs/$name" 2>/dev/null && continue
+    printf '%s: %s is inside the repository being reviewed, and %s would not be ignored there\n' \
+      "$__preflight_caller_name" "$dir" "$name" >&2
+    printf '%s: it holds the model configuration and the API key, and this review stages the working tree\n' \
+      "$__preflight_caller_name" >&2
+    printf '%s: ignore the render files, or keep them outside the repository:\n' "$__preflight_caller_name" >&2
+    printf '%s:   printf "\\n%%s\\n" %s >> %s && git -C %s check-ignore --no-index -q %s && %s review\n' \
+      "$__preflight_caller_name" "$(__preflight_q ".pragent.settings*.toml")" \
+      "$(__preflight_q "$root/.gitignore")" "$(__preflight_q "$root")" \
+      "$(__preflight_q "$abs/.pragent.settings.toml")" "$__preflight_caller_name" >&2
+    # Not `unset PREFLIGHT_RENDER_DIR`: this refusal is also reached with the variable UNSET (the render dir
+    # is then the config dir), where unsetting is a no-op. Naming one outside the repo works in both states.
+    printf '%s:   PREFLIGHT_RENDER_DIR=<a directory outside this repository> %s review\n' \
+      "$__preflight_caller_name" "$__preflight_caller_name" >&2
+    return 2
+  done
+  return 0
 }
 
 __preflight_render_settings() {
@@ -133,13 +160,26 @@ __preflight_render_settings() {
   if [ ! -f "$settings" ]; then
     printf '%s: %s was not found\n' "$__preflight_caller_name" "$settings" >&2
     printf '%s: it names the profiles to review with, and %s defines them\n' "$__preflight_caller_name" "$cfgdir/providers.toml" >&2
-    printf '%s: create it from the example installed beside it:\n' "$__preflight_caller_name" >&2
-    printf '%s:   cp "%s/settings.toml.example"  "%s/settings.toml"\n' "$__preflight_caller_name" "$cfgdir" "$cfgdir" >&2
-    # Named only when it is also absent: copying it over an existing providers.toml would replace a keyed
-    # file with the empty-key template, so this line is a remedy only in the state it applies to.
+    printf '%s: create it from the example installed beside it, then set [selection] main to a profile\n' \
+      "$__preflight_caller_name" >&2
+    # The providers half only when that file is absent: the empty-key template would destroy a key.
     if [ ! -f "$cfgdir/providers.toml" ]; then
-      printf '%s: %s is missing too, and nothing defines the profiles without it:\n' "$__preflight_caller_name" "$cfgdir/providers.toml" >&2
-      printf '%s:   cp "%s/providers.toml.example" "%s/providers.toml"   # then chmod 600\n' "$__preflight_caller_name" "$cfgdir" "$cfgdir" >&2
+      printf '%s: %s is missing too, and nothing defines the profiles without it. Create both, then\n' \
+        "$__preflight_caller_name" "$cfgdir/providers.toml" >&2
+      printf '%s: fill in the endpoint, key and model id and assign the profile, then re-run:\n' \
+        "$__preflight_caller_name" >&2
+      printf '%s:   cp %s %s && ( umask 077; cp %s %s ) && ${EDITOR:-vi} %s && %s review\n' \
+        "$__preflight_caller_name" "$(__preflight_q "$cfgdir/settings.toml.example")" \
+        "$(__preflight_q "$cfgdir/settings.toml")" "$(__preflight_q "$cfgdir/providers.toml.example")" \
+        "$(__preflight_q "$cfgdir/providers.toml")" "$(__preflight_q "$cfgdir/providers.toml")" \
+        "$__preflight_caller_name" >&2
+    else
+      printf '%s: create it, assign a profile from %s, then re-run:\n' \
+        "$__preflight_caller_name" "$cfgdir/providers.toml" >&2
+      printf '%s:   cp %s %s && ${EDITOR:-vi} %s && %s review\n' \
+        "$__preflight_caller_name" "$(__preflight_q "$cfgdir/settings.toml.example")" \
+        "$(__preflight_q "$cfgdir/settings.toml")" "$(__preflight_q "$cfgdir/settings.toml")" \
+        "$__preflight_caller_name" >&2
     fi
     return 2
   fi
@@ -150,6 +190,12 @@ __preflight_render_settings() {
   # silent-wrong-model failure this whole resolver exists to prevent.
   if [ ! -r "$settings" ]; then
     printf '%s: %s is present but cannot be read, so its assignment cannot be applied\n' "$__preflight_caller_name" "$settings" >&2
+    # `ls` first: a directory in its place or a wrong owner is not fixed by chmod.
+    printf '%s: check what it is and who may read it:\n' "$__preflight_caller_name" >&2
+    printf '%s:   ls -l %s\n' "$__preflight_caller_name" "$(__preflight_q "$settings")" >&2
+    printf '%s: if it is a file you own, give yourself read access and re-run:\n' "$__preflight_caller_name" >&2
+    printf '%s:   chmod u+r %s && %s review\n' \
+      "$__preflight_caller_name" "$(__preflight_q "$settings")" "$__preflight_caller_name" >&2
     printf '%s: refusing to review with a model configuration that was not applied\n' "$__preflight_caller_name" >&2
     return 2
   fi
@@ -164,14 +210,27 @@ __preflight_render_settings() {
   # quoted value can never make a real assignment look like a comment.
   if ! grep -qE '^[[:space:]]*[^[:space:]#]' "$settings"; then
     printf '%s: %s assigns no model profile (every line is blank or a comment)\n' "$__preflight_caller_name" "$settings" >&2
-    printf '%s: set [%s] main to a [profiles.<name>] table in %s\n' "$__preflight_caller_name" \
-      "selection" "$cfgdir/providers.toml" >&2
+    # The exact two lines: an invented shape is the next refusal.
+    printf '%s: add an assignment naming a [profiles.<name>] table from %s:\n' \
+      "$__preflight_caller_name" "$cfgdir/providers.toml" >&2
+    printf '%s:   [%s]\n' "$__preflight_caller_name" "selection" >&2
+    printf '%s:   main = "mine"          # the name of a [profiles.<name>] table in providers.toml\n' \
+      "$__preflight_caller_name" >&2
+    printf '%s: then re-run:  %s review\n' "$__preflight_caller_name" "$__preflight_caller_name" >&2
     printf '%s: refusing to review on pr-agent default settings\n' "$__preflight_caller_name" >&2
     return 2
   fi
 
   if ! command -v python3 >/dev/null 2>&1; then
     printf '%s: %s is present, but python3 is not on PATH to read it\n' "$__preflight_caller_name" "$settings" >&2
+    # No path is suggested: where an interpreter lives is a fact about the machine, not about preflight.
+    printf '%s: find an interpreter (3.11 or newer - settings.toml is read with the stdlib tomllib):\n' \
+      "$__preflight_caller_name" >&2
+    printf '%s:   command -v python3.13 python3.12 python3.11 python3\n' "$__preflight_caller_name" >&2
+    printf '%s: if none is found, install Python 3.11 or newer; otherwise put its directory first on PATH:\n' \
+      "$__preflight_caller_name" >&2
+    printf '%s:   PATH="<the directory it is in>:$PATH" %s review\n' \
+      "$__preflight_caller_name" "$__preflight_caller_name" >&2
     printf '%s: refusing to review with a model configuration that was not applied\n' "$__preflight_caller_name" >&2
     return 2
   fi
@@ -193,43 +252,45 @@ __preflight_render_settings() {
   # everything looked normal.
   # PER RUN, from the shell's pid: no two runs share a file, so there is nothing to serialise.
   #
-  # The DIRECTORY is the config dir unless `PREFLIGHT_RENDER_DIR` names another. The config is still READ
-  # from the config dir either way: this variable moves where the ONE credential-bearing file is written,
-  # not where the model is configured. That is what lets a read-only config dir (a sandboxed
-  # `~/.config/preflight`, a Nix store, a shared dotfiles checkout) run a review at all.
+  # Config is always READ from the config dir; `PREFLIGHT_RENDER_DIR` moves only the one file with the key.
   render_dir="${PREFLIGHT_RENDER_DIR:-$cfgdir}"
   if ! ( umask 077; mkdir -p "$render_dir" ) 2>/dev/null || [ ! -w "$render_dir" ]; then
     if [ -n "${PREFLIGHT_RENDER_DIR:-}" ]; then
-      # An EXPLICIT directory that cannot be written is a REFUSAL, not a candidate for the fallback: the
-      # operator asked for that location (a private tmpfs, an encrypted mount), and quietly writing
-      # somewhere else would put the credential where they did not choose.
-      printf '%s: PREFLIGHT_RENDER_DIR=%s cannot be written, so the model configuration cannot be rendered there\n' \
+      # A named directory that cannot be written refuses: the key must not move without the operator's choice.
+      printf '%s: PREFLIGHT_RENDER_DIR=%s cannot be written; not falling back, since you named it\n' \
         "$__preflight_caller_name" "$render_dir" >&2
+      printf '%s:   mkdir -p %s && chmod u+rwx %s && %s review\n' \
+        "$__preflight_caller_name" "$(__preflight_q "$render_dir")" "$(__preflight_q "$render_dir")" \
+        "$__preflight_caller_name" >&2
+      printf '%s:   unset PREFLIGHT_RENDER_DIR   # or drop it: the config dir, or the temp fallback if\n' \
+        "$__preflight_caller_name" >&2
+      printf '%s:                                  # that is not writable\n' "$__preflight_caller_name" >&2
       printf '%s: refusing to review with a model configuration that was not applied\n' "$__preflight_caller_name" >&2
       return 2
     fi
-    # The config dir is not writable, which is a normal state (a sandboxed `~/.config`, a shared dotfiles
-    # checkout) and not a reason to refuse a review: render into a per-run directory under the system temp
-    # dir instead. ANNOUNCED, never silent - a credential-bearing file now lives somewhere other than
-    # beside the config it came from, and `PREFLIGHT_RENDER_DIR` is how to make that choice explicit.
+    # A read-only config dir is normal, not a refusal: fall back to a per-run temp dir, and announce it.
     render_dir="${TMPDIR:-/tmp}/preflight-render.$$"
     __preflight_render_dir_ephemeral="$render_dir"
     if ! ( umask 077; mkdir -p "$render_dir" ) 2>/dev/null || [ ! -w "$render_dir" ]; then
       printf '%s: %s is not writable and %s could not be created either\n' \
         "$__preflight_caller_name" "$cfgdir" "$render_dir" >&2
+      # Which directory is writable is not something the renderer can know.
+      printf '%s: name a directory you can write to, outside the repository being reviewed:\n' \
+        "$__preflight_caller_name" >&2
+      printf '%s:   PREFLIGHT_RENDER_DIR=<that directory> %s review\n' "$__preflight_caller_name" "$__preflight_caller_name" >&2
       printf '%s: refusing to review with a model configuration that was not applied\n' "$__preflight_caller_name" >&2
       return 2
     fi
-    # The temp dir is a real location, and it can be inside the reviewed repository (`TMPDIR` pointed at a
-    # scratch dir there, which a build system does), so the in-repo refusal covers it too. Only for the
-    # fallback: the config dir's own check runs below, over the config dir.
+    # `TMPDIR` can point inside the reviewed repo, so the fallback is checked too.
     __preflight_refuse_in_repo_config "$render_dir" || return 2
-    # Where the file went, and the variable that would have chosen it. Both named, because the operator
-    # needs the directory to find the run's config and the variable to stop the fallback happening at all.
-    printf '%s: %s is not writable; rendering the model configuration into %s for this run\n' \
+    printf '%s: %s is not writable; rendered config is in %s for this run\n' \
       "$__preflight_caller_name" "$cfgdir" "$render_dir" >&2
-    printf '%s: set PREFLIGHT_RENDER_DIR to choose that location deliberately (the config is still read from %s)\n' \
-      "$__preflight_caller_name" "$cfgdir" >&2
+    # A placeholder, not a path: one named here may be no more writable than the config dir was.
+    printf '%s: to keep it inspectable, name a directory you can write to, outside the repository:\n' \
+      "$__preflight_caller_name" >&2
+    printf '%s:   PREFLIGHT_RENDER_DIR=<that directory> %s review\n' "$__preflight_caller_name" "$__preflight_caller_name" >&2
+    printf '%s: nothing changes if you do not - the run removes it; only this run is not inspectable\n' \
+      "$__preflight_caller_name" >&2
   fi
   out="$render_dir/.pragent.settings.$$.toml"
 
@@ -248,6 +309,13 @@ __preflight_render_settings() {
   rm -f "$out"
   if ! ( umask 077; : > "$out" ) 2>/dev/null; then
     printf '%s: could not create %s to render the model configuration into\n' "$__preflight_caller_name" "$out" >&2
+    # The directory passed the writability test, so the cause is elsewhere: the check names which.
+    printf '%s: the directory accepts writes but that file could not be created; check for a full disk or\n' \
+      "$__preflight_caller_name" >&2
+    printf '%s: a read-only mount:\n' "$__preflight_caller_name" >&2
+    printf '%s:   df -h %s && touch %s && rm -f %s\n' \
+      "$__preflight_caller_name" "$(__preflight_q "$(dirname "$out")")" "$(__preflight_q "$out")" \
+      "$(__preflight_q "$out")" >&2
     printf '%s: refusing to review with a model configuration that was not applied\n' "$__preflight_caller_name" >&2
     return 2
   fi
@@ -368,10 +436,26 @@ GATE_SECTION = "gate"
 ASSIGNMENT_KEYS = ("model", "fallback_models")
 
 
-def refuse(*lines):
+def refuse(*lines, fix=None):
+    """Report a refusal and exit 2.
+
+    `lines` explain WHY, which is what a reader needs to judge the message. `fix` is what to RUN, and it is
+    a separate argument so a refusal cannot quietly omit it: every caller either passes one, or is one of
+    the sites that deliberately has none (a decision only the operator can make, or a state no command
+    repairs) - and those say so in their own words instead of leaving the reader to guess.
+    """
     for line in lines:
         print(f"{PROG}: {line}", file=sys.stderr)
+    if fix:
+        for line in fix:
+            print(f"{PROG}: {line}", file=sys.stderr)
     sys.exit(2)
+
+
+def shq(path):
+    """Quote a path for a printed command, so a path containing `$(...)`, a backtick or a quote is data
+    when the line is pasted rather than a command."""
+    return "'" + str(path).replace("'", "'\\''") + "'"
 
 
 def plain_name(key):
@@ -396,7 +480,10 @@ def fmt(value):
         return "[" + ", ".join(fmt(item) for item in value) + "]"
     if isinstance(value, dict):
         return "{ " + ", ".join(f"{quote_key(k)} = {fmt(v)}" for k, v in value.items()) + " }"
-    refuse(f"a {type(value).__name__} cannot be written into the rendered configuration")
+    # A renderer defect, not a config error: no command the operator runs would fix it.
+    refuse(f"a {type(value).__name__} cannot be written into the rendered configuration",
+           fix=["this is a defect in the renderer, not in your config - report it with the file and section",
+                "at https://github.com/413x5/preflight/issues"])
 
 
 def emit(table, path, lines):
@@ -417,14 +504,20 @@ def load(path, label):
     """Parse a config file. An unreadable or unparseable one is a refusal, never a silent default."""
     if not os.access(path, os.R_OK):
         refuse(f"{label} {path} is present but cannot be read",
-               "refusing to review with a model configuration that was not applied")
+               "refusing to review with a model configuration that was not applied",
+               fix=[f"check what it is and who may read it:  ls -l {shq(path)}",
+                    f"if it is a file you own, then:  chmod u+r {shq(path)} && {PROG} review"])
     try:
         with open(path, "rb") as handle:
             data = tomllib.load(handle)
     except Exception as exc:
-        refuse(f"{label} {path} cannot be read as TOML ({exc})")
+        # The parser names the line and column; a generated "valid TOML" command would guess the intent.
+        refuse(f"{label} {path} cannot be read as TOML ({exc})",
+               fix=[f"fix the syntax at the line and column above in {path}, then re-run:  {PROG} review"])
     if not isinstance(data, dict):
-        refuse(f"{label} {path} does not contain a table at the top level")
+        refuse(f"{label} {path} does not contain a table at the top level",
+               fix=[f"start every section with a [table] header - settings.toml needs [selection] and "
+                    f"providers.toml needs [providers.<name>] and [profiles.<name>] - then re-run:  {PROG} review"])
     return data
 
 
@@ -442,7 +535,8 @@ if repo_path and os.path.exists(repo_path):
     for key in sorted(repo_data):
         if not isinstance(repo_data[key], dict):
             refuse(f".preflight.toml '{key}' is not a table",
-                   "every section of .preflight.toml is a [table] of settings")
+                   "every section of .preflight.toml is a [table] of settings",
+                   fix=[f"move '{key}' under a [section] header, or delete it, then re-run:  {PROG} review"])
     # `[selection]` is refused with them: naming a profile is how a model - and therefore a provider and
     # its key - is chosen, so a committed file that assigned one would decide which credential a review
     # spends on every machine that clones the repository. It is the same hazard as naming a provider
@@ -453,13 +547,15 @@ if repo_path and os.path.exists(repo_path):
                    "the profiles, the providers and the assignment decide a model and a credential entry,",
                    "and a committed file choosing one would spend that key on every machine that clones it",
                    "override review settings and the [gate] policy here; keep the models in "
-                   "settings.toml/providers.toml")
+                   "settings.toml/providers.toml",
+                   fix=[f"delete [{_stray}] from .preflight.toml, then re-run:  {PROG} review"])
     for _dk in DERIVED_CONFIG_KEYS:
         if isinstance(repo_data.get("config"), dict) and _dk in repo_data["config"]:
             refuse(f".preflight.toml [config] sets '{_dk}', which preflight derives",
                    "it is derived from the assigned profile's reasoning_effort, so a value here would be",
                    "overwritten and silently ignored",
-                   "remove it from .preflight.toml [config]")
+                   "remove it from .preflight.toml [config]",
+                   fix=[f"delete '{_dk}' from .preflight.toml [config], then re-run:  {PROG} review"])
     for section, values in repo_data.items():
         base = data.get(section)
         if base is None:
@@ -479,7 +575,8 @@ if repo_path and os.path.exists(repo_path):
 for key in sorted(data):
     if not isinstance(data[key], dict):
         refuse(f"settings.toml '{key}' is not a table",
-               "every section of settings.toml is a [table] of settings")
+               "every section of settings.toml is a [table] of settings",
+               fix=[f"move '{key}' under a [section] header, or delete it, then re-run:  {PROG} review"])
 # The other file's tables, pasted here. `[providers.*]` carries `keys`, and `[profiles.*]` carries the model
 # and budgets - none of it means anything to pr-agent, so it would be written into the rendered config
 # (credential included) and left in a settings.toml nothing mode-checks. Refused by name.
@@ -488,21 +585,27 @@ if "providers" in data or "profiles" in data:
     refuse(f"settings.toml defines [{_stray}.*], which belongs in providers.toml",
            "settings.toml says what the REVIEW does; providers.toml holds the endpoints, their keys and",
            "the profiles that use them - a table in the wrong file reads as configured and does nothing",
-           f"move that table to providers.toml and remove it from settings.toml")
+           fix=[f"move that table to {os.path.join(os.path.dirname(settings_path), 'providers.toml')}",
+                f"and remove it from settings.toml, then re-run:  {PROG} review"])
 
 root_config = data.get(SELECTION_SECTION) or {}
 if not isinstance(root_config, dict):
-    refuse(f"settings.toml [{SELECTION_SECTION}] is not a table")
+    refuse(f"settings.toml [{SELECTION_SECTION}] is not a table",
+           fix=[f"write it as a table header and one assignment:  [{SELECTION_SECTION}]  then  main = \"<profile>\"",
+                f"then re-run:  {PROG} review"])
 for key in sorted(set(root_config) - set(SELECTION_KEYS)):
     refuse(f"settings.toml has unknown key '{key}' in [{SELECTION_SECTION}]",
-           f"expected one of {list(SELECTION_KEYS)} - the profiles to use, by name")
+           f"expected one of {list(SELECTION_KEYS)} - the profiles to use, by name",
+           fix=[f"rename or remove '{key}' under [{SELECTION_SECTION}], then re-run:  {PROG} review"])
 
 # A [config] value for either of these would be overwritten by the assignment, so it is refused rather
 # than silently ignored: the reader would otherwise think it chose the model.
 for key in ASSIGNMENT_KEYS:
     if key in (data.get("config") or {}):
         refuse(f"settings.toml [config] sets '{key}', which [{SELECTION_SECTION}] decides",
-               "which model answers is the assignment's job; a second place to name it is a second answer")
+               "which model answers is the assignment's job; a second place to name it is a second answer",
+               fix=[f"delete '{key}' from [config] and name the profile under [{SELECTION_SECTION}] instead,"
+                    f" then re-run:  {PROG} review"])
 
 # A [config] value for any of these would be overwritten by the render's derivation, so it is refused
 # rather than silently ignored: the reader would otherwise think they registered the model, while the
@@ -512,18 +615,25 @@ for key in DERIVED_CONFIG_KEYS:
         refuse(f"settings.toml [config] sets '{key}', which preflight derives",
                "it is derived from the assigned profile's reasoning_effort, so a value here would be",
                "overwritten and silently ignored",
-               "remove it from settings.toml [config] and set reasoning_effort on the profile instead")
+               "remove it from settings.toml [config] and set reasoning_effort on the profile instead",
+               fix=[f"delete '{key}' from settings.toml [config], then re-run:  {PROG} review"])
 
 main_name = root_config.get("main", "")
 if not isinstance(main_name, str):
-    refuse("settings.toml [selection] main must be a profile name in quotes")
+    refuse("settings.toml [selection] main must be a profile name in quotes",
+           fix=['write it as a quoted string, e.g.  main = "mine"  (the name of a [profiles.<name>] table)',
+                f"then re-run:  {PROG} review"])
 main_name = main_name.strip()
 
 fallback_value = root_config.get("fallback", [])
 if isinstance(fallback_value, str):
-    refuse("settings.toml [selection] fallback must be a list of profile names, in the order pr-agent should try them")
+    refuse("settings.toml [selection] fallback must be a list of profile names, in the order pr-agent should try them",
+           fix=['write it as a list, e.g.  fallback = ["mine-backup"]  - or delete the line for no fallback',
+                f"then re-run:  {PROG} review"])
 if not isinstance(fallback_value, list) or not all(isinstance(n, str) for n in fallback_value):
-    refuse("settings.toml [selection] fallback must be a list of profile names")
+    refuse("settings.toml [selection] fallback must be a list of profile names",
+           fix=['write it as a list of quoted names, e.g.  fallback = ["mine-backup"]',
+                f"then re-run:  {PROG} review"])
 fallback_names = [n.strip() for n in fallback_value if n.strip()]
 
 # ------------------------------------------------------------------ providers.toml
@@ -547,16 +657,24 @@ if os.path.exists(providers_path):
                 f"users\n{PROG}: warning: it is now 600; set that mode yourself when you restore the file\n")
         except OSError as _exc:
             refuse(f"providers.toml is mode {oct(_mode)}, readable by other users, and could not be tightened ({_exc})",
-                   "it holds the API key, so refusing rather than rendering a credential that stays exposed")
+                   "it holds the API key, so refusing rather than rendering a credential that stays exposed",
+                   fix=[f"make it readable by you alone:  chmod 600 {shq(providers_path)}",
+                        f"then re-run:  {PROG} review"])
     providers = load(providers_path, "providers.toml")
     for key in sorted(set(providers) - {"providers", "profiles"}):
-        refuse(f"providers.toml has unknown top-level key '{key}'; expected 'providers' or 'profiles'")
+        refuse(f"providers.toml has unknown top-level key '{key}'; expected 'providers' or 'profiles'",
+               fix=[f"move the tables under [providers.<name>] or [profiles.<name>], or delete '{key}',",
+                    f"then re-run:  {PROG} review"])
     provider_table = providers.get("providers") or {}
     if not isinstance(provider_table, dict):
-        refuse("providers.toml [providers] is not a table")
+        refuse("providers.toml [providers] is not a table",
+               fix=['write each endpoint as  [providers.<name>]  with api_base and key, then re-run:  '
+                    + PROG + ' review'])
     profile_table = providers.get("profiles") or {}
     if not isinstance(profile_table, dict):
-        refuse("providers.toml [profiles] is not a table")
+        refuse("providers.toml [profiles] is not a table",
+               fix=['write each profile as  [profiles.<name>]  with provider and model, then re-run:  '
+                    + PROG + ' review'])
 
 # The profiles this file also carries. `settings.toml` names them; their definitions live here.
 profiles = profile_table
@@ -567,10 +685,14 @@ if not profiles and (main_name or fallback_names):
     # absent, and an existing providers.toml here holds the key even though it defines no profiles.
     if os.path.exists(providers_path):
         refuse("settings.toml assigns a model configuration, but providers.toml defines no [profiles.<name>] table",
-               "add the [profiles.<name>] tables to it; the example installed beside it shows their shape")
+               "add the [profiles.<name>] tables to it; the example installed beside it shows their shape",
+               fix=[f"copy the shape from the example:  less {shq(providers_path)}.example",
+                    f"then re-run:  {PROG} review"])
     refuse("settings.toml assigns a model configuration, but providers.toml defines no [profiles.<name>] table",
-           "the tables live in providers.toml, which is created from the example installed beside it:",
-           f'  cp "{os.path.dirname(providers_path)}/providers.toml.example" "{providers_path}"   # then chmod 600')
+           "the tables live in providers.toml, which is created from the example installed beside it",
+           fix=[f'( umask 077; cp {shq(os.path.join(os.path.dirname(providers_path), "providers.toml.example"))}'
+                f' {shq(providers_path)} )',
+                f"then set the endpoint, key and model id in it, and re-run:  {PROG} review"])
 
 # Every profile is validated, assigned or not: a typo caught here is a typo caught before it is relied on.
 settings_by_profile = {}
@@ -579,19 +701,26 @@ provider_by_profile = {}
 for name, body in sorted(profiles.items()):
     where = f"[profiles.{name}]"
     if not isinstance(body, dict):
-        refuse(f"providers.toml {where} is not a table")
+        refuse(f"providers.toml {where} is not a table",
+               fix=[f"write it as a table with provider and model, e.g.  {where}  then  provider = \"<name>\"  "
+                    f"and  model = \"<model-id>\"", f"then re-run:  {PROG} review"])
     for key in sorted(set(body) - set(PROFILE_KEYS) - set(PROFILE_SECTIONS)):
         if key == "litellm":
             refuse(f"providers.toml {where} sets [profiles.{name}.litellm]",
                    "the transport keys are derived from the provider this profile names, so a streaming",
                    "quirk belongs on that provider in providers.toml (its 'stream' key); a litellm key that",
                    "is specific to this endpoint belongs in [providers.*.litellm], and only one that is the",
-                   "same for every endpoint belongs in settings.toml")
+                   "same for every endpoint belongs in settings.toml",
+                   # `name` is the PROFILE, not the provider it names - those commonly differ, and a table
+                   # under the profile name would be a provider that does not exist.
+                   fix=["move that [litellm] table to [providers.<the provider this profile names>.litellm]",
+                        f"or to settings.toml [litellm] if it is the same for every endpoint, then re-run:  {PROG} review"])
         if key == "pr_reviewer":
             refuse(f"providers.toml {where} sets [profiles.{name}.pr_reviewer], but the review knobs are not",
                    "per model: pr-agent applies them to the whole run, so a copy in each profile is the same",
                    "answer written twice and free to drift",
-                   "move the table to the top level, as a single [pr_reviewer] section")
+                   "move the table to the top level, as a single [pr_reviewer] section",
+                   fix=[f"move it into settings.toml as one [pr_reviewer] table, then re-run:  {PROG} review"])
         # A profile name is a TOML KEY, and a bare key containing a dot is a table SEPARATOR: the header
         # `[profiles.acme-large-v4.1-flash]` silently defines `profiles.acme-large-v4` with
         # a child table named `1-flash`, so the profile the file meant does not exist at all. The signature
@@ -602,19 +731,24 @@ for name, body in sorted(profiles.items()):
                    "this is almost certainly a profile name containing a dot, split by TOML: a bare key",
                    f"cannot contain one, so this header defined a profile '{name}' with a sub-table",
                    f"'{key}' instead of the profile '{name}.{key}' the file meant",
-                   "quote such a name both where it is DEFINED and where it is ASSIGNED:",
-                   f'  [profiles."{name}.{key}"]   and   main = "{name}.{key}"')
+                   fix=[f'quote the name where it is DEFINED:  [profiles."{name}.{key}"]',
+                        f'and where it is ASSIGNED:  main = "{name}.{key}"   - then re-run:  {PROG} review'])
         refuse(f"providers.toml has unknown key '{key}' in {where}; expected 'provider', 'model' or a "
-               f"[{where[1:-1]}.config] table")
+               f"[{where[1:-1]}.config] table",
+               fix=[f"rename or remove '{key}' in {where}, then re-run:  {PROG} review"])
     model = body.get("model")
     if not isinstance(model, str) or not model.strip():
-        refuse(f"providers.toml {where} has no 'model'; every profile names the model id its endpoint serves")
+        refuse(f"providers.toml {where} has no 'model'; every profile names the model id its endpoint serves",
+               fix=[f'add it:  model = "<the model id your endpoint serves>"  under {where}',
+                    f"then re-run:  {PROG} review"])
     model_by_profile[name] = model.strip()
     provider = body.get("provider")
     if not isinstance(provider, str) or not provider.strip():
         refuse(f"providers.toml {where} has no 'provider'; every profile names the provider - in providers.toml -",
                "that serves it. Which host answers is never inferred from the model id's prefix: a prefix",
-               "that disagrees with the pinned transport is resolved silently, to the wrong endpoint")
+               "that disagrees with the pinned transport is resolved silently, to the wrong endpoint",
+               fix=[f'add it:  provider = "<a [providers.<name>] table in this file>"  under {where}',
+                    f"then re-run:  {PROG} review"])
     provider_by_profile[name] = provider.strip()
     sections = {}
     for section in PROFILE_SECTIONS:
@@ -622,27 +756,35 @@ for name, body in sorted(profiles.items()):
         if contents is None:
             continue
         if not isinstance(contents, dict):
-            refuse(f"providers.toml [{where[1:-1]}.{section}] is not a table")
+            refuse(f"providers.toml [{where[1:-1]}.{section}] is not a table",
+                   fix=[f"write it as a table of settings, e.g.  [{where[1:-1]}.{section}]  then  "
+                        f"max_output_tokens = 8000", f"then re-run:  {PROG} review"])
         if section == "config" and "model" in contents:
             refuse(f"providers.toml {where}.config sets 'model'; a profile names its model as 'model' in {where} itself",
-                   "so that the profile identity has exactly one spelling")
+                   "so that the profile identity has exactly one spelling",
+                   fix=[f"delete 'model' from {where}.config - it is already set as 'model' in {where}",
+                        f"then re-run:  {PROG} review"])
         if section == "config" and "fallback_models" in contents:
             refuse(f"providers.toml {where}.config sets 'fallback_models'; the fallback chain comes from [selection] fallback",
-                   "and a second place to name it is a second answer to the same question")
+                   "and a second place to name it is a second answer to the same question",
+                   fix=[f"delete 'fallback_models' here and list the profiles under [{SELECTION_SECTION}] fallback",
+                        f"in settings.toml, then re-run:  {PROG} review"])
         if section == "config":
             for _dk in DERIVED_CONFIG_KEYS:
                 if _dk in contents:
                     refuse(f"providers.toml {where}.config sets '{_dk}', which preflight derives",
                            "it is derived from this profile's reasoning_effort, so a value here would be",
                            "overwritten and silently ignored",
-                           "remove it and rely on reasoning_effort instead")
+                           fix=[f"delete '{_dk}' from {where}.config and set reasoning_effort instead,",
+                                f"then re-run:  {PROG} review"])
         # Each key is written as the name of a pr-agent setting, so a key that is not a setting name would
         # sit in the rendered file looking configured and be read by nothing.
         for key in sorted(contents):
             if not plain_name(key):
                 refuse(f"providers.toml [{where[1:-1]}.{section}] has a key that is not a setting name: {key!r}",
                        "a key reaches pr-agent as a setting name, so it may contain only letters, digits and",
-                       "underscores, and may not start with a digit")
+                       "underscores, and may not start with a digit",
+                       fix=[f"rename {key!r} to a setting name (letters, digits, underscores), then re-run:  {PROG} review"])
         sections[section] = contents
     settings_by_profile[name] = sections
 
@@ -650,7 +792,9 @@ for name in ([main_name] if main_name else []) + fallback_names:
     if name not in profiles:
         defined = ", ".join(sorted(profiles)) if profiles else "none"
         slot = "main" if name == main_name else "fallback"
-        refuse(f"settings.toml [{SELECTION_SECTION}] {slot} names '{name}', which no [profiles.{name}] table defines (defined: {defined})")
+        refuse(f"settings.toml [{SELECTION_SECTION}] {slot} names '{name}', which no [profiles.{name}] table defines (defined: {defined})",
+               fix=[f"add a [profiles.{name}] table to providers.toml, or change [{SELECTION_SECTION}] {slot}",
+                    f"to one of: {defined} - then re-run:  {PROG} review"])
 
 # pr-agent holds ONE config per process: get_max_tokens() and the output-cap resolver read the settings
 # and ignore which model is asking (both were checked against the installed pr-agent). So the assigned
@@ -692,69 +836,94 @@ if len(assigned_providers) > 1:
     refuse(f"settings.toml assigns {len(assigned_providers)} providers ({', '.join(assigned_providers)}),",
            "but pr-agent holds ONE endpoint per run, so the fallback chain would be answered by whichever",
            "provider is pinned - a different host, with that provider's key",
-           "assign configurations from one provider, and use the other by changing [selection] main")
+           "assign configurations from one provider, and use the other by changing [selection] main",
+           fix=[f"keep only profiles whose 'provider' is the same in [{SELECTION_SECTION}] main and fallback,",
+                f"then re-run:  {PROG} review"])
 chosen_provider = assigned_providers[0] if assigned_providers else ""
 
 provider_entry = {}
 for name, body in sorted(provider_table.items()):
     where = f"[providers.{name}]"
     if not isinstance(body, dict):
-        refuse(f"providers.toml {where} is not a table")
+        refuse(f"providers.toml {where} is not a table",
+               fix=[f"write it as a table with api_base and key, e.g.  {where}  then  "
+                    f'api_base = "https://<endpoint>/v1"  and  key = "<your API key>"',
+                    f"then re-run:  {PROG} review"])
     for key in sorted(set(body) - set(PROVIDER_KEYS)):
-        refuse(f"providers.toml has unknown key '{key}' in {where}; expected one of {list(PROVIDER_KEYS)}")
+        refuse(f"providers.toml has unknown key '{key}' in {where}; expected one of {list(PROVIDER_KEYS)}",
+               fix=[f"rename or remove '{key}' in {where}, then re-run:  {PROG} review"])
     transport = body.get("transport", "openai")
     if not isinstance(transport, str) or transport.strip() not in TRANSPORTS:
+        # No command repairs this: the list is the answer, and the choice is the operator's.
         refuse(f"providers.toml {where} names transport {transport!r}, which is not one pr-agent can route",
-               f"known transports: {', '.join(sorted(TRANSPORTS))}")
+               f"known transports: {', '.join(sorted(TRANSPORTS))}",
+               fix=[f"set 'transport' in {where} to one of those names - which one is right depends on what",
+                    f"your endpoint speaks, so this is your call - then re-run:  {PROG} review"])
     transport = transport.strip()
     section, key_name, reads_endpoint = TRANSPORTS[transport]
     api_base = body.get("api_base", "")
     if not isinstance(api_base, str):
-        refuse(f"providers.toml {where} 'api_base' must be a URL in quotes")
+        refuse(f"providers.toml {where} 'api_base' must be a URL in quotes",
+               fix=[f'write it as a quoted URL, e.g.  api_base = "https://api.example.com/v1", then re-run:  {PROG} review'])
     api_base = api_base.strip()
     if api_base and not reads_endpoint:
         refuse(f"providers.toml {where} sets api_base, but pr-agent reads no endpoint for transport '{transport}'",
                f"it reads only {section}.{key_name} from a config file, and takes its endpoint from an",
                "environment variable or from the provider's own default - so this value would be ignored",
-               f"name a transport that reads an endpoint ({ENDPOINT_TRANSPORTS}), or set that provider's",
-               "api-base variable in the environment that runs preflight")
+               fix=[f"delete 'api_base' from {where} and set that provider's endpoint variable in the",
+                    f"environment that runs preflight, or name a transport that reads an endpoint",
+                    f"({ENDPOINT_TRANSPORTS}) - then re-run:  {PROG} review"])
     if not api_base and reads_endpoint:
         refuse(f"providers.toml {where} has no 'api_base', and transport '{transport}' reads its endpoint from config",
                "without it pr-agent would use its own default host while taking this provider's key - a request",
-               "to one host with another's credential, so state the endpoint")
+               "to one host with another's credential, so state the endpoint",
+               fix=[f'add it:  api_base = "https://<your-endpoint>/v1"  under {where}, then re-run:  {PROG} review'])
     credential = body.get("key", "")
     if not isinstance(credential, str):
-        refuse(f"providers.toml {where} 'key' must be a string")
+        refuse(f"providers.toml {where} 'key' must be a string",
+               fix=[f'write it as a quoted string, e.g.  key = "sk-...", then re-run:  {PROG} review'])
     if not credential.strip():
         refuse(f"providers.toml {where} has no 'key'",
                "every provider states its credential - nothing else supplies one, and an endpoint that",
-               "ignores the key still takes a non-empty string")
+               "ignores the key still takes a non-empty string",
+               fix=[f'add it:  key = "<your API key>"  under {where}   # the file is chmod 600',
+                    f"then re-run:  {PROG} review"])
     # Stripped on the way in: a key pasted with a trailing space or newline is written verbatim, sent
     # verbatim, and refused by the endpoint as a bad credential - an authentication failure that the key
     # itself does not explain. Surrounding whitespace is never part of a credential.
     credential = credential.strip()
     stream = body.get("stream", False)
     if not isinstance(stream, bool):
-        refuse(f"providers.toml {where} 'stream' must be true or false")
+        refuse(f"providers.toml {where} 'stream' must be true or false",
+               fix=[f"write it as  stream = true  or  stream = false  (or delete the line), then re-run:  {PROG} review"])
     if stream and not api_base:
         refuse(f"providers.toml {where} sets stream, but its endpoint is not in this file",
                "the streaming workaround is scoped to this provider's own api_base, so an endpoint this file",
-               "cannot see is one the workaround cannot be scoped to")
+               "cannot see is one the workaround cannot be scoped to",
+               # Adding `api_base` alone would hit the "transport reads no endpoint" refusal above, since
+               # this branch implies that transport. Deleting the stream flag is the only single-step fix.
+               fix=[f"delete  stream = true  from {where} (this transport reads no endpoint to scope it to),",
+                    f"then re-run:  {PROG} review"])
     litellm_table = body.get("litellm") or {}
     if not isinstance(litellm_table, dict):
-        refuse(f"providers.toml [{where[1:-1]}.litellm] is not a table")
+        refuse(f"providers.toml [{where[1:-1]}.litellm] is not a table",
+               fix=[f"write it as a table of litellm keys, or delete it, then re-run:  {PROG} review"])
     for key in sorted(litellm_table):
         if key in DERIVED_LITELLM_KEYS:
             refuse(f"providers.toml {where}.litellm sets '{key}', which preflight derives",
                    "the transport comes from this provider's 'transport', and the streaming pair from its",
                    "'stream' key - writing them here would be a second answer, free to disagree with the",
-                   "endpoint, which LiteLLM resolves silently to the wrong host")
+                   "endpoint, which LiteLLM resolves silently to the wrong host",
+                   fix=[f"delete '{key}' from {where}.litellm, then re-run:  {PROG} review"])
         if key not in PROVIDER_LITELLM_KEYS:
             refuse(f"providers.toml {where}.litellm has an unknown key '{key}'",
                    f"a provider may set: {', '.join(PROVIDER_LITELLM_KEYS)}",
-                   "a [litellm] key that is the same for every provider belongs in settings.toml instead")
+                   "a [litellm] key that is the same for every provider belongs in settings.toml instead",
+                   fix=[f"remove '{key}' from {where}.litellm - or, if it is the same for every endpoint,",
+                        f"set it in settings.toml [litellm] - then re-run:  {PROG} review"])
         if not plain_name(key):
-            refuse(f"providers.toml {where}.litellm has a key that is not a setting name: {key!r}")
+            refuse(f"providers.toml {where}.litellm has a key that is not a setting name: {key!r}",
+                   fix=[f"rename {key!r} to a setting name (letters, digits, underscores), then re-run:  {PROG} review"])
     provider_entry[name] = {
         "transport": transport, "section": section, "key_name": key_name,
         "api_base": api_base, "key": credential, "stream": stream,
@@ -765,7 +934,9 @@ if chosen_provider and chosen_provider not in provider_entry:
     defined = ", ".join(sorted(provider_entry)) if provider_entry else "none"
     refuse(f"settings.toml names provider '{chosen_provider}', which no [providers.{chosen_provider}] table defines (defined: {defined})",
            "an unresolved provider is not a missing default: pr-agent would fall back to another section's",
-           "host and key, so this is refused rather than guessed")
+           "host and key, so this is refused rather than guessed",
+           fix=[f"add a [providers.{chosen_provider}] table to providers.toml, or point the profile's",
+                f"'provider' at one of: {defined} - then re-run:  {PROG} review"])
 
 # A valid file that assigns nothing means there is no model, and with preflight.toml gone there is no
 # second config to fall back to - so it is a refusal that names the section to fill in, not a no-op.
@@ -779,7 +950,9 @@ if not main_name:
     refuse("settings.toml assigns no model profile",
            f"{_why}, so there is nothing to review with" +
            (" - a fallback chain is not a main model" if fallback_names else ""),
-           f"set [{SELECTION_SECTION}] main to the name of a [profiles.<name>] table in providers.toml")
+           fix=[f'add it to settings.toml:  [{SELECTION_SECTION}]  then  main = "<profile name>"',
+                f"where the name is a [profiles.<name>] table in {providers_path}",
+                f"then re-run:  {PROG} review"])
 
 # ------------------------------------------------------------------ render
 #
@@ -799,7 +972,9 @@ rendered.pop(GATE_SECTION, None)
 
 config = rendered.setdefault("config", {})
 if not isinstance(config, dict):
-    refuse("settings.toml [config] is not a table")
+    refuse("settings.toml [config] is not a table",
+           fix=["write it as a table of settings, e.g.  [config]  then  output_run_details = true, then re-run:  "
+                + PROG + " review"])
 
 primary = main_name
 config["model"] = model_by_profile[primary]
@@ -830,7 +1005,8 @@ for section in PROFILE_SECTIONS:
                    "the profile's value would overwrite settings.toml's, leaving that one looking set and",
                    "doing nothing",
                    f"keep it in [profiles.{supplier}.{section}] - it describes the model - and remove it",
-                   f"from settings.toml [{section}]" + (f"; {where}" if where else ""))
+                   f"from settings.toml [{section}]" + (f"; {where}" if where else ""),
+                   fix=[f"delete '{key}' from ONE of the two places, then re-run:  {PROG} review"])
     # DERIVED_CONFIG_KEYS are refused here too: a profile that sets one would have it copied into
     # the rendered [config] and then silently replaced by the derivation block below. Only the primary
     # profile's settings are merged here (supplier == main_name), so a fallback profile's setting
@@ -841,11 +1017,12 @@ for section in PROFILE_SECTIONS:
                 refuse(f"settings.toml [profiles.{supplier}.config] sets '{_dk}', which preflight derives",
                        "it is derived from this profile's reasoning_effort, so a value here would be",
                        "overwritten and silently ignored",
-                       "remove it and rely on reasoning_effort instead")
+                       fix=[f"delete '{_dk}' and set reasoning_effort instead, then re-run:  {PROG} review"])
     for key, value in profile_settings.items():
         target = rendered.setdefault(section, {})
         if not isinstance(target, dict):
-            refuse(f"settings.toml [{section}] is not a table")
+            refuse(f"settings.toml [{section}] is not a table",
+               fix=[f"write it as a [table] of settings, or delete it, then re-run:  {PROG} review"])
         target[key] = value
 
 # Derive additional_reasoning_effort_models from the configured reasoning_effort: pr-agent
@@ -879,7 +1056,8 @@ entry = provider_entry[chosen_provider]
 transport = entry["transport"]
 litellm = rendered.setdefault("litellm", {})
 if not isinstance(litellm, dict):
-    refuse("settings.toml [litellm] is not a table")
+    refuse("settings.toml [litellm] is not a table",
+           fix=["write it as a [litellm] table of settings, or delete it, then re-run:  " + PROG + " review"])
 # The three derived keys are refused here for the same reason they are refused inside a provider's
 # [litellm]: a value written here is overwritten below, so it would read as configured and do nothing -
 # and a pin that disagreed with the endpoint is resolved by LiteLLM silently, to the wrong host.
@@ -888,7 +1066,9 @@ for _key in DERIVED_LITELLM_KEYS:
         refuse(f"settings.toml [litellm] sets '{_key}', which preflight derives from the provider",
                "the transport comes from the provider's 'transport', and the streaming pair from its",
                "'stream' key, so a value here would be overwritten and silently ignored",
-               "remove it from settings.toml [litellm]")
+               "remove it from settings.toml [litellm]",
+               fix=[f"delete '{_key}' from settings.toml [litellm] and set it on the provider entry instead,",
+                    f"then re-run:  {PROG} review"])
 # The pin, and the reason a model id needs no provider prefix: with it set, pr-agent routes every model
 # to this transport and LiteLLM strips a matching prefix, so the id reaches the endpoint as the endpoint's
 # own name. It is written from the provider entry, so it cannot disagree with the endpoint below - the
@@ -924,13 +1104,16 @@ for key in sorted(entry["litellm"]):
                "the provider's value would overwrite settings.toml's, leaving that one looking set and",
                "doing nothing",
                "keep it on the provider if it describes THIS endpoint, or in settings.toml [litellm] if it",
-               "is the same for every endpoint - but only one of them")
+               "is the same for every endpoint - but only one of them",
+               fix=[f"delete '{key}' from ONE of the two places, then re-run:  {PROG} review"])
 for key, value in entry["litellm"].items():
     litellm[key] = value
 
 endpoint_table = rendered.setdefault(entry["section"], {})
 if not isinstance(endpoint_table, dict):
-    refuse(f"settings.toml [{entry['section']}] is not a table")
+    refuse(f"settings.toml [{entry['section']}] is not a table",
+           fix=[f"write it as a [table], or delete it - the provider supplies this section's values - then "
+                f"re-run:  {PROG} review"])
 # The provider supplies this section's endpoint and credential. A user-written copy in settings.toml would
 # be overwritten below without a word - the same silent-collision failure refused everywhere else here.
 # EVERY spelling, not only this transport's: a stale value under another name would be copied into the
@@ -940,7 +1123,8 @@ for _key in sorted(_CREDENTIAL_KEYS | {"api_base"}):
         refuse(f"settings.toml [{entry['section']}] sets '{_key}', which the provider supplies",
                f"the endpoint and credential come from [providers.{chosen_provider}] in providers.toml",
                f"remove '{_key}' from settings.toml [{entry['section']}], so the provider's value is the",
-               "only one")
+               "only one",
+               fix=[f"delete '{_key}' from settings.toml [{entry['section']}], then re-run:  {PROG} review"])
 # EVERY endpoint-shaped section is checked, not just the one being written: a `key` left under another
 # provider's section (a migration remnant, say) would be copied into the rendered file verbatim, so the
 # credential would be sent - and would sit in a settings.toml nothing mode-checks. That is the
@@ -954,7 +1138,9 @@ for _name in sorted(_ENDPOINT_SECTIONS):
             refuse(f"settings.toml [{_name}] sets '{_key}', which belongs in providers.toml",
                    "every endpoint and credential is a property of a [providers.*] entry - a second copy",
                    "in settings.toml is one that reaches pr-agent and is never mode-checked",
-                   f"remove settings.toml [{_name}] and put it in providers.toml")
+                   f"remove settings.toml [{_name}] and put it in providers.toml",
+                   fix=[f"delete settings.toml [{_name}] and move its values to a [providers.*] entry,",
+                        f"then re-run:  {PROG} review"])
 if entry["api_base"]:
     endpoint_table["api_base"] = entry["api_base"]
 endpoint_table[entry["key_name"]] = entry["key"]
@@ -969,9 +1155,14 @@ try:
     with open(out_path, "w") as handle:
         handle.write("\n".join(lines) + "\n")
 except OSError as exc:
-    refuse(f"could not write the rendered configuration ({exc})")
+    refuse(f"could not write the rendered configuration ({exc})",
+           fix=[f"check the directory is writable and has space:  df -h {shq(os.path.dirname(out_path))}",
+                "or name a directory you can write to, outside the repository being reviewed:",
+                f"  PREFLIGHT_RENDER_DIR=<that directory> {PROG} review"])
 if os.path.getsize(out_path) == 0:
-    refuse("the rendered configuration came out empty, so it is not passed on as a configuration at all")
+    refuse("the rendered configuration came out empty, so it is not passed on as a configuration at all",
+           fix=["this is a defect in the renderer, not in your config: report it with the two config files'",
+                f"shapes (not their keys) at https://github.com/413x5/preflight/issues"])
 
 shown = []
 if main_name:
@@ -1017,12 +1208,23 @@ PY
   # 600-mode like the source. A failure here is reported but not fatal: the run's own config is already
   # complete, and refusing a valid run over a convenience copy would be the wrong trade.
   #
-  # It stays in the CONFIG dir even when the render went elsewhere: the copy is for a human looking where
-  # the config lives, and a credential-bearing copy dropped into the temp dir a run is about to remove
-  # would be either useless or a leak. When the config dir is the unwritable thing, the message says so
-  # and names the run's own file, which is gone once the run ends.
-  _latest="$cfgdir/.pragent.settings.toml"
-  _tmp_latest="$cfgdir/.pragent.settings.part.$$.toml"
+  # Config dir, or a render dir the operator NAMED - never the automatic temp fallback, which the run
+  # removes: a copy there would leave a credential-bearing file behind.
+  #
+  # Neither available: the fallback notice already said the run is not inspectable, so nothing is printed.
+  if [ "$render_dir" != "$cfgdir" ] && [ -n "$__preflight_render_dir_ephemeral" ]; then
+    _latest=''
+  else
+    _latest="$cfgdir/.pragent.settings.toml"
+    if [ "$render_dir" != "$cfgdir" ]; then
+      _latest="$render_dir/.pragent.settings.toml"
+    fi
+  fi
+  if [ -z "$_latest" ]; then
+    PREFLIGHT_RENDERED_CONFIG="$out"
+    return 0
+  fi
+  _tmp_latest="$(dirname "$_latest")/.pragent.settings.part.$$.toml"
   if ( umask 077; cp "$out" "$_tmp_latest" && mv -f "$_tmp_latest" "$_latest" ) 2>/dev/null; then
     chmod 600 "$_latest" 2>/dev/null || true
   else

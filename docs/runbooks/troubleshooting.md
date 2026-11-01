@@ -90,23 +90,25 @@ if you want the whole diff in a single call.
 
 ## `preflight-code review` says the config dir "is not writable" (or renders into a temp dir)
 
-That is not an error: the run continues, and the two lines on stderr say where the rendered config went and
-that `PREFLIGHT_RENDER_DIR` is how to choose that location instead of letting the fallback decide. It
-happens when `~/.config/preflight` cannot be written - a sandbox that mounts it read-only, a shared or
-dotfiles checkout, an immutable package store.
+Not an error: the run continues, and the message names where the rendered config went. It happens when
+`~/.config/preflight` cannot be written - a read-only mount, a shared or dotfiles checkout, an immutable
+package store.
 
 ```sh
-mkdir -p "$TMPDIR/preflight-render"                      # anywhere you can write
-PREFLIGHT_RENDER_DIR="$TMPDIR/preflight-render" preflight-code review
+PREFLIGHT_RENDER_DIR=<a directory you can write to, outside the repository> preflight-code review
 ```
 
-`settings.toml` and `providers.toml` are still read from `PREFLIGHT_HOME`, so the review is the same
-review. Do **not** copy the config directory somewhere writable and point `PREFLIGHT_HOME` at the copy:
-the two then drift, and the next edit lands in the one nobody reviews with. Keep the render dir outside the
-repository being reviewed - one inside it is refused unless that exact path is gitignored there, because
-the review's `git add -A` snapshot would otherwise hand the key to the model. The run removes its own file
-when it ends; the copy kept for inspection stays in the config dir, or the run says where it could not be
-written.
+The directory must be one **you can write to** and **outside the repository being reviewed** (one inside it
+is refused unless gitignored, since the review's `git add -A` snapshot would hand the key to the model). It
+is created if absent. Which directory that is, only you can say - a path writable here may not be writable
+in the sandbox a review runs in, so nothing in this bundle names one.
+
+Doing nothing is also fine: each run gets its own temp dir and removes it, so the review is unaffected and
+only inspection is lost. `settings.toml` and `providers.toml` are always read from `PREFLIGHT_HOME`; do not
+copy the config dir somewhere writable and point `PREFLIGHT_HOME` at the copy - the two then drift.
+
+A `PREFLIGHT_RENDER_DIR` you named that cannot be written makes the run **refuse** rather than pick
+somewhere else. The message prints both ways out: `mkdir -p` it and re-run, or `unset PREFLIGHT_RENDER_DIR`.
 
 ## `preflight-code review` says pr-agent "exited 0 without writing" a review
 

@@ -3200,10 +3200,27 @@ TOML
   # `providers.toml.bak` or an editor copy, which the same snapshot stages. It must also be RELATIVE,
   # because a gitignore pattern is matched from the repo root and an absolute one can never be pasted in.
   case "$(cat "$work/models.tmpdir.out")" in
-    *"(home-in-repo/)"*) ;;
+    *'printf'*'home-in-repo/'*) ;;
     *) problems="$problems
-        | the refusal did not print the config directory as a repo-relative rule: $(grep -i 'not ignored' "$work/models.tmpdir.out")" ;;
+        | the refusal did not print the config directory as a repo-relative rule: $(cat "$work/models.tmpdir.out")" ;;
   esac
+  # The printed remedy must actually work. Its verification step is `check-ignore`, which on a TRACKED path
+  # reports "not ignored" however the rules read - so the command uses `--no-index` to test the RULE. Run the
+  # printed line itself: a remedy that fails when pasted is the same defect as none.
+  # Only the RULE half is run: the printed line ends in `&& <caller> review`, and running that would spend a
+  # model call (or fail for want of a config) and be reported as a broken remedy. The line is cut at the
+  # verification step, so what is tested is the part that fixes the state.
+  _ignore_cmd="$(grep -o 'printf .*check-ignore[^&]*' "$work/models.tmpdir.out" | head -1)"
+  if [ -n "$_ignore_cmd" ]; then
+    rm -f "$d/.gitignore"
+    ( cd "$d" && eval "$_ignore_cmd" ) >"$work/models.tmpdir.remedy" 2>&1 || problems="$problems
+        | the printed ignore remedy does not work when pasted: $(cat "$work/models.tmpdir.remedy")"
+    git -C "$d" check-ignore -q home-in-repo/.pragent.settings.toml || problems="$problems
+        | the printed ignore rule does not cover the inspection copy at the fixed name"
+  else
+    problems="$problems
+        | the refusal printed no pasteable ignore command: $(cat "$work/models.tmpdir.out")"
+  fi
   # Ignoring ONLY the render is not enough: providers.toml sits beside it and holds the same key, so the
   # remedy the refusal prints has to cover both, and a half-ignored config dir must still be refused.
   printf 'home-in-repo/.pragent.settings.*.toml\n' > "$d/.gitignore"
@@ -3951,12 +3968,15 @@ FAKE
     *"is not writable"*) problems="$problems
         | (2) an explicit render dir still reported the config dir as unwritable, so the fallback ran" ;;
   esac
-  # The inspection copy stays in the CONFIG dir - it is for a human looking where the config lives - and
-  # the run's own file is the only thing the render dir gets.
-  [ -f "$cfg/.pragent.settings.toml" ] || problems="$problems
-        | (2) no inspectable copy of the render was left in the config dir"
-  [ -z "$(ls -A "$work/renderdir-explicit" 2>/dev/null)" ] || problems="$problems
-        | (2) the render dir was left holding something after the run: $(ls -A "$work/renderdir-explicit")"
+  # The inspection copy follows a render dir the operator NAMED, because that is the only way it survives a
+  # read-only config dir - which is the state this variable exists for. It is 600-mode like its source, and
+  # the per-run file is still gone.
+  [ -f "$work/renderdir-explicit/.pragent.settings.toml" ] || problems="$problems
+        | (2) no inspectable copy of the render was left in the named render dir, so a read-only config dir
+        |     would leave nothing to inspect"
+  [ "$(python3 -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' \
+        "$work/renderdir-explicit/.pragent.settings.toml" 2>/dev/null)" = "0o600" ] || problems="$problems
+        | (2) the inspectable copy in the render dir is not 600-mode, and it holds the key"
   [ -z "$url" ] || [ ! -e "$url" ] || problems="$problems
         | (2) the run left its per-run rendered config behind: $url (it holds the key)"
 
@@ -3994,6 +4014,181 @@ FAKE
 }
 
 # --------------------------------------------------------------- a review that was never written
+
+# --------------------------------------------------------------- a refusal tells you what to run
+
+case_refusals_name_a_command() {
+  # REQ-HOOK-50 asserts the render-dir messages EXIST and name the variable. This asserts the thing an agent
+  # mid-loop actually needs: a COMMAND it can run. "set PREFLIGHT_RENDER_DIR" is advice; a line it can paste
+  # is an instruction, and the difference is a round trip through a human.
+  #
+  # Both headline states are driven through the real helper, and each is checked for a command that (a) is
+  # shaped like a command - a real executable, the caller's own name, a concrete directory - and (b) names
+  # the thing to fix. The caller name matters: the renderer is shared, so a hard-coded `preflight-code` in a
+  # message printed by `preflight-pr` sends the reader to a command they did not run.
+  local d fake cfg problems='' rc out tmpdir
+  d="$work/recover"; fake="$work/recover-bin"; cfg="$work/recover-cfg"; tmpdir="$work/recover-tmp"
+  mkdir -p "$fake" "$tmpdir"
+  model_repo "$d"
+  model_cfg_dir "$cfg"
+  model_cfg_write "$cfg" "$(cat <<'TOML'
+[selection]
+main = "work-main"
+
+[providers.work]
+api_base = "https://llm.internal.corp/v1"
+key = "key-two"
+
+[profiles.work-main]
+provider = "work"
+model = "their-model-id"
+TOML
+)"
+  model_stub "$fake"
+
+  run_it() {
+    rc=0
+    out="$( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" TMPDIR="$tmpdir" \
+              PREFLIGHT_RENDER_DIR="$1" PREFLIGHT_CFG_OUT="$work/recover.url" \
+              PREFLIGHT_CFG_COPY="$work/recover.copy" PREFLIGHT_HOME="$cfg" \
+              bash "$repo_root/src/preflight-code" review 2>&1 )" || rc=$?
+    rm -f "$work/recover.url"
+  }
+  # A line of the message that is a COMMAND: the first non-blank token after the `<caller>: ` prefix must be
+  # an executable the message itself is telling the reader to run. Checked against the text, not by running
+  # it - a test that ran `PREFLIGHT_RENDER_DIR=... preflight-code review` would spend a model call.
+  #
+  # `$1` is the caller the message must name. Both helpers are driven below, because a renderer that printed
+  # a hard-coded `preflight-code` would pass a `preflight-code`-only check - and the renderer is shared.
+  command_lines() {
+    printf '%s\n' "$out" | grep -E "^$1:   " | sed "s/^$1:   //"
+  }
+
+  # (a) The read-only-config fallback notice. The run SUCCEEDS, so this is a notice - and a notice still has
+  # to tell an agent what to do, because the next run has the same problem.
+  chmod 0555 "$cfg"
+  run_it ''
+  chmod 0755 "$cfg"
+  [ "$rc" = 0 ] || problems="$problems
+        | (a) the read-only config dir failed the run (exit $rc): $out"
+  case "$out" in
+    *"is not writable; rendered config is in"*) ;;
+    *) problems="$problems
+        | (a) the fallback notice was not printed at all: $out" ;;
+  esac
+  # The command names the variable, leaves the LOCATION as a placeholder, and re-runs the caller's own
+  # command. The placeholder is the point: a path suggested here would state a fact the renderer cannot
+  # know - an agent in a sandbox may not be able to write to `$HOME` either - so what is asserted is the
+  # SHAPE, and the absence of a guessed path is asserted too, below.
+  case "$(command_lines preflight-code)" in
+    *'PREFLIGHT_RENDER_DIR=<'*'> preflight-code review'*) ;;
+    *) problems="$problems
+        | (a) the fallback notice carries no command shape naming the variable, a placeholder and the
+        |     caller; got: $(command_lines preflight-code)" ;;
+  esac
+  # The notice may not SUGGEST a directory of its own choosing - that relocates the failure instead of
+  # describing it. Quoting a path the operator supplied is a different thing, and the refusal below requires
+  # it. Asserted as the ABSENCE of a concrete path: a case requiring the placeholder would be satisfied by a
+  # line carrying both, so the two are separate checks.
+  case "$(command_lines preflight-code)" in
+    *'PREFLIGHT_RENDER_DIR=/'*|*'PREFLIGHT_RENDER_DIR="$'*)
+      problems="$problems
+        | (a) the fallback notice names a concrete directory instead of a placeholder:
+        |     $(command_lines preflight-code)" ;;
+  esac
+  # The property the directory must satisfy is stated, since the location is not: without it the reader
+  # has a command and no way to know what to substitute.
+  case "$out" in
+    *"outside the repository"*) ;;
+    *) problems="$problems
+        | (a) the notice does not say the directory must be outside the reviewed repository: $out" ;;
+  esac
+  case "$out" in
+    *"you can write to"*) ;;
+    *) problems="$problems
+        | (a) the notice does not say the directory must be one the caller can write to: $out" ;;
+  esac
+  # The honest trade of doing nothing must be stated, or an agent cannot judge whether to act.
+  case "$out" in
+    *"nothing changes if you do not"*) ;;
+    *) problems="$problems
+        | (a) the notice does not say what happens if the reader does nothing: $out" ;;
+  esac
+  case "$out" in
+    *"not inspectable"*) ;;
+    *) problems="$problems
+        | (a) the notice does not name the cost of doing nothing: $out" ;;
+  esac
+  # And the cost must be REAL: the fallback directory is removed with the run. A credential-bearing copy
+  # written into it would keep it non-empty, so `rmdir` would fail and the key would sit in the temp dir
+  # for good - which is why the inspection copy never follows the automatic fallback. Asserted on the
+  # directory rather than on the copy, because a leftover empty dir is the harmless case and a leftover
+  # holding a key is not.
+  [ -z "$(ls -d "$tmpdir"/preflight-render.* 2>/dev/null)" ] || problems="$problems
+        | (a) the automatic fallback directory outlived the run, so anything left in it - including a copy
+        |     of the credential-bearing render - stays in the temp dir: $(ls -A "$tmpdir"/preflight-render.* 2>/dev/null | head -3)"
+
+  # (b) The explicit-directory refusal. Two ways out, both commands: create the directory, or stop naming it.
+  mkdir -p "$work/recover-closed"
+  chmod 0555 "$work/recover-closed"
+  run_it "$work/recover-closed"
+  chmod 0755 "$work/recover-closed"
+  [ "$rc" != 0 ] || problems="$problems
+        | (b) an unwritable PREFLIGHT_RENDER_DIR did not refuse: $out"
+  # Quote-agnostic on the path: the printed command shell-quotes it, and the quoting style is not the
+  # property under test - that the directory it was GIVEN is named and the command re-runs is.
+  case "$(command_lines preflight-code)" in
+    *"mkdir -p "*"$work/recover-closed"*"preflight-code review"*) ;;
+    *) problems="$problems
+        | (b) the refusal carries no command to create and re-run against the directory it was given;
+        |     got: $(command_lines preflight-code)" ;;
+  esac
+  case "$(command_lines preflight-code)" in
+    *"unset PREFLIGHT_RENDER_DIR"*) ;;
+    *) problems="$problems
+        | (b) the refusal does not offer the other way out - unsetting the variable: $(command_lines preflight-code)" ;;
+  esac
+  # The directory the operator named is reported verbatim, so the command can be pasted unchanged.
+  case "$out" in
+    *"PREFLIGHT_RENDER_DIR=$work/recover-closed"*) ;;
+    *) problems="$problems
+        | (b) the refusal did not name the directory it was given: $out" ;;
+  esac
+  # And it says it will not just pick somewhere else, which is the property the refusal protects.
+  case "$out" in
+    *"not falling back"*) ;;
+    *) problems="$problems
+        | (b) the refusal does not say it will not silently override the named directory: $out" ;;
+  esac
+
+  # The renderer is shared, so the same notice under `preflight-pr` must name `preflight-pr`. Run through the
+  # real helper, which sets __preflight_caller_name before sourcing the renderer.
+  chmod 0555 "$cfg"
+  rc=0
+  # `</dev/null`: preflight-pr passes the caller's stdin to the child, so without a redirect this waits on
+  # the harness's own stdin forever.
+  out="$( cd "$d" && rm -rf .preflight && PATH="$fake:$PATH" TMPDIR="$tmpdir" PREFLIGHT_RENDER_DIR='' \
+            PREFLIGHT_CFG_OUT="$work/recover.url" PREFLIGHT_CFG_COPY="$work/recover.copy" \
+            PREFLIGHT_HOME="$cfg" bash "$repo_root/src/preflight-pr" review </dev/null 2>&1 )" || rc=$?
+  chmod 0755 "$cfg"
+  rm -f "$work/recover.url"
+  case "$(command_lines preflight-pr)" in
+    *'PREFLIGHT_RENDER_DIR=<'*'> preflight-pr review'*) ;;
+    *) problems="$problems
+        | (c) under preflight-pr the command still names preflight-code, so the caller is not interpolated;
+        |     got: $(command_lines preflight-pr)" ;;
+  esac
+  case "$out" in
+    *"preflight-code:"*) problems="$problems
+        | (c) a message from preflight-pr names the other command: $out" ;;
+  esac
+
+  if [ -z "$problems" ]; then ok "a refusal tells the reader what to run, not only what is wrong" "REQ-HOOK-53"
+  else bad "a refusal tells the reader what to run, not only what is wrong" "REQ-HOOK-53" \
+        "both headline messages carry a runnable command shape naming the caller and the variable" \
+        "see below" "$problems
+"; fi
+}
 
 case_no_analyzable_files() {
   # pr-agent 0.49 exits 0 having written NEITHER artifact when every changed file is filtered out - a
@@ -4424,7 +4619,7 @@ REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31
 REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36 REQ-HOOK-37 REQ-HOOK-38
 REQ-HOOK-39 REQ-HOOK-40 REQ-HOOK-41 REQ-HOOK-42 REQ-HOOK-43
 REQ-HOOK-44 REQ-HOOK-45 REQ-HOOK-46 REQ-HOOK-47 REQ-HOOK-48 REQ-HOOK-49
-REQ-HOOK-50 REQ-HOOK-51 REQ-HOOK-52'
+REQ-HOOK-50 REQ-HOOK-51 REQ-HOOK-52 REQ-HOOK-53'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -4567,6 +4762,7 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_structured_coverage_agrees \
     case_render_dir_selection \
     case_no_analyzable_files \
+    case_refusals_name_a_command \
     case_pr_rendered_config_removed \
     case_review_progress_note \
     case_abnormal_exit_reaps_child \

@@ -125,8 +125,20 @@ inside the reviewed repository. That last check asks git about the exact file ra
 directory, because a render dir can be an empty scratch directory, and "nothing unignored in here" is true
 of it right up to the moment the credential is written into it.
 
-The inspection copy stays in the config dir. When that directory is the unwritable thing, the renderer says
-so and names the run's own file instead - the copy is best-effort by design and never fails a run.
+The inspection copy goes in the config dir, and follows `PREFLIGHT_RENDER_DIR` when the operator **named**
+one - that is what makes the variable worth setting on a read-only config dir. It does not follow the
+automatic temp fallback, which is removed with the run: a copy there would either be discarded or leave a
+credential-bearing file behind. The copy is best-effort and never fails a run.
+
+**Every refusal names the next command.** The renderer is read by an agent mid-loop as often as by a person,
+and an agent can run a command where it cannot act on "set `PREFLIGHT_RENDER_DIR`". Each refusal therefore
+ends with a pasteable line - `cp` for a missing config file, `chmod` for an unreadable one, the two lines to
+add for an unassigned `[selection]`, the section and key to change for a config error. The caller's own name
+is interpolated, because the renderer is shared. A directory is never suggested: one writable here may not be
+writable for the caller, so the render-directory messages give the property (`PREFLIGHT_RENDER_DIR=<that
+directory>`) and leave the path to them. Where no command repairs the state - which transport an endpoint
+speaks, a mixed-provider chain - the message says so instead of inventing one. `REQ-HOOK-53` asserts the
+render-directory messages carry a runnable command, not only the variable name.
 
 **Two files, and nothing else.** `settings.toml` says what the *review* does — which profiles are assigned,
 and the review's own pr-agent settings — and `providers.toml` says which *models* exist, what each needs, and

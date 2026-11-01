@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Changed
+
+- **Every refusal in the config renderer ends with the command that fixes it.** "Set
+  `PREFLIGHT_RENDER_DIR`" is advice an agent cannot act on, so the read-only-config notice now prints
+  `PREFLIGHT_RENDER_DIR=<that directory> <caller> review` and says that doing nothing changes nothing
+  except inspection. The location stays a parameter rather than a suggestion: a path named here may be no
+  more writable for the caller than the config dir was, which is the failure the notice reports. The
+  explicit-`PREFLIGHT_RENDER_DIR` refusal prints both ways out - repair the named directory, or `unset` it -
+  and says it will not fall back. The same treatment reached every other refusal: `cp` for a missing config
+  file, `chmod` for an unreadable one, the two lines to add for an unassigned `[selection]`, and the
+  section and key to change for a config error. Where no command repairs the state - which transport an
+  endpoint speaks, a mixed-provider chain - the message says so instead of inventing one.
+
+- **The inspection copy of the rendered config follows a `PREFLIGHT_RENDER_DIR` you name.** It stayed in
+  the config dir unconditionally, which made the variable pointless in the case it exists for: with a
+  read-only config dir nothing survived to inspect. It does not follow the automatic temp fallback, whose
+  directory is removed with the run.
 
 ## [0.10.0] - 2026-10-31
 

@@ -431,10 +431,12 @@ model, that attempt times out the same way, and the answer you finally read came
 `fallback_models` - so the summary line carries `model=FALLBACK` and the review is a different model's
 judgement. On a run where the fallback also misses, nothing answers at all.
 
-**The tell is the duration, not the prompt.** A killed request lands on **120.0s exactly**, because that is
-`config.ai_timeout` (upstream's default, unset by this bundle); a review that merely ran long has a ragged
-duration. Prompt size is not the driver - the same model has completed far larger prompts in seconds and
-timed out on a review-sized one. The figures are in [`../measurements.md`](../measurements.md).
+**The tell is the duration, not the prompt.** Each killed attempt lands on **your `config.ai_timeout`
+exactly** - 120.0s on a default install, because that is upstream's value and this bundle sets none. Every
+attempt uses that same number: pr-agent passes one timeout to every call and does not lengthen it per retry,
+so a run that retries twice shows two kills at the same duration, not one. A review that merely ran long has
+a ragged duration. Prompt size is not the driver - the same model has completed far larger prompts in
+seconds and timed out on a review-sized one. The figures are in [`../measurements.md`](../measurements.md).
 
 **Why it bounds the whole generation.** On a NON-streaming provider no byte arrives until the completion
 is finished, so `ai_timeout` is a completion-length budget rather than an inactivity window (the

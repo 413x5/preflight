@@ -206,6 +206,7 @@ fails.
 | `config` | The generated config parses, the completeness keys are set and the keys left off are absent, and the gate template is inert |
 | `models` | The `settings.toml`/`providers.toml` templates are inert, the renderer derives the endpoint, the key and the transport pin together, and it refuses a chain spanning two providers |
 | `envhelp` | Every `PREFLIGHT_*` the helper reads is in `--help`, no `--help` entry is unread, an internal variable is not advertised as a setting, and the shared resolver's default caller name is the installed command |
+| `envelope` | The envelope shim unwraps only an armed host's wrapped body and passes every other shape through, the `.pth` line is executed by `site.py` and a line without `import` is not, a missing seam refuses by name, `install.sh` fails rather than report an unapplied patch, and the seam exists in the installed SDK (skipped with a reason when pr-agent is absent) |
 | `version` | `src/VERSION`, the CHANGELOG's released heading for it, and `--version` agree |
 | `gateshapes` | `preflight-gate` survives the JSON shapes the model really produces |
 | `coverage` | The coverage marker matches pr-agent's footer and ignores prose |
@@ -301,6 +302,12 @@ command -v preflight-code   # a path means installed; no output means a bare clo
   against throwaway repositories. A *real* review is the one thing that cannot run - it needs the installed
   helpers, pr-agent and an API key - so `./tests/run.sh e2e` skips itself instead of failing.
 - **Installed.** The live case runs, and a scratch repo can go through a real review.
+
+The stages and cases that assert against the installed package find it through **`uv tool dir`**, the way
+`install.sh` does, never through a hard-coded `~/.local/share/uv/tools`. Both files export a throwaway
+`UV_TOOL_DIR` so no installer can patch the developer's real venv, which means a lookup must unset it
+deliberately - `installed_tool_dir()` in each - or it answers "not installed" and retires the check as a
+SKIP. A skip while pr-agent is present at uv's default location FAILS instead.
 
 `python3` 3.11 or newer is needed to run the gate, because it parses TOML with `tomllib`, which entered the
 standard library there; `tools` reports a too-old interpreter rather than letting a later stage die on an

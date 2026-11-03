@@ -42,6 +42,23 @@ work="$(mktemp -d)"
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
 
+# install.sh also writes the envelope shim into pr-agent's tool venv, which is the developer's real one by
+# default. Redirected once here, so every install the suite drives - now or later - stays inside its own
+# scratch directory.
+UV_TOOL_DIR="$work/uv-tools"
+export UV_TOOL_DIR
+
+# Where pr-agent is REALLY installed, for the cases that assert against the installed package. The export
+# above keeps every install the suite drives inside its own scratch dir; a lookup that honoured it would
+# answer "pr-agent not installed" and turn those cases into SKIPs. Resolved as install.sh resolves it, so a
+# machine that moved its tool dir is found rather than assumed absent.
+installed_tool_dir() {
+  local d
+  d="$( unset UV_TOOL_DIR; uv tool dir 2>/dev/null || true )"
+  [ -n "$d" ] || d="$HOME/.local/share/uv/tools"
+  printf '%s\n' "$d"
+}
+
 # settings.toml is the ONLY config source now (there is no preflight.toml to fall back to), so a case that
 # points PREFLIGHT_HOME at a bare directory would stop at "settings.toml was not found" rather than
 # exercising what it means to. Seed every config dir the suite uses with a working pair, once, here - a
@@ -704,7 +721,7 @@ case_coverage_marker_matches_real_footer() {
   # than pretending to have verified anything - and BOTH ids must still report, because a classified id
   # that never reports would let the selfcheck's "every case must be classified" rule go vacuous for it.
   local sp
-  sp="$(ls -d "$HOME"/.local/share/uv/tools/pr-agent/lib/*/site-packages/pr_agent 2>/dev/null | head -n1)"
+  sp="$(ls -d "$(installed_tool_dir)"/pr-agent/lib/*/site-packages/pr_agent 2>/dev/null | head -n1)"
   if [ -z "$sp" ] || [ ! -f "$sp/tools/pr_reviewer.py" ]; then
     skip "the coverage marker ignores prose and matches the real footer" "REQ-HOOK-28" "pr-agent not installed"
     skip "the config keys sit where pr-agent reads them, and the knob list matches upstream" "REQ-HOOK-29" "pr-agent not installed"
@@ -3812,7 +3829,7 @@ case_structured_coverage_agrees() {
   # same reason the other pr-agent-dependent cases skip: the shape being checked does not exist there, and
   # CI never installs pr-agent.
   local sp
-  sp="$(ls -d "$HOME"/.local/share/uv/tools/pr-agent/lib/*/site-packages/pr_agent 2>/dev/null | head -n1)"
+  sp="$(ls -d "$(installed_tool_dir)"/pr-agent/lib/*/site-packages/pr_agent 2>/dev/null | head -n1)"
   if [ -z "$sp" ] || [ ! -f "$sp/tools/pr_reviewer.py" ]; then
     skip "the structured coverage object matches the keys the helper reads" "REQ-HOOK-52" "pr-agent not installed"
     return
@@ -4339,6 +4356,198 @@ FAKE
 "; fi
 }
 
+case_envelope_unwrap() {
+  # An endpoint may answer a NON-streaming chat completion wrapped in an envelope:
+  #
+  #     {"data": {"choices": [...]}, "success": true}
+  #
+  # LiteLLM looks for a top-level `choices`, finds None, and raises "provider returned 'choices' that is
+  # not a list" - so the endpoint reads as broken, and the only workaround is `stream = true`, which costs
+  # every reasoning_content delta and loses the whole call on a mid-stream cut. The shim is a `.pth` line in
+  # pr-agent's own tool venv that patches ONE seam in the OpenAI SDK.
+  #
+  # This case is OFFLINE and runs in CI: it drives the SHIPPED module against a fake SDK, which proves the
+  # unwrap decision and the host gate. It deliberately does NOT prove the seam still exists in the real SDK
+  # - that is case_envelope_seam, which skips when pr-agent is absent. Keeping them apart is the point: a
+  # fixture standing in for the seam would report a patch that no longer lands as a pass.
+  if python3 - "$repo_root/src/preflight_envelope.py" <<'PY'
+import importlib.util, sys, types
+
+problems = []
+ENVELOPE = {"data": {"choices": [{"message": {"content": "ok"}}], "usage": {"total_tokens": 3}},
+            "success": True}
+SHIM_PATH = sys.argv[1]
+
+
+def load_shim():
+    """A FRESH module and a FRESH fake SDK.
+
+    Per scenario, because the shim patches once per process: reusing one would nest wrappers, and the
+    outer frame's config would then decide what an inner frame already did - a test that passes for the
+    wrong reason. The module is also what makes "the key came from the config" assertion-able.
+    """
+    spec = importlib.util.spec_from_file_location("preflight_envelope", SHIM_PATH)
+    shim = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shim)
+
+    class BaseClient:
+        # An INSTANCE method, like the SDK's: the wrapper is bound the same way, so a shim that got the
+        # receiver wrong fails here rather than in production.
+        def _process_response_data(self, *, data, cast_to, response):
+            return {"seen": data, "cast_to": cast_to, "response": response}
+
+    base_client = types.ModuleType("openai._base_client")
+    base_client.BaseClient = BaseClient
+    openai_pkg = types.ModuleType("openai")
+    openai_pkg._base_client = base_client
+    sys.modules["openai"] = openai_pkg
+    sys.modules["openai._base_client"] = base_client
+    return shim, BaseClient
+
+
+def scenario(key, hosts, body, base_url="https://api.env.test/v1", explode=False):
+    """Install the shim, then return what the SDK parse was handed."""
+    shim, BaseClient = load_shim()
+    BaseClient.base_url = base_url
+    shim._install_seam(key, hosts)
+    if explode:
+        class Exploding(dict):
+            def get(self, _key, default=None):
+                raise ValueError("this body cannot be read")
+        body = Exploding()
+    cast_to, response = object(), object()
+    result = BaseClient()._process_response_data(data=body, cast_to=cast_to, response=response)
+    return result, cast_to, response
+
+
+def seen(body, **kw):
+    return scenario("data", ["api.env.test"], body, **kw)[0]["seen"]
+
+
+# --- the seam is guarded BEFORE patching, not left to fail later -------------------------------
+# A private SDK method can move with no litellm version change at all, so install() must refuse by name
+# rather than discover the absence later.
+shim, BaseClient = load_shim()
+delattr(BaseClient, shim.SEAM)
+try:
+    shim._install_seam("data", ["api.env.test"])
+    problems.append("a missing seam did not raise: a patch that never applies would look installed")
+except LookupError as exc:
+    if shim.SEAM not in str(exc):
+        problems.append("the missing-seam error does not name the seam: " + str(exc))
+except Exception as exc:  # noqa: BLE001 - any other type is the wrong contract
+    problems.append("a missing seam raised %s, not LookupError" % type(exc).__name__)
+
+# install() must turn that into SystemExit, because site.py PRINTS AND IGNORES every ordinary exception
+# raised from a `.pth` line - so a LookupError there would leave pr-agent running unwrapped, which is
+# indistinguishable from a patch that applied.
+import os, tempfile
+shim, BaseClient = load_shim()
+delattr(BaseClient, shim.SEAM)
+with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as armed:
+    armed.write('[preflight_envelope]\nkey = "data"\nhosts = ["api.env.test"]\n')
+saved_env = os.environ.get(shim.CONFIG_ENV)
+os.environ[shim.CONFIG_ENV] = armed.name
+try:
+    shim.install()
+    problems.append("an armed run with no seam did not abort")
+except SystemExit:
+    pass
+except Exception as exc:  # noqa: BLE001 - the point is that only SystemExit survives site.py
+    problems.append("an armed run with no seam raised %s, which site.py would swallow"
+                    % type(exc).__name__)
+finally:
+    if saved_env is None:
+        os.environ.pop(shim.CONFIG_ENV, None)
+    else:
+        os.environ[shim.CONFIG_ENV] = saved_env
+    os.unlink(armed.name)
+
+# --- the unwrap -------------------------------------------------------------------------------
+result, cast_to, response = scenario("data", ["api.env.test"], ENVELOPE)
+if result["seen"] is not ENVELOPE["data"]:
+    problems.append("an envelope from an armed host was not unwrapped: %r" % (result["seen"],))
+# `cast_to` is the chat-completion model for this request. Replacing it would parse the same bytes into a
+# different model, so the unwrapped body would take a code path a flat one never does.
+if result["cast_to"] is not cast_to:
+    problems.append("the unwrap replaced cast_to, so the body is parsed as a different model")
+if result["response"] is not response:
+    problems.append("the unwrap replaced the response object")
+
+# A flat body is LEFT ALONE: same object, no copy, no re-validation. A provider that answers both ways
+# during a rollout must keep working without a second knob. The `data` key is deliberately present and
+# envelope-shaped, because without it this assertion cannot fail - a flat body has no such key to unwrap.
+flat = {"choices": [{"message": {"content": "ok"}}], "usage": {"total_tokens": 3},
+        "data": {"choices": [{"message": {"content": "WRONG"}}]}}
+if seen(flat) is not flat:
+    problems.append("a body that already had top-level choices was modified")
+
+# The key comes from the CONFIG, not from a constant: the renderer accepts any safe name, and a shim that
+# assumed "data" would silently do nothing for a provider whose envelope key differs.
+payload = {"payload": {"choices": [{"message": {"content": "ok"}}]}, "success": True}
+if scenario("payload", ["api.env.test"], payload)[0]["seen"] is not payload["payload"]:
+    problems.append("a configured envelope key other than 'data' was not unwrapped")
+if scenario("payload", ["api.env.test"], ENVELOPE)[0]["seen"] is not ENVELOPE:
+    problems.append("a 'data' envelope was unwrapped for a provider configured with a 'payload' key")
+
+# Every malformed shape reaches the SDK exactly as it is, so the SDK reports its own error rather than a
+# new one from the shim.
+for label, body in (
+    ("data is not a dict", {"data": "nope", "success": True}),
+    ("data.choices is not a list", {"data": {"choices": None}, "success": True}),
+    ("no data at all", {"success": True}),
+    ("data.choices absent", {"data": {"usage": {}}, "success": True}),
+    ("a non-dict body", ["not", "a", "dict"]),
+    ("a non-JSON body", "plain text"),
+):
+    if seen(body) is not body:
+        problems.append("a body with %s was modified instead of passed through" % label)
+
+# A body the shim cannot even inspect must still reach the SDK. The wrapper sits on the parse path of
+# EVERY response, so an exception escaping it would turn a working provider into a broken one.
+try:
+    scenario("data", ["api.env.test"], None, explode=True)
+except Exception as exc:  # noqa: BLE001 - the assertion is that this does NOT happen
+    problems.append("an unreadable body escaped the shim as %s instead of passing through" % exc)
+
+# The armed host still matches when the URL carries userinfo, which is a supported way to write an api_base
+# with embedded credentials - and the renderer strips them when it derives the host, so the shim must too,
+# or a wrapped endpoint with a credential in its URL would silently not be armed.
+if seen(ENVELOPE, base_url="https://user@api.env.test/v1") is not ENVELOPE["data"]:
+    problems.append("an armed host behind userinfo was not unwrapped")
+
+# An UNGATED host is untouched even when its body IS an envelope: the renderer is the only place a host is
+# armed, so a shim with a hard-coded host would be a second, invisible configuration. These are the exact
+# failures that must keep behaving as they do today - LiteLLM raising on choices=None.
+for label, base_url in (
+    ("another host", "https://api.other.test/v1"),
+    ("a host that merely starts with the armed one", "https://api.env.test.evil/v1"),
+    ("the armed name as a path segment", "https://other.test/api.env.test/v1"),
+    ("the armed name as a userinfo component", "https://api.env.test@other.test/v1"),
+):
+    if seen(ENVELOPE, base_url=base_url) is not ENVELOPE:
+        problems.append("%s: the envelope was unwrapped for %s" % (label, base_url))
+
+# The seam is patched ONCE. The `.pth` line runs at every interpreter startup, so re-wrapping would nest a
+# wrapper per import and a stale config would then be applied by an inner frame.
+shim, BaseClient = load_shim()
+shim._install_seam("data", ["api.env.test"])
+first = BaseClient.__dict__[shim.SEAM]
+shim._install_seam("data", ["api.evil.test"])
+if BaseClient.__dict__[shim.SEAM] is not first:
+    problems.append("a second install re-patched the seam instead of being a no-op")
+
+if problems:
+    print("\n".join(problems))
+    sys.exit(1)
+PY
+  then ok "an envelope from an armed host is unwrapped, and nothing else is touched" "REQ-HOOK-54"
+  else bad "an envelope from an armed host is unwrapped, and nothing else is touched" "REQ-HOOK-54" \
+        "unwrap only armed-host envelopes, and pass every other body through unchanged" "see below" \
+        "the shim would either break a provider that works today, or silently do nothing for the one it exists to fix"
+  fi
+}
+
 case_pr_abnormal_exit_reaps_child() {
   local cfg="$work/prreap-cfg" fake="$work/prreap-bin" d="$work/prreap-repo"
   local pidf="$work/prreap.pid" problems=''
@@ -4619,7 +4828,7 @@ REQ-HOOK-22 REQ-HOOK-26 REQ-HOOK-27 REQ-HOOK-28 REQ-HOOK-29 REQ-HOOK-31
 REQ-HOOK-32 REQ-HOOK-33 REQ-HOOK-34 REQ-HOOK-35 REQ-HOOK-36 REQ-HOOK-37 REQ-HOOK-38
 REQ-HOOK-39 REQ-HOOK-40 REQ-HOOK-41 REQ-HOOK-42 REQ-HOOK-43
 REQ-HOOK-44 REQ-HOOK-45 REQ-HOOK-46 REQ-HOOK-47 REQ-HOOK-48 REQ-HOOK-49
-REQ-HOOK-50 REQ-HOOK-51 REQ-HOOK-52 REQ-HOOK-53'
+REQ-HOOK-50 REQ-HOOK-51 REQ-HOOK-52 REQ-HOOK-53 REQ-HOOK-54'
 
 case_selfcheck() {
   # A stub that lets every commit through. Not a copy of the real hook with a line removed: the point is
@@ -4766,7 +4975,8 @@ if [ "$which_cases" = "all" ] || [ "$which_cases" = "hook" ]; then
     case_pr_rendered_config_removed \
     case_review_progress_note \
     case_abnormal_exit_reaps_child \
-    case_pr_abnormal_exit_reaps_child
+    case_pr_abnormal_exit_reaps_child \
+    case_envelope_unwrap
   say ""
 fi
 

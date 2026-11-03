@@ -19,15 +19,60 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$here" || exit 1
 
-STAGES="tools syntax install config models envhelp version gateshapes coverage snippet hooktests selfcheck"
+# Every `install.sh` below runs inside a throwaway prefix, but the installer also patches pr-agent's tool
+# VENV - the developer's real one - so the gate redirects the tool dir for them all here rather than
+# trusting each call to remember. A stage that wants a populated tool dir sets UV_TOOL_DIR itself.
+_verify_tool_dir="$(mktemp -d)"
+export UV_TOOL_DIR="$_verify_tool_dir"
+trap 'rm -rf "$_verify_tool_dir"' EXIT
+
+# The directory pr-agent is REALLY installed in, for the stages that assert against the installed package.
+# It ignores the throwaway `UV_TOOL_DIR` above on purpose: the export exists so no installer can patch the
+# developer's venv, and a check that honoured it would answer "pr-agent not installed" on every machine -
+# a quiet SKIP on the one check that can see a moved SDK seam. Resolved the way `install.sh` resolves it,
+# from `uv tool dir`, so a machine that moved its tool dir is found rather than assumed absent.
+installed_tool_dir() {
+  local d
+  d="$( unset UV_TOOL_DIR; uv tool dir 2>/dev/null || true )"
+  [ -n "$d" ] || d="$HOME/.local/share/uv/tools"
+  printf '%s\n' "$d"
+}
+
+# A stage that SKIPs because pr-agent "is not installed" is only allowed to mean that. If the package is
+# present at uv's DEFAULT location while the resolved one has it not, the resolution itself is what broke -
+# and a skip there would retire the check silently, which is the failure every one of these guards exists
+# to prevent. Returns non-zero, having explained, when a skip would be a lie.
+skip_is_justified() {
+  local tdir default
+  tdir="$(installed_tool_dir)"
+  default="$HOME/.local/share/uv/tools"
+  [ "$tdir" = "$default" ] && return 0
+  ls -d "$default"/pr-agent/lib/*/site-packages/pr_agent >/dev/null 2>&1 || return 0
+  echo "pr-agent is installed under $default but the tool dir resolved to $tdir, so this check would" >&2
+  echo "SKIP on a machine that has the package - fix installed_tool_dir() rather than accepting the skip" >&2
+  return 1
+}
+
+STAGES="tools syntax install config models envhelp envelope version gateshapes coverage snippet hooktests selfcheck"
 # A group CI can ask for by NAME, so the workflow does not re-list stages: a stage added above is then
 # picked up by CI automatically instead of appearing locally and never running there. The split is by cost
 # - these need no pr-agent and no network - and `GROUP_fast` is checked against STAGES below.
-GROUP_fast="tools syntax install config models envhelp version gateshapes coverage snippet"
+GROUP_fast="tools syntax install config models envhelp envelope version gateshapes coverage snippet"
 for s in $GROUP_fast; do
   case " $STAGES " in
     *" $s "*) ;;
     *) echo "verify: GROUP_fast names '$s', which is not a stage (see --list)" >&2; exit 2 ;;
+  esac
+done
+# Every stage must have a `run <name> <function>` line below. A name added to STAGES but never dispatched
+# lists, selects and silently never runs - a green tick for a check that did not happen, which is the exact
+# false result the gate exists to prevent.
+_self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+_dispatched="$(awk '/^run [a-z]+ /{printf "%s ", $2}' "$_self")"
+for s in $STAGES; do
+  case " $_dispatched " in
+    *" $s "*) ;;
+    *) echo "verify: stage '$s' is listed but never dispatched (add: run $s stage_$s)" >&2; exit 2 ;;
   esac
 done
 rc=0
@@ -52,6 +97,8 @@ Stages, cheapest first:
                the endpoint, the key and the pin together, and it refuses a
                chain that spans two providers
   envhelp      every PREFLIGHT_* the helper reads is documented, and no others
+  envelope     the envelope shim unwraps only what it is armed for, and its
+               seam still exists in the installed OpenAI SDK
   version      src/VERSION, the CHANGELOG heading and --version agree
   gateshapes   preflight-gate survives the JSON shapes the model really produces
   coverage     the coverage marker matches pr-agent's footer and ignores prose
@@ -997,11 +1044,13 @@ max_output_tokens = 1000'
   # guarded, so a green tick from a run that could not check it would be the false result this gate
   # exists to prevent. This is the only place the table is cross-checked - the hook suite does not
   # repeat it, because it would skip on exactly the same machines.
-  local sp py=""
-  sp="$(ls -d "$HOME"/.local/share/uv/tools/pr-agent/lib/*/site-packages/pr_agent 2>/dev/null | head -n1)"
-  [ -n "$sp" ] && py="$HOME/.local/share/uv/tools/pr-agent/bin/python3"
-  [ -x "$py" ] || py="$HOME/.local/share/uv/tools/pr-agent/bin/python"
+  local sp py="" tdir
+  tdir="$(installed_tool_dir)"
+  sp="$(ls -d "$tdir"/pr-agent/lib/*/site-packages/pr_agent 2>/dev/null | head -n1)"
+  [ -n "$sp" ] && py="$tdir/pr-agent/bin/python3"
+  [ -x "$py" ] || py="$tdir/pr-agent/bin/python"
   if [ -z "$sp" ] || [ ! -x "$py" ]; then
+    skip_is_justified || { rc=1; return "$rc"; }
     echo "transport table vs pr-agent: SKIPPED (pr-agent not installed)"
   else
     "$py" - "$PWD/scripts/settings-render.sh" <<'PY' || rc=1
@@ -1070,7 +1119,10 @@ helped = set(re.findall(r"PREFLIGHT_[A-Z_]+", usage.group(1)))
 read = set(re.findall(r"\$\{?(PREFLIGHT_[A-Z_]+)", src))
 
 # INTERNAL names are the helper-to-helper channel, not settings - they must NOT be advertised.
-INTERNAL = {"PREFLIGHT_RENDERED_CONFIG"}
+# PREFLIGHT_ENVELOPE_CONFIG is the same channel one hop further: the rendered file, handed to the
+# envelope shim that pr-agent's interpreter imports at startup. A setting the operator sets would be a
+# second way to arm a host, so it is internal by design and must not be advertised.
+INTERNAL = {"PREFLIGHT_RENDERED_CONFIG", "PREFLIGHT_ENVELOPE_CONFIG"}
 # Read by a DIFFERENT helper in the bundle, and documented here because `preflight-code --help` is the bundle's
 # one help page - the hook has no `--help` of its own. Checked against that file so the claim stays true.
 # PREFLIGHT_RENDER_DIR belongs to the shared renderer, which both helpers source; documenting it on the
@@ -1132,6 +1184,296 @@ if fails:
     sys.exit("; ".join(fails))
 print("a direct source of the resolver names preflight-code, not the retired command")
 PY
+  return "$rc"
+}
+
+stage_envelope() {
+  # The envelope shim is a `.pth` line plus a module in pr-agent's own tool venv, and it patches a PRIVATE
+  # OpenAI SDK method. Three separate things can therefore go wrong without a word, and this stage divides
+  # them so each failure reads as what it is:
+  #
+  #   offline    the unwrap DECISION, against a fake SDK. Runs in CI. It cannot speak for the real SDK.
+  #   driven     the `.pth` line, through `site.addsitedir` with the venv's own interpreter: a line that
+  #              does not begin with `import` is silently ignored, so the assertion is the import landing.
+  #   installed  the seam itself, in the SDK pr-agent actually runs. SKIPs with a reason when pr-agent is
+  #              absent - and FAILs, never skips, when it is present without the seam.
+  #
+  # The third is the one no fixture can stand in for: a recorded body proves the logic and says nothing
+  # about whether the method the patch replaces still exists. Keeping them apart is the whole point.
+  local tmp rc=0
+  tmp="$(mktemp -d)" || return 1
+
+  # ---- offline: the decision, against a fake SDK --------------------------------------------------
+  python3 - "$PWD/src/preflight_envelope.py" "$PWD/tests/fixtures/envelope-recorded.json" <<'PY' || rc=1
+import importlib.util, json, sys, types
+
+shim_path, fixture_path = sys.argv[1:3]
+recorded = json.load(open(fixture_path))
+recorded.pop("_comment", None)
+problems = []
+
+
+def scenario(key, hosts, body, base_url="https://api.env.test/v1"):
+    """A FRESH module and a FRESH fake per call, because the shim patches once per process."""
+    spec = importlib.util.spec_from_file_location("preflight_envelope", shim_path)
+    shim = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shim)
+
+    class BaseClient:
+        def _process_response_data(self, *, data, cast_to, response):
+            return {"seen": data, "cast_to": cast_to, "response": response}
+
+    base_client = types.ModuleType("openai._base_client")
+    base_client.BaseClient = BaseClient
+    openai_pkg = types.ModuleType("openai")
+    openai_pkg._base_client = base_client
+    sys.modules["openai"] = openai_pkg
+    sys.modules["openai._base_client"] = base_client
+    BaseClient.base_url = base_url
+    shim._install_seam(key, hosts)
+    cast_to, response = object(), object()
+    return BaseClient()._process_response_data(data=body, cast_to=cast_to, response=response), cast_to, response
+
+
+def seen(body, **kw):
+    return scenario("data", ["api.env.test"], body, **kw)[0]["seen"]
+
+
+# The recorded body, unwrapped to exactly the inner object - not a copy, not a re-serialisation.
+result, cast_to, _ = scenario("data", ["api.env.test"], recorded)
+if result["seen"] is not recorded["data"]:
+    problems.append("the recorded envelope was not unwrapped")
+if result["cast_to"] is not cast_to:
+    problems.append("the unwrap replaced cast_to, so the body is parsed as a different model")
+
+# A bare body is untouched: same object. `data` is present and envelope-shaped on purpose, otherwise this
+# assertion could not fail.
+flat = {"choices": [], "data": {"choices": []}}
+if seen(flat) is not flat:
+    problems.append("a body that already had top-level choices was modified")
+
+# Every malformed shape reaches the SDK as it is, so the SDK reports its own error.
+for label, body in (("data not a dict", {"data": "nope"}),
+                    ("data.choices not a list", {"data": {"choices": None}}),
+                    ("no data", {"success": True}),
+                    ("non-JSON body", "text")):
+    if seen(body) is not body:
+        problems.append(f"a body with {label} was modified instead of passed through")
+
+# Another host is untouched, including one that merely starts with the armed name.
+for label, url in (("another host", "https://api.other.test/v1"),
+                   ("a host starting with the armed one", "https://api.env.test.evil/v1")):
+    if seen(recorded, base_url=url) is not recorded:
+        problems.append(f"the envelope was unwrapped for {label}")
+
+if problems:
+    print("\n".join(problems))
+    sys.exit(1)
+print("the unwrap decision is right for the recorded body and for every pass-through shape")
+PY
+
+  # ---- driven: the `.pth` line, through site.addsitedir ------------------------------------------
+  # The shim reaches pr-agent because `site.py` EXECUTES a `.pth` line that begins with `import`, and
+  # silently ignores one that does not - so "the files are in site-packages" is not the property that
+  # matters. Asserted by the import landing, and by the same line with its `import` removed NOT landing.
+  mkdir -p "$tmp/pth"
+  cp src/preflight_envelope.py "$tmp/pth/"
+  python3 - "$tmp/pth" src/preflight_envelope.py <<'PY' || rc=1
+import os, shutil, site, subprocess, sys
+
+target, shim = sys.argv[1], sys.argv[2]
+problems = []
+probe = (
+    "import site, sys; site.addsitedir(sys.argv[1]);"
+    " print('imported' if 'preflight_envelope' in sys.modules else 'ignored')"
+)
+
+
+def driven(line):
+    open(os.path.join(target, "preflight_envelope.pth"), "w").write(line + "\n")
+    out = subprocess.run([sys.executable, "-c", probe, target],
+                         capture_output=True, text=True)
+    return out.stdout.strip(), out.stderr
+
+
+# The line the installer writes. Read out of install.sh rather than repeated, so a change there is caught
+# here instead of drifting.
+installer = open("install.sh", encoding="utf-8").read()
+marker = "_envelope_pth='"
+start = installer.index(marker) + len(marker)
+line = installer[start:installer.index("'", start)]
+if not line.startswith("import "):
+    problems.append("install.sh writes a .pth line that does not begin with import: %r" % line)
+status, _ = driven(line)
+if status != "imported":
+    problems.append("the installer's .pth line did not import the shim: %r -> %s" % (line, status))
+
+# The same line with its `import` removed is IGNORED by site.py. Without this direction the assertion
+# above would pass on a machine where the module happened to be importable another way.
+status, _ = driven(" " + line)
+if status != "ignored":
+    problems.append("a .pth line without a leading import was still executed, so the check above proves"
+                    " nothing: %s" % status)
+
+# And the module still parses under the interpreter the gate runs on.
+subprocess.run([sys.executable, "-m", "py_compile", shim], check=True, capture_output=True)
+if problems:
+    print("\n".join(problems))
+    sys.exit(1)
+print("the .pth line is executed by site.py, and a line without import is ignored")
+PY
+
+  # ---- missing seam is LOUD, against a stub with the attribute removed ----------------------------
+  # Two separate properties. install() must refuse by name (a private method can move), and it must raise
+  # SystemExit, because site.py prints and then IGNORES every other exception from a `.pth` line - which is
+  # how a patch that never applied would look exactly like one that did.
+  mkdir -p "$tmp/stub/openai"
+  cat > "$tmp/stub/openai/__init__.py" <<'PY'
+PY
+  cat > "$tmp/stub/openai/_base_client.py" <<'PY'
+class BaseClient:
+    pass
+PY
+  cat > "$tmp/stub/armed.toml" <<'TOML'
+[preflight_envelope]
+key = "data"
+hosts = ["api.env.test"]
+TOML
+  cp src/preflight_envelope.py "$tmp/stub/"
+  printf 'import preflight_envelope; preflight_envelope.install()\n' > "$tmp/stub/preflight_envelope.pth"
+  if PREFLIGHT_ENVELOPE_CONFIG="$tmp/stub/armed.toml" \
+       python3 -c 'import site, sys; site.addsitedir(sys.argv[1])' "$tmp/stub" >"$tmp/stub.out" 2>&1; then
+    echo "an armed config with no seam did not abort the interpreter" >&2
+    sed 's/^/    /' "$tmp/stub.out" >&2; rc=1
+  elif ! grep -q '_process_response_data' "$tmp/stub.out"; then
+    echo "the missing-seam refusal does not name the method it could not find:" >&2
+    sed 's/^/    /' "$tmp/stub.out" >&2; rc=1
+  fi
+
+  # ---- install.sh against a stub tool dir -------------------------------------------------------
+  # The installer must fail LOUDLY rather than report a shim it could not place. Driven here with a
+  # stubbed `uv` and an empty tool dir, so neither the network nor this machine's pr-agent is touched.
+  mkdir -p "$tmp/uv/bin" "$tmp/uv/tools/pr-agent/bin" "$tmp/uv/tools/pr-agent/lib/python3.13/site-packages" \
+           "$tmp/uv/cfg" "$tmp/uv/binout"
+  cat > "$tmp/uv/bin/uv" <<'UVSTUB'
+#!/bin/sh
+case "$1 $2" in
+  "tool install") exit 0 ;;
+  "tool dir") printf '%s\n' "$UV_TOOL_DIR"; exit 0 ;;
+esac
+exit 0
+UVSTUB
+  chmod +x "$tmp/uv/bin/uv"
+  # A venv whose interpreter is the gate's python3, so the probe runs - and whose site-packages hold no
+  # `openai`, so there is no seam to find.
+  printf '#!/bin/sh\nexec python3 "$@"\n' > "$tmp/uv/tools/pr-agent/bin/python3"
+  chmod +x "$tmp/uv/tools/pr-agent/bin/python3"
+  if PATH="$tmp/uv/bin:$PATH" UV_TOOL_DIR="$tmp/uv/tools" PREFLIGHT_HOME="$tmp/uv/cfg" \
+       PREFLIGHT_BIN_DIR="$tmp/uv/binout" PREFLIGHT_SKIP_TOOL_INSTALL=1 \
+       ./install.sh >"$tmp/uv/noseam.out" 2>&1; then
+    echo "installer reported success for a tool venv with no OpenAI SDK" >&2
+    sed 's/^/    /' "$tmp/uv/noseam.out" >&2; rc=1
+  elif ! grep -q 'envelope shim did not apply' "$tmp/uv/noseam.out"; then
+    echo "installer failed without saying the envelope shim did not apply:" >&2
+    sed 's/^/    /' "$tmp/uv/noseam.out" >&2; rc=1
+  fi
+  # And the module plus `.pth` are written where the venv's interpreter will read them, with the mode a
+  # package directory expects.
+  [ -f "$tmp/uv/tools/pr-agent/lib/python3.13/site-packages/preflight_envelope.pth" ] \
+    || { echo "installer did not write the .pth into the tool venv" >&2; rc=1; }
+
+  # ---- installed: the seam in the SDK pr-agent actually runs -------------------------------------
+  # The ONLY check that can speak for the real SDK. SKIP with a reason when pr-agent is absent (CI never
+  # installs it), FAIL when it is present without the seam - never a quiet pass either way.
+  local sp py="" tdir
+  tdir="$(installed_tool_dir)"
+  sp="$(ls -d "$tdir"/pr-agent/lib/*/site-packages 2>/dev/null | head -n1)"
+  [ -n "$sp" ] && py="$tdir/pr-agent/bin/python3"
+  [ -x "$py" ] || py="$tdir/pr-agent/bin/python"
+  if [ -z "$sp" ] || [ ! -x "$py" ]; then
+    skip_is_justified || { rc=1; return "$rc"; }
+    echo "envelope seam vs the installed OpenAI SDK: SKIPPED (pr-agent not installed)"
+  else
+    "$py" - "$PWD/src/preflight_envelope.py" "$PWD/scripts/settings-render.sh" <<'PY' || rc=1
+import importlib.util, sys, types
+
+shim_path, renderer = sys.argv[1:3]
+spec = importlib.util.spec_from_file_location("preflight_envelope", shim_path)
+shim = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(shim)
+
+# 1. The seam EXISTS AND IS CALLABLE in the installed SDK. This is the property a bump can break with no
+#    litellm version change, and the one no recording can stand in for.
+import importlib
+module_name, attribute = shim._SEAM_OWNER
+owner = getattr(importlib.import_module(module_name), attribute, None)
+if owner is None:
+    sys.exit(f"{module_name}.{attribute} is gone from the installed OpenAI SDK")
+seam = getattr(owner, shim.SEAM, None)
+if not callable(seam):
+    sys.exit(f"{module_name}.{attribute}.{shim.SEAM} is not callable in the installed OpenAI SDK")
+
+# 2. It is the funnel litellm's request path calls: the SDK's own response classes reach it, so one patch
+#    covers sync and async rather than only the path a fixture exercises.
+import openai._base_client as sdk_base
+for cls in ("SyncAPIClient", "AsyncAPIClient"):
+    if not issubclass(getattr(sdk_base, cls), owner):
+        sys.exit(f"openai._base_client.{cls} no longer inherits {attribute}, so the seam would not see"
+                 " its responses")
+
+# 3. The transports the renderer accepts for `envelope` are the ones litellm routes through that SDK.
+#    Asserted against litellm's OWN dispatch rather than a copy of this list.
+from litellm.llms.openai.openai import OpenAIChatCompletion
+Routed = type("Routed", (BaseException,), {})
+
+
+def routes(provider):
+    """True when litellm sends this provider's completion through OpenAIChatCompletion."""
+    import asyncio, litellm
+    saved_a, saved_s = OpenAIChatCompletion.acompletion, OpenAIChatCompletion.completion
+
+    async def a_mark(self, *a, **kw):
+        raise Routed()
+
+    def s_mark(self, *a, **kw):
+        raise Routed()
+
+    OpenAIChatCompletion.acompletion, OpenAIChatCompletion.completion = a_mark, s_mark
+    try:
+        try:
+            litellm.completion(model="probe-model", messages=[{"role": "user", "content": "x"}],
+                               custom_llm_provider=provider, api_base="https://probe.invalid/v1",
+                               api_key="k", max_retries=0)
+        except Routed:
+            return True
+        except BaseException:
+            return False
+        return False
+    finally:
+        OpenAIChatCompletion.acompletion, OpenAIChatCompletion.completion = saved_a, saved_s
+
+
+import ast, re
+src = open(renderer, encoding="utf-8").read()
+body = re.search(r"^ENVELOPE_TRANSPORTS = frozenset\(\{(.*?)^\}\)", src, re.S | re.M)
+if not body:
+    sys.exit("the renderer no longer defines ENVELOPE_TRANSPORTS; update this guard")
+ours = set(ast.literal_eval("{" + body.group(1) + "}"))
+
+# Only the SDK-routed ones are asserted: a transport that does NOT route is refused by the renderer by
+# design, so its absence from this set is correct rather than a gap. `openai` is probed with a model the
+# catalog knows, because an unknown model id takes a different config class.
+wrong = sorted(p for p in ours if not routes(p))
+if wrong:
+    sys.exit("the renderer accepts 'envelope' for transports litellm does not route through the OpenAI "
+             "SDK, so their wrapped reply would never be unwrapped: " + ", ".join(wrong))
+
+print(f"the seam exists in the installed SDK and covers sync and async; "
+      f"{len(ours)} transports route through it")
+PY
+  fi
+
+  rm -rf "$tmp"
   return "$rc"
 }
 
@@ -1514,6 +1856,7 @@ run install      stage_install
 run config       stage_config
 run models       stage_models
 run envhelp      stage_envhelp
+run envelope     stage_envelope
 run version      stage_version
 run gateshapes   stage_gateshapes
 run coverage     stage_coverage

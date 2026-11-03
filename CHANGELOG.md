@@ -7,7 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Added
+
+- **A wrapped non-streaming reply can be read as it is: `envelope = "<key>"` on a provider.** A gateway
+  that answers `{"data": {"choices": [...], "usage": {...}}, "success": true}` had LiteLLM reporting
+  `provider returned 'choices' that is not a list (NoneType). Raw keys: ['data', 'success']` - a working
+  endpoint read as a broken one. The only way through was `stream = true`, which streams over the wrapper
+  and then costs the review every `reasoning_content` delta (pr-agent keeps `delta.content` only) and
+  loses the whole call when the stream is cut. Naming the wrapping key unwraps the reply instead. It is
+  scoped to that provider's own host, refused on a transport LiteLLM does not route through the OpenAI
+  client, and refused together with `stream = true` - a wrapped endpoint does not need to stream, so
+  setting both would only buy the cost. `install.sh` puts the unwrap in pr-agent's own tool venv as a
+  `.pth` line plus a module; there is no fork and no edit to pr-agent.
+
+  What can go wrong now says so. The seam is a private OpenAI SDK method, so an SDK bump can move it:
+  the patch verifies it exists before patching, `install.sh` fails if the shim did not apply, an armed run
+  stops rather than reviewing a wrapped reply as an empty one, and `./scripts/verify envelope` fails when
+  the seam is missing from the installed SDK. `uv tool install` replaces that venv, so re-run `install.sh`
+  after it.
+
+  ```toml
+  [providers.mine]
+  envelope = "data"      # and no `stream = true`
+  ```
+
+### Changed
+
+- **`stream = true` is the fallback for a proxy, not the first answer.** The runbook entry for a wrapped
+  reply now names `envelope` and keeps streaming for an endpoint that does not answer at all without it.
 
 ## [0.10.1] - 2026-11-01
 

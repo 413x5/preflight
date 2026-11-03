@@ -523,6 +523,10 @@ fi
 # and the sibling helper.
 __preflight_render_settings "$cfgdir" "${root:-}" || exit $?
 rendered_cfg="$PREFLIGHT_RENDERED_CONFIG"
+# The envelope shim lives in pr-agent's venv and is imported by the interpreter at STARTUP, before pr-agent
+# reads any config, so the run's rendered file reaches it through the environment. It arms exactly the
+# hosts this run configured - a directory scan would arm whatever a previous run left there.
+export PREFLIGHT_ENVELOPE_CONFIG="$rendered_cfg"
 
 case "$cmd" in
   review|review_pr)     out_md="$dir/review.md";      out_json="$dir/review.json" ;;

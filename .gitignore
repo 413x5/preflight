@@ -3,6 +3,10 @@
 # Editor and recovery leftovers. A mutation test that edits a file in place leaves one behind, and a
 # committed duplicate of a shipped script drifts from it while still matching every grep for it.
 *.bak
+# Bytecode a check leaves behind: `tests/run.sh` and the gate import `src/preflight_envelope.py` to test
+# it, and the resulting `__pycache__` is a build artifact, never a shipped file.
+__pycache__/
+*.pyc
 # never commit a real model or provider configuration: providers.toml holds an API key, and both are
 # per-machine. The bundle ships only the .example templates. Explicit paths, not a bare `*.toml`, so a
 # future committed .toml under config/ is not silently ignored.

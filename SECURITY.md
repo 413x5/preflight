@@ -58,6 +58,13 @@ That framing decides what counts as a vulnerability here, so it is stated plainl
   rather than falling back, so the key is never written somewhere the operator did not choose. The
   inspection copy follows a directory the operator named, never the automatic temp fallback.
 
+- **The envelope shim reads two things from the rendered config, and no credential.** Its host list and
+  the wrapping key's name arrive through `PREFLIGHT_ENVELOPE_CONFIG`, pointing at the file the run already
+  renders; it does not read `providers.toml`, does not parse the key, and writes nothing. It runs inside
+  pr-agent's own interpreter as a `.pth` line, so it is only as trusted as that venv - which is why
+  `install.sh` verifies the files landed under that venv's own `site-packages` and fails if the SDK it
+  found came from anywhere else.
+
 ## Outbound traffic
 
 The only outbound traffic is to the OpenAI-compatible endpoint you configure, which is the service the

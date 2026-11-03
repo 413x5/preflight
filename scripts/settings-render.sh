@@ -400,7 +400,25 @@ _CREDENTIAL_KEYS = {name for _, name, _ in TRANSPORTS.values()} | {"key", "api_k
 # profiles ended up with identical review blocks. That one section is general, at the top level.
 PROFILE_SECTIONS = ("config",)
 PROFILE_KEYS = ("provider", "model")
-PROVIDER_KEYS = ("api_base", "key", "transport", "stream", "litellm")
+PROVIDER_KEYS = ("api_base", "key", "transport", "stream", "envelope", "litellm")
+# The section the render DERIVES from a provider's `envelope` key, read by the shim installed in the
+# tool venv. Refused wherever it could be written by hand, like the pin and the streaming pair: the host
+# list has to follow the endpoint the run actually uses, or the unwrap fires on a host that is not this
+# run's - or never fires on the one that is.
+ENVELOPE_SECTION = "preflight_envelope"
+# A top-level key a chat-completion BODY already has. Naming one as the envelope would make the wrapper
+# unable to tell "wrapped" from "already flat" - and, worse, could make it unwrap the real completion into
+# a shape nothing parses. Refused by name rather than guessed at.
+ENVELOPE_RESERVED = ("id", "object", "created", "model", "choices", "usage",
+                     "system_fingerprint", "service_tier", "moderation")
+# The transports whose requests go through the OpenAI SDK client, and therefore through the parse funnel
+# the shim patches. A transport LiteLLM serves with its own HTTP layer never reaches it, so an `envelope`
+# there would be armed and do nothing - the "looks configured, does nothing" shape refused everywhere
+# else in this file. scripts/verify asserts this table against the INSTALLED litellm, so a release that
+# reroutes one of these fails the gate rather than disarming a working configuration.
+ENVELOPE_TRANSPORTS = frozenset({
+    "openai", "moonshot", "sambanova", "zai", "deepinfra", "codestral", "dashscope",
+})
 # The `[litellm]` keys a provider may set. Each is genuinely per endpoint - a callback, a timeout, a
 # caching policy, a model_id ARN - so it belongs with the provider rather than on the run.
 PROVIDER_LITELLM_KEYS = (
@@ -541,11 +559,12 @@ if repo_path and os.path.exists(repo_path):
     # its key - is chosen, so a committed file that assigned one would decide which credential a review
     # spends on every machine that clones the repository. It is the same hazard as naming a provider
     # directly, one indirection away.
-    for _stray in ("providers", "profiles", SELECTION_SECTION):
+    for _stray in ("providers", "profiles", SELECTION_SECTION, ENVELOPE_SECTION):
         if _stray in repo_data:
             refuse(f".preflight.toml defines [{_stray}], which a repository cannot override",
-                   "the profiles, the providers and the assignment decide a model and a credential entry,",
-                   "and a committed file choosing one would spend that key on every machine that clones it",
+                   "the profiles, the providers, the assignment and the envelope hosts decide a model, a",
+                   "credential entry and which endpoint's replies are unwrapped - a committed file choosing",
+                   "one would spend that key on every machine that clones it",
                    "override review settings and the [gate] policy here; keep the models in "
                    "settings.toml/providers.toml",
                    fix=[f"delete [{_stray}] from .preflight.toml, then re-run:  {PROG} review"])
@@ -587,6 +606,14 @@ if "providers" in data or "profiles" in data:
            "the profiles that use them - a table in the wrong file reads as configured and does nothing",
            fix=[f"move that table to {os.path.join(os.path.dirname(settings_path), 'providers.toml')}",
                 f"and remove it from settings.toml, then re-run:  {PROG} review"])
+# Derived from the provider entry and written by the render, so a hand-written one would be a second
+# answer the render overwrites - the same collision refused for every other derived key.
+if ENVELOPE_SECTION in data:
+    refuse(f"settings.toml defines [{ENVELOPE_SECTION}], which preflight derives from the provider",
+           "the envelope key and the hosts it applies to follow the assigned provider's 'envelope' and",
+           "'api_base', so a copy here would be overwritten and silently ignored",
+           fix=[f"delete [{ENVELOPE_SECTION}] from settings.toml and set 'envelope' on the provider entry",
+                f"in providers.toml, then re-run:  {PROG} review"])
 
 root_config = data.get(SELECTION_SECTION) or {}
 if not isinstance(root_config, dict):
@@ -904,6 +931,34 @@ for name, body in sorted(provider_table.items()):
                # this branch implies that transport. Deleting the stream flag is the only single-step fix.
                fix=[f"delete  stream = true  from {where} (this transport reads no endpoint to scope it to),",
                     f"then re-run:  {PROG} review"])
+    envelope = body.get("envelope", "")
+    if not isinstance(envelope, str):
+        refuse(f"providers.toml {where} 'envelope' must be the KEY the real reply is wrapped under, in quotes",
+               fix=[f'write it as a quoted key, e.g.  envelope = "data", or delete the line, then re-run:  {PROG} review'])
+    envelope = envelope.strip()
+    if envelope and envelope in ENVELOPE_RESERVED:
+        refuse(f"providers.toml {where} names '{envelope}' as its envelope, but that is a key a chat-completion body already has",
+               "the shim could no longer tell a wrapped reply from a flat one, and unwrapping a flat one",
+               "would hand pr-agent a body nothing parses",
+               fix=[f"set 'envelope' to the key the endpoint wraps its reply in (the one holding the real",
+                    f"'choices'), or delete the line for the default OpenAI shape - then re-run:  {PROG} review"])
+    if envelope and stream:
+        refuse(f"providers.toml {where} sets both 'envelope' and 'stream = true'",
+               "the envelope is unwrapped on the non-streaming reply, so streaming is no longer needed - and",
+               "streaming is the expensive half: pr-agent discards every reasoning_content delta, and a cut",
+               "mid-stream loses the whole call",
+               fix=[f"delete  stream = true  from {where}, then re-run:  {PROG} review"])
+    if envelope and transport not in ENVELOPE_TRANSPORTS:
+        refuse(f"providers.toml {where} sets 'envelope', but transport '{transport}' does not go through the",
+               "OpenAI client the envelope shim patches, so the reply would be read unwrapped",
+               "the envelope is only meaningful on an OpenAI-compatible transport",
+               fix=[f"delete 'envelope' from {where} and keep 'stream = true' as the workaround for it, or",
+                    f"point this provider at an OpenAI-compatible transport - then re-run:  {PROG} review"])
+    if envelope and not api_base:
+        refuse(f"providers.toml {where} sets 'envelope', but its endpoint is not in this file",
+               "the unwrap is scoped to this provider's own host, so an endpoint this file cannot see is one",
+               "the shim cannot be armed for",
+               fix=[f"add  api_base = \"https://<your-endpoint>/v1\"  under {where}, then re-run:  {PROG} review"])
     litellm_table = body.get("litellm") or {}
     if not isinstance(litellm_table, dict):
         refuse(f"providers.toml [{where[1:-1]}.litellm] is not a table",
@@ -926,7 +981,7 @@ for name, body in sorted(provider_table.items()):
                    fix=[f"rename {key!r} to a setting name (letters, digits, underscores), then re-run:  {PROG} review"])
     provider_entry[name] = {
         "transport": transport, "section": section, "key_name": key_name,
-        "api_base": api_base, "key": credential, "stream": stream,
+        "api_base": api_base, "key": credential, "stream": stream, "envelope": envelope,
         "litellm": litellm_table,
     }
 
@@ -1144,6 +1199,24 @@ for _name in sorted(_ENDPOINT_SECTIONS):
 if entry["api_base"]:
     endpoint_table["api_base"] = entry["api_base"]
 endpoint_table[entry["key_name"]] = entry["key"]
+
+# The envelope, derived from the provider entry exactly as the pin and the streaming pair are. Written as
+# the ONE section the shim reads: the key the reply is wrapped under, and the host it applies to. Absent
+# entirely when the provider sets no `envelope`, so an unconfigured install arms nothing.
+#
+# The HOST, not the authority, for the same reason the streaming pair strips it: an api_base may carry
+# userinfo (`https://user@host/v1`) or a port, and `user@host` appears in no request URL, so the unwrap
+# would silently never fire. The shim compares this against the client's base_url.
+if entry["envelope"]:
+    authority = entry["api_base"].split("//", 1)[-1].split("/", 1)[0]
+    envelope_host = authority.rsplit("@", 1)[-1]
+    if not envelope_host:
+        refuse(f"[providers.{chosen_provider}] sets 'envelope' but its api_base has no host",
+               "the unwrap is scoped to this provider's own host, and a host that cannot be read from the",
+               "endpoint would arm it for every endpoint or for none",
+               fix=[f'write the endpoint with its host, e.g.  api_base = "https://<your-endpoint>/v1",',
+                    f"then re-run:  {PROG} review"])
+    rendered[ENVELOPE_SECTION] = {"key": entry["envelope"], "hosts": [envelope_host]}
 
 lines = ["# Generated by preflight from settings.toml and providers.toml. Do not edit: it is rewritten before",
          f"# every run. Edit those two files instead. Generated {__import__('time').strftime('%Y-%m-%dT%H:%M:%SZ', __import__('time').gmtime())}.", ""]

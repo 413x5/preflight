@@ -16,8 +16,15 @@
 #   transport   pr-agent/LiteLLM's transport for this endpoint. Default "openai", which is the generic
 #               OpenAI-compatible transport and does NOT mean the provider is OpenAI. It decides both the
 #               routing pin and which settings section the endpoint is read from.
+#   envelope    the top-level key whose value is the real chat-completion body, for an endpoint that WRAPS
+#               its non-streaming reply: `envelope = "data"` for {"data": {"choices": [...]}, ...}. The
+#               unwrap is scoped to this provider's own host. Refused on a transport that does not go
+#               through the OpenAI client, and refused together with `stream = true` - a wrapped endpoint
+#               does not need to stream, so keeping both would only buy the cost of streaming.
 #   stream      true when the endpoint's NON-streaming reply cannot be parsed by LiteLLM. Scopes the
 #               streaming workaround to this provider's own host, so it cannot leak onto another endpoint.
+#               PREFER `envelope` when the reply is wrapped in a key, which is a different problem from an
+#               endpoint that only answers when it streams.
 #   litellm     this endpoint's own [litellm] settings - callbacks, their timeout, message logging,
 #               prompt-cache points, drop_params, a bedrock model_id. See the block at the end.
 
@@ -28,9 +35,19 @@
 [providers.mine]
 api_base = "https://api.example.com/v1"    # replace with your endpoint
 key = ""                                   # paste the API key here; this file is chmod 600
-# Uncomment `true` for an endpoint whose NON-streaming reply LiteLLM cannot parse (one that returns no
-# `choices` list, for instance). It is scoped to this provider's own host, so it cannot leak onto another
-# endpoint - but it is still a knob you set, not one install.sh guesses from the URL.
+# A gateway that WRAPS its non-streaming reply, so the `choices` list is one level down:
+#
+#     {"data": {"choices": [...], "usage": {...}}, "success": true}
+#
+# LiteLLM looks for a top-level `choices`, finds none, and reports the endpoint as broken. Naming the
+# wrapping key here is the fix, and it is preferred over `stream = true`: a streamed review downloads every
+# reasoning delta and then discards it, and a cut mid-stream loses the whole call. Streaming stays as the
+# fallback for an endpoint whose non-streaming path does not answer at all.
+# envelope = "data"
+
+# Uncomment `true` for an endpoint whose NON-streaming reply LiteLLM cannot parse and that has no wrapping
+# key to name. It is scoped to this provider's own host, so it cannot leak onto another endpoint - but it
+# is still a knob you set, not one install.sh guesses from the URL.
 # stream = true
 
 # A second OpenAI-compatible endpoint, with its own key. Switching to it is one line in settings.toml.

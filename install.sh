@@ -131,6 +131,82 @@ install -m 0644 "$src/VERSION"        "$cfg/VERSION"
 # templates above: a helper that is missing while settings.toml assigns a model is a refused review, so an
 # upgraded install must carry both together.
 install -m 0644 "$scripts/settings-render.sh" "$cfg/settings-render.sh"
+install -m 0644 "$src/preflight_envelope.py" "$cfg/preflight_envelope.py"
+
+# The envelope shim, in the interpreter pr-agent actually runs. A `.pth` line beginning with `import` is
+# executed by `site.py` at startup, which is how the patch lands with no change to pr-agent; a line that
+# does not begin with it (leading space included) is silently ignored, so the line is not written blindly.
+#
+# The seam is a PRIVATE OpenAI SDK method, so a bump can move it with no litellm version change at all.
+# That is why the patch is VERIFIED here with the venv's own interpreter rather than trusted: an install
+# that reports success while the patch no-ops is the silent failure this feature exists to prevent. Absent
+# pr-agent (a bundle-only install, or PREFLIGHT_SKIP_TOOL_INSTALL) is a skip, not a failure.
+_envelope_pth='import preflight_envelope; preflight_envelope.install()'
+_tool_dir="$(uv tool dir 2>/dev/null || true)"
+[ -n "$_tool_dir" ] || _tool_dir="${UV_TOOL_DIR:-$HOME/.local/share/uv/tools}"
+_venv_py="$_tool_dir/pr-agent/bin/python3"
+[ -x "$_venv_py" ] || _venv_py="$_tool_dir/pr-agent/bin/python"
+# Derived from the VENV's own layout, not from `site.getsitepackages()`: when the venv's python is a
+# symlink to (or a shim around) a base interpreter, that reports the BASE interpreter's site-packages, and
+# the shim would land in a system directory pr-agent never imports from - or, worse, in one shared with
+# every other tool on the machine. The path must also stay under the venv this install is for.
+_sp=''
+for _cand in "$_tool_dir"/pr-agent/lib/python*/site-packages; do
+  [ -d "$_cand" ] || continue
+  _sp="$_cand"; break
+done
+case "$_sp" in
+  "$_tool_dir"/pr-agent/lib/python*/site-packages) ;;
+  *) _sp='' ;;
+esac
+if [ -z "$_sp" ] || [ ! -x "$_venv_py" ] || [ ! -d "$_sp" ]; then
+  say "!! the envelope shim was not installed: no pr-agent tool venv was found under $_tool_dir"
+  say "   a review only needs it for a provider with 'envelope' set; re-run install.sh after installing pr-agent"
+elif ! { install -m 0644 "$src/preflight_envelope.py" "$_sp/preflight_envelope.py" \
+         && printf '%s\n' "$_envelope_pth" > "$_sp/preflight_envelope.pth"; }; then
+  say "!! could not write the envelope shim into $_sp"
+  say "   check that the tool venv is writable, or re-run 'uv tool install' and then install.sh"
+  exit 1
+else
+  # Verified by the venv's own interpreter, which is the one pr-agent runs: the .pth line must actually
+  # execute (a non-`import` line would be ignored without a word), the module must import from there, and
+  # the seam must exist. A failure is fatal - an armed endpoint with an inert patch reads a wrapped reply
+  # as an empty one.
+  if ! _report="$(cd "$_sp" && PREFLIGHT_ENVELOPE_CONFIG=/dev/null "$_venv_py" - \
+        "$_sp/preflight_envelope.py" "$_sp/preflight_envelope.pth" "$_sp" <<'PY' 2>&1
+import json, os, sys
+module_path, pth_path, site_packages = sys.argv[1:4]
+line = open(pth_path, encoding="utf-8").read().rstrip("\n")
+if not line.startswith("import "):
+    print(f"the .pth line does not begin with import: {line!r}")
+    sys.exit(1)
+# The module must be the one under THIS venv, and the SDK must be the one under THIS venv. Without this
+# the probe can pass against a base interpreter on PATH - which is how a venv with no openai at all, or a
+# shadowed one, would report a patch that never reaches pr-agent.
+sys.path.insert(0, os.path.dirname(module_path))
+exec(line)
+import preflight_envelope
+import openai, openai._base_client
+for label, item in (("the shim module", preflight_envelope.__file__),
+                    ("the OpenAI SDK", openai.__file__),
+                    ("the OpenAI parse funnel", openai._base_client.__file__)):
+    if not os.path.realpath(item).startswith(os.path.realpath(site_packages) + os.sep):
+        print(f"{label} was loaded from {item}, which is outside this venv ({site_packages})")
+        sys.exit(1)
+state = preflight_envelope.selftest()
+print(json.dumps(state))
+sys.exit(0 if state["seam"] else 1)
+PY
+  )"; then
+    say "!! the envelope shim did not apply to the pr-agent OpenAI SDK in $_sp"
+    [ -n "$_report" ] && printf '   %s\n' "$_report" >&2
+    say "   the response parse funnel it patches is a private SDK method, so an upgrade can move it"
+    say "   re-run 'uv tool install' at the pinned version; if it still fails, report this: a provider"
+    say "   with 'envelope' set would silently read a wrapped reply as an empty one"
+    exit 1
+  fi
+  say "==> envelope shim installed in $_sp (seam present)"
+fi
 # The gate's policy is a [gate] table in the settings.toml reference above, not a file of its own: one file
 # for everything preflight can be told, and the renderer strips the table before pr-agent sees it. The old
 # install created an INERT `gate.toml` (every key commented out), so that one is removed here. A file that

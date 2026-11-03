@@ -1,0 +1,18 @@
+{
+  "_comment": "A recorded NON-streaming chat-completion body from a gateway that wraps its reply. The shape is the point: `choices` is nested one level down, which is why LiteLLM reports `choices` as None. Nothing here identifies the endpoint.",
+  "data": {
+    "id": "gen-recorded",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "recorded-model",
+    "choices": [
+      {
+        "index": 0,
+        "message": {"role": "assistant", "content": "ok"},
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13}
+  },
+  "success": true
+}

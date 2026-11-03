@@ -66,6 +66,9 @@ fi
 pr_root="$(git rev-parse --show-toplevel 2>/dev/null)" || pr_root=''
 __preflight_render_settings "$cfgdir" "$pr_root" || exit $?
 rendered_cfg="$PREFLIGHT_RENDERED_CONFIG"
+# The envelope shim is imported by pr-agent's interpreter at startup, before pr-agent reads this file, so
+# the run's rendered config reaches it through the environment - the same single source of truth.
+export PREFLIGHT_ENVELOPE_CONFIG="$rendered_cfg"
 
 # pr-agent is run as a child rather than `exec`d, so this process stays alive to reap it and to remove the
 # per-run rendered config from its EXIT trap. `<&0` is explicit because job control is off in a

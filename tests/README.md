@@ -100,6 +100,7 @@ The selfcheck is its own requirement, since it checks the suite rather than the 
 
 | Requirement | What it asserts | Guards against |
 |---|---|---|
+| REQ-HOOK-54 | The envelope shim unwraps a wrapped non-streaming chat completion ONLY for a host the rendered config armed, and only when the body is really an envelope: a recorded gateway body is replaced by its inner object while `cast_to` and the response object are kept; a body that already has a top-level `choices` list, a configured key that is not a dict, a `choices` that is not a list, a missing key and a non-JSON body are each passed through as the SAME object; `api.other.test`, `api.env.test.evil`, the armed name as a path segment and as a userinfo component are all untouched; the key comes from the config rather than a constant; an unreadable body does not escape as a new error; and a second install is a no-op | the streamed workaround's cost, made avoidable - but a patch scoped by a substring would unwrap a host nobody configured, and one that assumed the key `data` would silently do nothing for the provider it was written for |
 | REQ-SELF-01 | A neutered hook fails exactly the declared enforcement-sensitive cases, every case is classified, and the child run actually produced results | a case claiming to test enforcement that passes with the hook disabled; the insensitive set growing by default; the child suite silently running nothing |
 
 ## Mutation-checked
@@ -238,6 +239,19 @@ reverted in turn and the expected case was confirmed to fail:
 | the `<&0` removed from `preflight-pr`'s launch, so a backgrounded pr-agent reads /dev/null instead of the caller's stdin | REQ-HOOK-46 |
 | the mode fix changed to an unconditional `chmod 600`, so a file the operator made stricter is widened | install |
 | the in-repo guard's pre-snapshot call removed, so the refusal comes after `git add -A` and the key is already a blob in `.git/objects` | REQ-HOOK-44 |
+| the envelope shim's host gate removed, so every endpoint's envelope is rewritten | REQ-HOOK-54 |
+| a flat body (top-level `choices`) unwrapped as if it were an envelope | REQ-HOOK-54 |
+| the configured envelope key ignored in favour of a hard-coded `data` | REQ-HOOK-54 |
+| the host compared as a substring, so `api.env.test` also arms `api.env.test.evil` | REQ-HOOK-54 |
+| userinfo kept when deriving the host, so an armed host written `https://user@host/v1` is not armed | REQ-HOOK-54 |
+| `cast_to` replaced by the unwrap, so the inner body parses as a different model | REQ-HOOK-54 |
+| the missing-seam refusal turned into an ordinary exception, which `site.py` prints and ignores | REQ-HOOK-54 |
+| the missing-seam refusal no longer naming the method it could not find | REQ-HOOK-54 |
+| a second install re-wrapping the seam, so the outermost frame's config decides | REQ-HOOK-54 |
+| the installer's `.pth` line made not to begin with `import`, so `site.addsitedir` does not execute it and the shim never loads | envelope (gate stage; the installer refuses the line, watched failing) |
+| the installer reporting success for a tool venv with no OpenAI SDK, so an unapplied patch looks installed | envelope (gate stage) |
+| the installer no longer writing the `.pth` into the tool venv | envelope (gate stage) |
+| the renderer accepting `envelope` on a transport litellm does not route through the OpenAI client | envelope (gate stage, against litellm's own dispatch) |
 | the copy command removed from the missing-profiles refusal, so a half-created config dir names a file it never says how to create | models |
 | the providers.toml copy command made unconditional again, so the half-configured state is told to overwrite its keyed file with the empty-key template | REQ-HOOK-45 |
 | the settings.toml copy command made unconditional again, so a configured settings.toml is told to overwrite itself with the template | install |

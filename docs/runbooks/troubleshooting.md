@@ -395,11 +395,25 @@ endpoint for one short completion, using the model id and the credential from `p
 look for is below. How to send it is not this document's subject, and `SECURITY.md` states the trust model
 that governs the credential.
 
-- **A proxy that only answers when the request streams** is the common one: a non-streaming request
-  returns a 5xx (an empty body, `empty response content`, or `no choices`) while the same request with
-  `"stream": true` succeeds. Set `stream = true` on that provider in `providers.toml` - the renderer scopes
+- **A proxy that WRAPS its non-streaming reply** is the common one, and the message names it:
+  `provider returned 'choices' that is not a list (NoneType). Raw keys: ['data', 'success']`. The real
+  body is one level down, and streaming "fixes" it only because the SSE path is unwrapped - at the cost of
+  every `reasoning_content` delta and the whole call on a mid-stream cut. Name the wrapping key instead:
+
+  ```toml
+  [providers.mine]
+  envelope = "data"
+  ```
+
+  Remove `stream = true` from that provider: the two are refused together, because a wrapped endpoint does
+  not need to stream. If the fix does not take effect, the shim did not apply - run `./scripts/verify
+  envelope`, which fails by name when the seam is missing from the installed SDK, and re-run `install.sh`
+  after any `uv tool install` (it replaces the venv, and the shim with it).
+- **A proxy that only answers when the request streams**, with no wrapping key to name - a non-streaming
+  request returns a 5xx (an empty body, `empty response content`) while the same request with
+  `"stream": true` succeeds. Set `stream = true` on that provider in `providers.toml`; the renderer scopes
   the workaround to that provider's own host, and it is a knob the operator sets, never one the bundle
-  infers from the URL. The example file documents the key.
+  infers from the URL.
 - **`503 no subscriptions are configured for this model`** and similar are the proxy's own account state
   for that model id: nothing in preflight can fix it, and the model id in the profile must be one the
   endpoint reports as available.

@@ -81,7 +81,8 @@ endpoint or a model:
 [providers.mine]
 api_base = "https://api.example.com/v1"
 key      = "sk-..."                # this file is chmod 600
-# stream = true                    # see below
+# envelope = "data"                # a reply wrapped as {"data": {...}} - see below
+# stream = true                    # only if the non-streaming path does not answer at all
 
 [profiles.mine]
 provider = "mine"
@@ -100,9 +101,15 @@ Two settings in a profile are worth knowing about:
   until you set it. `max_model_tokens` clamps the diff, and `max_output_tokens` caps the reply: unset, the
   endpoint's own ceiling applies and a reasoning model can spend all of it thinking, returning truncated
   output pr-agent treats as a failed call.
-- **`stream = true`** on the *provider*, for an endpoint whose non-streaming reply LiteLLM cannot parse.
-  preflight-code forces streaming **for that provider's own host only**; every other endpoint gets an empty
-  pair, so the workaround never engages there.
+- **`envelope = "<key>"`** on the *provider*, for a gateway that wraps its non-streaming reply so the
+  `choices` list sits one level down: `{"data": {"choices": [...], "success": true}}` becomes
+  `envelope = "data"`. LiteLLM otherwise reports the endpoint as broken. The unwrap is scoped to that
+  provider's own host, and it is preferred over streaming, which makes the review download every reasoning
+  delta it discards. `install.sh` puts it in pr-agent's own venv - no fork - and
+  `./scripts/verify envelope` fails by name if a pr-agent or SDK upgrade ever moves the seam it patches.
+- **`stream = true`** on the *provider*, for an endpoint whose non-streaming path does not answer at all,
+  with no wrapping key to name. preflight-code forces streaming **for that provider's own host only**;
+  every other endpoint gets an empty pair, so the workaround never engages there.
 
 ### More than one endpoint
 
@@ -114,7 +121,7 @@ profiles that use it:
 [providers.mine]
 api_base = "https://api.example.com/v1"
 key      = "sk-..."
-# stream = true                  # only if this host's non-streaming reply needs SSE
+# envelope = "data"              # only if this host wraps its reply in a key
 
 [providers.work]
 api_base = "https://llm.internal.corp/v1"

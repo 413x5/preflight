@@ -79,6 +79,76 @@ you point at names its own host, and the pair is armed for that host.
 Nothing in the mechanism is endpoint-specific. An endpoint that behaves normally needs neither the
 workaround nor a guessed budget.
 
+## The envelope shim (opt-in, per provider)
+
+`stream = true` is the fallback, not the fix. An endpoint whose non-streaming reply is **wrapped** - the
+real body under one key, as in `{"data": {"choices": [...]}, "success": true}` - can be read as it is,
+and `envelope` names that key:
+
+```toml
+[providers.mine]
+api_base = "https://api.example.com/v1"
+key = "..."
+envelope = "data"      # NOT with stream = true
+```
+
+Streaming costs a review every `reasoning_content` delta pr-agent then discards - `litellm_helpers.py`
+accumulates only `delta.content` - and a cut mid-stream loses the whole call. So the two are refused
+together rather than composed: a wrapped endpoint does not need to stream, and setting both would only buy
+that cost. `envelope` is refused on a transport LiteLLM does not route through the OpenAI client, and
+refused for a key the chat-completion body already uses (`choices`, `usage`, `model`, ...) - naming one of
+those would make the unwrap produce a body that is not a completion.
+
+**Why the seam is the SDK's parse funnel.** Every OpenAI SDK response passes through
+`openai._base_client.BaseClient._process_response_data`, which receives the raw body as a dict before
+pydantic parses it. One patch there covers sync and async, re-sends nothing, re-implements no retry, and
+leaves the request path untouched - the seam runs *after* the HTTP call, inside `raw.parse()`. The
+alternatives were measured and rejected: `OpenAIConfig.transform_response`, `transform_parsed_response_dict`
+and a LiteLLM `post_call_success_hook` all run after the SDK has parsed the body, at which point `choices`
+is already `None` and the wrapper is gone.
+
+The patch swaps only the body, and only when the client's authority is one the renderer armed, so a body
+that already has `choices`, a body whose named key is not a dict, a body whose `choices` is not a list, a
+non-JSON body and every ungated host reach the SDK exactly as before. `cast_to` is left alone: it is
+already this request's chat-completion model, so the unwrapped body is parsed by the same code path a flat
+one takes.
+
+**How it reaches pr-agent without a fork.** `install.sh` writes two files into pr-agent's own tool venv:
+
+```
+$TOOL_DIR/pr-agent/lib/python*/site-packages/preflight_envelope.py     the module
+$TOOL_DIR/pr-agent/lib/python*/site-packages/preflight_envelope.pth    one line, beginning with `import`
+```
+
+`site.py` executes a `.pth` line that begins with `import`, which is how pr-agent's interpreter runs
+`install()` at startup with no change to pr-agent. Any other line is not reliably executed - it is treated as
+a path, and which spellings a given CPython tolerates is a version detail - so "the files are in
+site-packages" is not the property that matters. The line is therefore asserted rather than written
+blindly: the installer and the gate both require it to begin with `import`, and both drive it through
+`site.addsitedir` and require the import to land.
+
+**What the shim reads.** The host list and the key name come from the rendered config, through
+`PREFLIGHT_ENVELOPE_CONFIG`, which the helpers export for the run. Not from a file the shim finds by
+scanning a directory: a config dir can hold a previous run's file, and arming on that would unwrap a host
+this run never configured.
+
+**Loud, because a silent patch is the failure this exists to prevent.** The seam is a private SDK method,
+so an SDK bump can move it with no LiteLLM version change. Three things refuse rather than degrade:
+
+- `install()` verifies the attribute exists and is callable before patching, and raises a `LookupError`
+  naming it otherwise. `install.sh` runs that verification with the venv's own interpreter and the venv's
+  own SDK, and fails the install if the shim did not apply - including when the SDK it found is outside
+  that venv, which would be a patch pr-agent never imports.
+- From a `.pth` line, `site.py` prints and then *ignores* every ordinary exception, so `install()` converts
+  the refusal into `SystemExit`, the one status it does not swallow. An armed run against a moved seam
+  stops rather than reviewing a wrapped reply as an empty one.
+- `./scripts/verify envelope` fails when the seam is missing from the installed SDK, and skips with a
+  reason only when pr-agent is absent. A recorded fixture cannot stand in for that check, so the two live in
+  the same stage as separate assertions.
+
+`uv tool install` replaces the venv, which removes the shim; `install.sh` writes it again on the next run,
+and the gate reports the missing seam until it does.
+
 Token budgets matter for a related reason: LiteLLM does not know every model id, and an id it cannot
 resolve has no declared context window. `custom_model_max_tokens` is what pr-agent measures the prompt
 against instead - without it the run fails rather than reviewing a clamped diff. `max_model_tokens`

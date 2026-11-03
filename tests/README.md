@@ -248,7 +248,7 @@ reverted in turn and the expected case was confirmed to fail:
 | the missing-seam refusal turned into an ordinary exception, which `site.py` prints and ignores | REQ-HOOK-54 |
 | the missing-seam refusal no longer naming the method it could not find | REQ-HOOK-54 |
 | a second install re-wrapping the seam, so the outermost frame's config decides | REQ-HOOK-54 |
-| the installer's `.pth` line given a leading space, so `site.py` treats it as a path and ignores it | envelope (gate stage; the installer refuses the line, watched failing) |
+| the installer's `.pth` line made not to begin with `import`, so `site.addsitedir` does not execute it and the shim never loads | envelope (gate stage; the installer refuses the line, watched failing) |
 | the installer reporting success for a tool venv with no OpenAI SDK, so an unapplied patch looks installed | envelope (gate stage) |
 | the installer no longer writing the `.pth` into the tool venv | envelope (gate stage) |
 | the renderer accepting `envelope` on a transport litellm does not route through the OpenAI client | envelope (gate stage, against litellm's own dispatch) |

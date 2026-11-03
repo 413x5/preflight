@@ -121,9 +121,11 @@ $TOOL_DIR/pr-agent/lib/python*/site-packages/preflight_envelope.pth    one line,
 ```
 
 `site.py` executes a `.pth` line that begins with `import`, which is how pr-agent's interpreter runs
-`install()` at startup with no change to pr-agent. A line that does not begin with it is treated as a path
-and **silently ignored**, so the line is asserted rather than written blindly - by the installer, and again
-by the gate.
+`install()` at startup with no change to pr-agent. Any other line is not reliably executed - it is treated as
+a path, and which spellings a given CPython tolerates is a version detail - so "the files are in
+site-packages" is not the property that matters. The line is therefore asserted rather than written
+blindly: the installer and the gate both require it to begin with `import`, and both drive it through
+`site.addsitedir` and require the import to land.
 
 **What the shim reads.** The host list and the key name come from the rendered config, through
 `PREFLIGHT_ENVELOPE_CONFIG`, which the helpers export for the run. Not from a file the shim finds by

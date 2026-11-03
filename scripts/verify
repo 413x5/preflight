@@ -1308,19 +1308,23 @@ status, _ = driven(line)
 if status != "imported":
     problems.append("the installer's .pth line did not import the shim: %r -> %s" % (line, status))
 
-# The same line with its `import` removed is IGNORED by site.py. Without this direction the assertion
-# above would pass on a machine where the module happened to be importable another way.
-status, _ = driven(" " + line)
+# The probe is LIVE: a `.pth` file holding no import line must not import the shim. Without this direction
+# the assertion above would pass on a machine where the module was importable some other way, and "the
+# installer's line works" would be a fact about the machine rather than about the line. A comment is used
+# rather than a whitespace-mangled import, because which non-`import` lines site.py tolerates is a CPython
+# version detail (it changed the accepted prefixes) and a test of it would fail on a version bump for a
+# reason that has nothing to do with this bundle.
+status, _ = driven("# this line is not an import")
 if status != "ignored":
-    problems.append("a .pth line without a leading import was still executed, so the check above proves"
-                    " nothing: %s" % status)
+    problems.append("the shim was imported without an import line in the .pth, so the check above proves"
+                    " nothing about the line the installer writes: %s" % status)
 
 # And the module still parses under the interpreter the gate runs on.
 subprocess.run([sys.executable, "-m", "py_compile", shim], check=True, capture_output=True)
 if problems:
     print("\n".join(problems))
     sys.exit(1)
-print("the .pth line is executed by site.py, and a line without import is ignored")
+print("the installer's .pth line is executed by site.py, and the probe does not import without one")
 PY
 
   # ---- missing seam is LOUD, against a stub with the attribute removed ----------------------------

@@ -206,7 +206,7 @@ fails.
 | `config` | The generated config parses, the completeness keys are set and the keys left off are absent, and the gate template is inert |
 | `models` | The `settings.toml`/`providers.toml` templates are inert, the renderer derives the endpoint, the key and the transport pin together, and it refuses a chain spanning two providers |
 | `envhelp` | Every `PREFLIGHT_*` the helper reads is in `--help`, no `--help` entry is unread, an internal variable is not advertised as a setting, and the shared resolver's default caller name is the installed command |
-| `envelope` | The envelope shim unwraps only an armed host's wrapped body and passes every other shape through, the `.pth` line is executed by `site.py` and a line without `import` is not, a missing seam refuses by name, `install.sh` fails rather than report an unapplied patch, and the seam exists in the installed SDK (skipped with a reason when pr-agent is absent) |
+| `envelope` | The envelope shim unwraps only an armed host's wrapped body and passes every other shape through, the installer's `.pth` line is executed by `site.addsitedir` and the probe does not import without one, a missing seam refuses by name, `install.sh` fails rather than report an unapplied patch, and the seam exists in the installed SDK (skipped with a reason when pr-agent is absent) |
 | `version` | `src/VERSION`, the CHANGELOG's released heading for it, and `--version` agree |
 | `gateshapes` | `preflight-gate` survives the JSON shapes the model really produces |
 | `coverage` | The coverage marker matches pr-agent's footer and ignores prose |

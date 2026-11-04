@@ -345,7 +345,8 @@ itself the reason the fix above is a bound rather than a diagnosis.
    `get_settings().litellm.get("callback_timeout_seconds", 30)`, and a key placed under `[config]` is
    silently ignored, so an operator who "sets" the wrong one keeps hanging with no feedback. Lowering it
    has **not** been confirmed to stop the hang; treat it as a lever to test, not a known fix. The model
-   *request* is bounded separately by `config.ai_timeout` (default 120s), which does not cover this wait.
+   *request* is bounded separately by `config.ai_timeout` (default 120s), which does not cover this wait -
+   see "A review dies at exactly 120s" below.
 
 ## I want to see what pr-agent itself printed during a run
 
@@ -422,6 +423,36 @@ that governs the credential.
 **Do not raise `PREFLIGHT_REVIEW_WAIT` to make this go away.** That bound is an hour by default; the note
 exists so the run announces itself while it waits, not so the wait can grow. `PREFLIGHT_PROGRESS_EVERY`
 controls only how often it speaks - set it to `0` to silence it, or leave it alone.
+
+## A review dies at exactly 120s and the fallback model answers
+
+**Symptom.** A run ends with `APITimeoutError` after roughly two minutes, pr-agent retries the *same*
+model, that attempt times out the same way, and the answer you finally read came from
+`fallback_models` - so the summary line carries `model=FALLBACK` and the review is a different model's
+judgement. On a run where the fallback also misses, nothing answers at all.
+
+**The tell is the duration, not the prompt.** Each killed attempt lands on **your `config.ai_timeout`
+exactly** - 120.0s on a default install, because that is upstream's value and this bundle sets none. Every
+attempt uses that same number: pr-agent passes one timeout to every call and does not lengthen it per retry,
+so a run that retries twice shows two kills at the same duration, not one. A review that merely ran long has
+a ragged duration. Prompt size is not the driver - the same model has completed far larger prompts in
+seconds and timed out on a review-sized one. The figures are in [`../measurements.md`](../measurements.md).
+
+**Why it bounds the whole generation.** On a NON-streaming provider no byte arrives until the completion
+is finished, so `ai_timeout` is a completion-length budget rather than an inactivity window (the
+`sock_read` detail is in the same measurement row).
+
+**The fix is the operator's choice, not a bundle default:**
+
+```toml
+[config]
+ai_timeout = 900
+```
+
+The renderer passes `[config]` through unchanged, so the key reaches pr-agent as written. Raise it for an
+endpoint that is slow to finish a review; leave it alone when a two-minute ceiling is what you want, and
+treat the fallback answer as the signal to re-run. Do not raise `PREFLIGHT_REVIEW_WAIT` for this - it bounds
+a different wait, and the request is already dead by then.
 
 ## `preflight-code review` is slow, and the output looks tiny for it
 

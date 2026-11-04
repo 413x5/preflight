@@ -45,6 +45,10 @@ main = "mine"
 # than overwritten, because the profile's value would leave this one looking set and doing nothing.
 # Show the model, token counts and time in review.md.
 output_run_details = true
+# Upstream is 120s. On a non-streaming provider this bounds the WHOLE generation - no byte arrives until
+# the completion is finished - so it is a completion-length budget, not an idle gap: a review that reasons
+# heavily can exceed it at any prompt size. See docs/runbooks/troubleshooting.md for the symptom and the fix.
+# ai_timeout = 120
 # How this repository's own instructions reach the reviewer.
 # repo_context_files = ["AGENTS.md"]
 # repo_context_from_default_branch = true

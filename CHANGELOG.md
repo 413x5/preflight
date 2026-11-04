@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Changed
+
+- **`config.ai_timeout` is documented, and what it bounds is stated.** The bundle never set the key and
+  never mentioned it, so a review killed at exactly 120s read as a slow endpoint rather than as upstream's
+  default deadline. On a non-streaming provider the value bounds the **whole generation** - no byte arrives
+  until it finishes - so it is a completion-length budget, not an idle window: a heavily reasoning review
+  can exceed it at any prompt size, and the run is then retried on the same model and handed to
+  `fallback_models`. The reference now lists the key commented at upstream's value, the runbook names the
+  symptom and its tell, and the measurement behind it is recorded. No default is added and nothing in the
+  renderer changes.
 
 ## [0.11.0] - 2026-11-03
 

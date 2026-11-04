@@ -493,3 +493,27 @@ for the stop signal: `new=N/M` counts a reworded repeat as new. `[config] seed` 
 that also pins `temperature` to 0; the endpoint accepts both. It is left unset deliberately - pinning can
 reduce finding coverage, and the loop's judgement step is what handles a reworded repeat - but it is the
 lever to reach for if `new=` never settles.
+
+## `new=` never reaches zero, and every finding repeats
+
+`new=N/M` identifies a finding by `(relevant_file, issue_header, issue_content)`, so it counts a finding as
+new when its **body** is reworded even though its header did not move. A model whose headers are stable is
+what makes the counter useful: the same concern under the same title recurs as a repeat, and only the
+wording drifted.
+
+**A generic header is therefore a convergence defect, not a style preference.** A finding titled only
+"Possible Bug" (or "Issue", or "Bug") matches nothing the previous round wrote unless its body happens to
+be byte-identical, so a genuinely unchanged finding reads as NEW on every round and `new=` never falls. The
+bodies can be perfectly substantive while this happens - what is missing is the label the counter keys on.
+
+This was measured: at `reasoning_effort = "max"` one review returned three of its four findings under the
+title "Possible Bug". The level has not been shown to help otherwise - wall time and output volume are not
+monotonic in it, and run-to-run variance exceeds the difference between levels, while `low`, `high` and
+`max` were broadly comparable - so **do not choose `max` for this workflow**. The ladder and its limits are
+in [`../measurements.md`](../measurements.md).
+
+The fix is on the model setting, not in the counter: drop back to `low`/`medium`/`high`, where this was not
+observed, or use a provider whose headers are specific. Do not read a high `new=` count as proof the
+findings are new; read it as a question about the header, and compare the finding **bodies** against the
+previous `review.md` yourself. The counter's wording and its stated limits are in
+[`../architecture.md`](../architecture.md).

@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symptom and its tell, and the measurement behind it is recorded. No default is added and nothing in the
   renderer changes.
 
+- **The `reasoning_effort` ladder is measured, and `max` is documented as unusable for this workflow.** Two
+  byte-verified diffs were reviewed at every effort level on one model; wall time and output volume are not
+  monotonic in effort, and run-to-run variance exceeds any difference between levels, so no level is
+  recommended over another. What is actionable is a defect: at `max`, findings arrived titled only
+  "Possible Bug" - a header generic enough that `new=N/M` cannot match an unchanged finding across rounds,
+  which retires the convergence signal. The runbook names the symptom and says not to pick `max`. This is
+  documentation of a measurement, not a behaviour change: no default, profile, renderer or counter changed,
+  and `docs/measurements.md` carries the table and its limits.
+
 ## [0.11.0] - 2026-11-03
 
 ### Added

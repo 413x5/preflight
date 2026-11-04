@@ -21,6 +21,68 @@ several entries below record exactly that lesson.
 | 2026-11-04 | `ttfb=19.93 total=19.98`, and `ttfb=77.27 total=77.30` | two independent probes of the configured endpoint at review size, NON-streaming | The first byte arrives with the last, so on this path `config.ai_timeout` bounds the **entire generation**, not a gap between chunks. LiteLLM passes it as the httpx `timeout`, which its aiohttp transport maps to `sock_read` - per-read inactivity, not wall clock - so the two coincide only because a non-streaming reply is a single read. A streaming or trickling path would lose the bound without any error |
 | 2026-11-04 | five reviews killed at exactly 120.0s; in two of them the primary **and** the fallback timed out | review-sized prompts of 20.9k-22.4k prompt tokens, from each run's `run.log` | The kill is `APITimeoutError` at pr-agent's default `config.ai_timeout` (120s), which is a **completion-length** budget, not a prompt-size one: the same model completed 146k-155k input tokens in 1-2s and a 509,722-token request in 4s, and the fallback answered the same ~21-22k prompts in 52-58s with only 4,096-4,643 completion tokens. A larger prompt budget would not have helped; a larger `ai_timeout` might |
 
+### The effort ladder, 2026-11-04
+
+Two reconstructed diffs, labelled `underclass` and `proxy`, reviewed at every `reasoning_effort` level. The
+bytes were the control: the tree hash was recomputed before each run and matched its diff every time
+(`2867009950a59c5cc504cfebbc9bdf2ebc9b419e` for `underclass`, `dc73867f5645deb33fd08f35c5de1f41e002a477`
+for `proxy`). Held fixed for every cell: `ai_timeout = 1500`, no fallback model, the `openai` transport
+non-streaming, and one model - `glm-5.3-flash`, reached through a local OpenAI-compatible endpoint. Effort was
+switched per profile in an isolated `PREFLIGHT_HOME` copy, so no in-repo configuration changed.
+
+| Diff | Effort | Wall | out tokens | Findings |
+|---|---|---|---|---|
+| `underclass` (1951 lines) | low | 77s | 4,672 | 3 |
+| `underclass` | medium | 645s | 6,333 | 2 |
+| `underclass` | high (run 1) | 72s | 4,736 | 3 |
+| `underclass` | high (run 2) | 64s | 4,548 | 2 |
+| `underclass` | max | 85s | 5,747 | 4 |
+| `proxy` (375 lines) | low | 38s | 2,272 | 0 |
+| `proxy` | medium | 42s | 2,928 | 2 |
+| `proxy` | high (run 1) | 67s | 4,502 | 2 |
+| `proxy` | high (run 2) | 74s | 4,757 | 3 |
+| `proxy` | max | 69s | 4,775 | 3 |
+
+A second model on the same bytes, recorded for cost context rather than as a recommendation - it is a
+different provider, only two levels were run, and no quality comparison survives either limit:
+
+| Diff | Model | Effort | Wall | out tokens | Findings |
+|---|---|---|---|---|---|
+| `underclass` | `deepseek` | low | 1128s | 56,470 | 2 |
+| `underclass` | `deepseek` | medium | 1117s | 69,435 | 2 |
+| `proxy` | `deepseek` | low | 292s | 49,300 | 3 |
+| `proxy` | `deepseek` | medium | 627s | 50,695 | 3 |
+
+What the ladder supports, and what it does not:
+
+1. **Wall time is not monotonic in effort.** The `medium` cell on `underclass` is the slowest by roughly an
+   order of magnitude, while `high` and `max` finished inside the range `low` occupied on the same bytes - so
+   that cell is an outlier, not an effort cost, and no wall-clock ranking of the levels follows.
+2. **Effort raises output volume weakly, and not monotonically.** `medium` and `max` both returned more than
+   `low` on both diffs, but the levels do not order: on `underclass` `medium` returned the most, `max` less,
+   and `high` less than `low` in one of its two runs; only on the smaller diff does the order follow the
+   levels.
+3. **Run-to-run variance exceeds any difference between levels.** `high` returned 3 findings then 2 on the
+   same bytes minutes apart - the same ~10x spread recorded for 2026-10-10 above, which is why ranking efforts
+   by finding count on two diffs is not meaningful.
+4. **`max` degrades its own output format.** On `underclass`, three of the four findings it returned were
+   titled "Possible Bug" - generic, non-diagnostic headers over substantive bodies (rollback staging without
+   stopping the daemon; a two-line `.installed-revision` read with `head -n1`; a `set -e` abort). `new=N/M`
+   keys on `(relevant_file, issue_header, issue_content)` (the identity is in
+   [`architecture.md`](architecture.md)), so a finding whose header has collapsed to a fixed phrase reads as
+   NEW every round whenever its body is reworded, and the convergence signal the bundle exists to keep honest
+   stops arriving. The operator-facing symptom is in [`runbooks/troubleshooting.md`](runbooks/troubleshooting.md).
+
+One finding was stable across the whole experiment: a dry-run/stale-binary defect on `underclass` was
+reported at every effort level, in a different wording each time. A finding that survives rewording is the
+shape the loop should converge on - which is also why a finding *count* cannot stand in for it.
+
+**The limits, stated because the table invites over-reading.** Two diffs, one model, and variance larger than
+the effect. What this supports is that `glm` is broadly comparable across `low`/`high`/`max`, and that `max`
+produced generic finding headers on one of the two diffs. It does **not** support "`high` is better than
+`low`", or any ranking at all, and it is not a reason to pin a level: no default changed, and the 2026-10-11
+row above is what happened last time a ladder result was read as a pin.
+
 ## Reliability and variance
 
 | Date | Measurement | Conditions | Why it matters |

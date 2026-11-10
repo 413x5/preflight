@@ -354,7 +354,7 @@ stage_install() {
   # install unpinned.
   grep -qE '^[[:space:]]*uv tool install .*"\$pr_agent_spec"' install.sh \
     || { echo "install.sh no longer installs the pinned spec in the uv command" >&2; rc=1; }
-  grep -q 'PREFLIGHT_PR_AGENT_VERSION:-0\.49\.0' install.sh \
+  grep -q 'PREFLIGHT_PR_AGENT_VERSION:-0\.50\.0' install.sh \
     || { echo "install.sh pr-agent pin changed; re-verify the coverage footer fixture in tests/run.sh" >&2; rc=1; }
   # The `github` extra is what makes `preflight-pr` work at all: pr-agent moved its git-provider SDKs out
   # of the base dependencies, so a plain pin installs a hosted mode that fails on its first review with

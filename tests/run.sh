@@ -1038,13 +1038,37 @@ _fb_pattern = eval("re.compile(" + m.group(1) + ")", {"re": re})
 # matters as much as the parenthetical: `Fallback: yes` would still contain the literal but never match the
 # shipped regex, and fixtures written with the same wrong prefix would agree with it - the silent
 # retirement this whole check exists to catch.
-_fb_prefixes = re.findall(r'f"(- Models?: )', run_output)
-if sorted(_fb_prefixes) != ["- Model: ", "- Models: "]:
-    print("pr-agent's run-details no longer build their model line with the expected prefixes "
-          "(found %r); check the marker's regex against the new wording" % (_fb_prefixes or "none"))
+# 0.50 moved the wording into settings/i18n/en.toml, so the literals are no longer in run_output.py.
+_i18n_path = os.path.join(os.path.dirname(defaults_path), "i18n", "en.toml")
+if not os.path.isfile(_i18n_path):
+    print("cannot find pr-agent's i18n/en.toml beside its settings; update this case")
     sys.exit(7)
-if "includes fallback" not in run_output or "(fallback)" not in run_output:
-    print("pr-agent's run-details no longer contain the fallback literals this marker reads: "
+_i18n_raw = tomllib.load(open(_i18n_path, "rb"))
+_i18n = _i18n_raw.get("run_details")
+if not isinstance(_i18n, dict):
+    print("pr-agent's i18n/en.toml no longer has a [run_details] table; update this case")
+    sys.exit(7)
+if _i18n.get("model") != "Model" or _i18n.get("models") != "Models":
+    print("pr-agent's run-details i18n no longer uses the expected model labels "
+          "(found %r); check the marker's regex against the new wording" % (_i18n,))
+    sys.exit(7)
+if _i18n.get("fallback") != "fallback" or _i18n.get("includes_fallback") != "includes fallback":
+    print("pr-agent's run-details i18n no longer uses the expected fallback labels "
+          "(found %r); check the marker's regex against the new wording" % (_i18n,))
+    sys.exit(7)
+# The source must still build the bullet prefix and route through those keys, so a rename
+# or a prefix change there is caught.
+for _needle in ("f\"- {t('run_details.model')}", "f\"- {t('run_details.models')}"):
+    if _needle not in run_output:
+        print("pr-agent's run-details no longer build the expected bullet prefix via i18n: "
+              "check the marker's regex against the new wording")
+        sys.exit(7)
+if "run_details.model" not in run_output or "run_details.models" not in run_output:
+    print("pr-agent's run-details no longer reference the model labels via i18n: "
+          "check the marker's regex against the new wording")
+    sys.exit(7)
+if "includes_fallback" not in run_output or "fallback" not in run_output:
+    print("pr-agent's run-details no longer reference the fallback literals via i18n: "
           "check the marker's regex against the new wording")
     sys.exit(7)
 # Rebuild each line the way pr-agent does, prefix included, then require the shipped regex to match it.

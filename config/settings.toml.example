@@ -102,6 +102,7 @@ num_max_findings = 10
 # max_previous_findings_chars = 8000
 # enable_large_pr_chunking = false  # the bundle reports partial coverage instead of chunking
 # max_number_of_calls = 3  # does nothing unless chunking is on
+# structural_reach_input_file = ""  # JSON reach facts from a build-graph tool; adds a deterministic change-risk row
 
 # ---------------------------------------------------------------------------- [gate]
 # The policy `preflight-gate` applies to the review. It is NOT a pr-agent section: the renderer strips it,

@@ -521,6 +521,8 @@ fi
 # A missing settings.toml means there is no model and no review, and the renderer prints that refusal: it
 # is the one place that knows which of the two files is absent, so the wording cannot drift between here
 # and the sibling helper.
+# `root` is the reviewed repository's toplevel (resolved above and required), so the renderer can derive
+# a session id from it; an empty override path only happens outside a repository, where there is no id.
 __preflight_render_settings "$cfgdir" "${root:-}" || exit $?
 rendered_cfg="$PREFLIGHT_RENDERED_CONFIG"
 # The envelope shim lives in pr-agent's venv and is imported by the interpreter at STARTUP, before pr-agent

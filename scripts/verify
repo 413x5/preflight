@@ -544,6 +544,10 @@ stage_models() {
   local tmp rc=0 rendered_files=''
   tmp="$(mktemp -d)" || return 1
   mkdir -p "$tmp/cfg"
+  # A reviewed repository beside (not containing) the config dir, so the render can derive a session
+  # id from its path and branch without tripping the in-repo-config guard.
+  mkdir -p "$tmp/repo"
+  ( cd "$tmp/repo" && git init -q . >/dev/null 2>&1 && git -c commit.gpgsign=false -c user.name=preflight -c user.email=preflight@localhost commit -q --allow-empty -m init >/dev/null 2>&1 )
 
   # Fixtures are written as ONE document and split by TOP-LEVEL TABLE: [config] and [pr_reviewer] are
   # settings.toml; [providers.*] and [profiles.*] are providers.toml, appended to whatever that file
@@ -677,7 +681,13 @@ TOML
   # The general section is stated ONCE at the top level; the per-model settings ride on the profile that
   # is assigned. Both halves are the shape this asserts - and `[settings]` is the FILE name now, so a
   # table of that name here would be the mistake rather than the feature.
+  # `session_id_name` is named EXPLICITLY even though it has a default: a fixture that relied on the default
+  # stopped exercising the feature the moment the default was considered for a change, and the test then
+  # asserted nothing. Naming it makes the case independent of what the default is.
   write_cfg "$(cat <<'TOML'
+[preflight]
+session_id_name = "session-id"
+
 [selection]
 main = "alpha-main"
 fallback = ["alpha-small"]
@@ -702,8 +712,8 @@ TOML
   # a subshell here), and every rendered file this stage creates is removed by the `for rendered in` loop
   # at the end - a stray one would be a 600-mode file holding a key, which is the very property this stage
   # checks for.
-  if ! bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
-       _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" >"$tmp/path" 2>"$tmp/err"; then
+  if ! bash -c '. "$1"; __preflight_render_settings "$2" "$3" >/dev/null; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
+       _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" "$tmp/repo" >"$tmp/path" 2>"$tmp/err"; then
     echo "renderer refused a valid assignment:" >&2; sed 's/^/    /' "$tmp/err" >&2; rc=1
   fi
   rendered="$(cat "$tmp/path")"
@@ -730,6 +740,9 @@ assert lt["custom_llm_provider"] == "openai", lt
 # stream = true on this provider scopes the workaround to this provider's own host.
 assert lt["force_streaming_custom_llm_provider"] == "openai", lt
 assert lt["force_streaming_api_base_substrings"] == ["alpha.example.com"], lt
+# The derived session id is injected into [litellm] as an extra_headers JSON string.
+assert "extra_headers" in lt, lt
+assert "session-id" in lt["extra_headers"], lt
 # settings.toml's own [config] values survive the render: it IS the config now, so a value it carries
 # must reach pr-agent rather than be replaced by the render.
 assert d["config"]["max_output_tokens"] >= 100000, d["config"]
@@ -740,6 +753,312 @@ PY
       || { echo "the rendered config is not 600-mode" >&2; rc=1; }
     rm -f "$rendered"
   fi
+
+  # ---- disable case: empty session_id_name produces no injected header ----
+  # The fixture is snapshotted and restored around this case rather than trimmed back with a pattern: a
+  # truncation on a line match would silently cut at the wrong place the moment the base fixture gains a
+  # section of its own, and every case after it would then run against a halved file with nothing to say so.
+  _fixture_snapshot="$(cat "$tmp/cfg/settings.toml")"
+  # The operator's own TOML table is present here on purpose: with nothing to inject, this is the ONLY path
+  # that exercises the JSON-string normalization, so without it a table could reach pr-agent and raise
+  # there. The assertion below checks the form as well as the absence.
+  # The base fixture already carries a `[preflight]` table (it opts in), so this case REWRITES that line
+  # rather than appending a second table - two `[preflight]` headers are a TOML error, and the case would
+  # fail on syntax instead of testing the disable path.
+  python3 - "$tmp/cfg/settings.toml" <<'PYD'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+out = []
+for line in p.read_text().splitlines():
+    if line.strip() == 'session_id_name = "session-id"':
+        line = 'session_id_name = ""'
+    out.append(line)
+p.write_text("\n".join(out) + '\n\n[litellm.extra_headers]\n"X-Org" = "acme"\n')
+PYD
+  if ! bash -c '. "$1"; __preflight_render_settings "$2" "$3" >/dev/null; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
+       _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" "$tmp/repo" >"$tmp/pathD" 2>"$tmp/errD.out"; then
+    echo "disable-case render failed:" >&2; sed 's/^/    /' "$tmp/errD.out" >&2; rc=1
+  fi
+  renderedD="$(cat "$tmp/pathD")"
+  rendered_files="$rendered_files $renderedD"
+  python3 - "$renderedD" <<'PY' || rc=1
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+lt = d.get("litellm", {})
+assert "session-id" not in str(lt.get("extra_headers", "")), lt
+# The form matters even with nothing injected: pr-agent json.loads LITELLM.EXTRA_HEADERS, so an operator's
+# own TOML table must still reach it as a JSON string rather than raising at startup.
+if "extra_headers" in lt:
+    assert isinstance(lt["extra_headers"], str), \
+        f"extra_headers is {type(lt['extra_headers']).__name__}, not a JSON string"
+# This render DOES carry a [preflight] table, so it is the case that can see one leaking through. pr-agent
+# reads nothing from that section, so leaving it in would be the "looks configured, does nothing" shape.
+assert "preflight" not in d, "the rendered config still carries preflight's own [preflight] table"
+print('session_id_name = "" disables the injection')
+PY
+  rm -f "$renderedD"
+  printf '%s\n' "$_fixture_snapshot" > "$tmp/cfg/settings.toml"
+
+  # ---- precedence: an explicit header wins and neighbours survive ----
+  # The riskiest part of the injection is the MERGE, not the derive: clobbering a user's own header would
+  # be invisible in review (the rendered file looks configured either way) and would break a run that pins
+  # its own id. Asserted in both accepted forms, because only the dict form is reachable from a table.
+  _cfg_base="$(cat "$tmp/cfg/settings.toml")"
+  for _form in string table; do
+    if [ "$_form" = string ]; then
+      printf '%s\n\n[litellm]\nextra_headers = %s\n' "$_cfg_base" \
+        "'{\"session-id\": \"pinned\", \"X-Org\": \"acme\"}'" > "$tmp/cfg/settings.toml"
+    else
+      printf '%s\n\n[litellm.extra_headers]\n"Session-Id" = "pinned"\n"X-Org" = "acme"\n' "$_cfg_base" \
+        > "$tmp/cfg/settings.toml"
+    fi
+    if ! bash -c '. "$1"; __preflight_render_settings "$2" "$3" >/dev/null; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
+         _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" "$tmp/repo" >"$tmp/pathP" 2>"$tmp/errP"; then
+      echo "precedence render ($_form) failed:" >&2; sed 's/^/    /' "$tmp/errP" >&2; rc=1
+    fi
+    renderedP="$(cat "$tmp/pathP")"
+    rendered_files="$rendered_files $renderedP"
+    python3 - "$renderedP" "$_form" <<'PY' || rc=1
+import json, sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+raw = d["litellm"]["extra_headers"]
+# pr-agent parses LITELLM.EXTRA_HEADERS with json.loads, so it must be a JSON STRING whichever form the
+# operator wrote; a table left as a table would raise at pr-agent's startup.
+assert isinstance(raw, str), f"{sys.argv[2]}: extra_headers is {type(raw).__name__}, not a JSON string"
+h = json.loads(raw)
+values = {k.lower(): v for k, v in h.items()}
+assert values.get("session-id") == "pinned", f"{sys.argv[2]}: an explicit id was overwritten: {h}"
+assert values.get("x-org") == "acme", f"{sys.argv[2]}: an unrelated header was dropped: {h}"
+print(f'{sys.argv[2]} form: an explicit session id wins and neighbouring headers survive')
+PY
+    rm -f "$renderedP"
+  done
+
+  # ---- what the origin URL does to the derived id ----
+  # The id is a GROUPING key, so the two properties that matter are asserted directly: the same work must
+  # reach one id (two clones, two credential forms) and distinct work must reach different ones. Nothing
+  # asserted either before this, which is how a truncating parser survived.
+  #
+  # The fixture is restored first: the precedence loop above leaves a PINNED header in place, and a pinned
+  # header suppresses the derivation - every origin would then agree, and these cases would pass vacuously.
+  printf '%s\n' "$_cfg_base" > "$tmp/cfg/settings.toml"
+  _origin_id() {
+    git -C "$tmp/repo" remote remove origin >/dev/null 2>&1 || true
+    git -C "$tmp/repo" remote add origin "$1"
+    bash -c '. "$1"; __preflight_render_settings "$2" "$3" >/dev/null 2>&1; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"' \
+      _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" "$tmp/repo" >"$tmp/pathO" 2>/dev/null
+    python3 - "$(cat "$tmp/pathO")" <<'PY2'
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+print(d.get("litellm", {}).get("extra_headers", ""))
+PY2
+    rm -f "$(cat "$tmp/pathO")"
+  }
+  _id_clean="$(_origin_id 'https://github.com/o/r.git')"
+  _id_toked="$(_origin_id 'https://user:tok@github.com/o/r.git')"
+  [ "$_id_clean" = "$_id_toked" ] || { echo "a credential in the origin URL changes the derived id: two clones of one repository would group apart" >&2; rc=1; }
+  _id_other="$(_origin_id 'https://github.com/o/other.git')"
+  [ "$_id_clean" != "$_id_other" ] || { echo "two different origins derive the same session id" >&2; rc=1; }
+  # An `@` in a scheme-less remote is a DIRECTORY name unless the form is scp-like (user@host:path), which
+  # git reads as a path otherwise. Truncating it keys two clones of one repository differently.
+  _id_at_path="$(_origin_id 'work@home/repo')"
+  _id_truncated="$(_origin_id 'home/repo')"
+  [ "$_id_at_path" != "$_id_truncated" ] || { echo "a scheme-less origin's '@' was stripped as userinfo, so a local path keyed as a different repository" >&2; rc=1; }
+  # The scp-like form git DOES read as a remote: its user@ is userinfo and must not reach the key.
+  _id_scp="$(_origin_id 'git@github.com:o/r.git')"
+  _id_scp_host="$(_origin_id 'github.com:o/r.git')"
+  [ "$_id_scp" = "$_id_scp_host" ] || { echo "an scp-like origin keeps its user@, so two forms of one remote group apart" >&2; rc=1; }
+  git -C "$tmp/repo" remote remove origin >/dev/null 2>&1 || true
+  echo "the origin URL groups one repository's work and separates another's"
+
+  # ---- a detached HEAD announces the degraded grouping ----
+  # A detached HEAD has no branch to key on, so the commit is the honest key - and the group then restarts
+  # at every commit, which is the split the header exists to prevent. Silent degradation would read as
+  # working grouping, so a note goes to stderr; an attached checkout must not produce it.
+  _detach_repo="$tmp/detachrepo"
+  mkdir -p "$_detach_repo"
+  git -C "$_detach_repo" init -q . >/dev/null 2>&1
+  git -C "$_detach_repo" -c commit.gpgsign=false -c user.name=preflight -c user.email=preflight@localhost \
+    commit -q --allow-empty -m one >/dev/null 2>&1
+  _detach_stderr() {
+    bash -c '. "$1"; __preflight_render_settings "$2" "$3" >/dev/null' \
+      _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" "$_detach_repo" 2>&1 >/dev/null
+  }
+  _attached_notes="$(_detach_stderr | grep -c 'HEAD is detached' || true)"
+  git -C "$_detach_repo" checkout -q --detach HEAD >/dev/null 2>&1
+  _detached_notes="$(_detach_stderr | grep -c 'HEAD is detached' || true)"
+  [ "$_attached_notes" = 0 ] || { echo "an attached checkout warned that HEAD is detached" >&2; rc=1; }
+  [ "$_detached_notes" -ge 1 ] || {
+    echo "a detached HEAD silently keyed the session id on the commit, so grouping restarts at every commit with no signal" >&2; rc=1; }
+  echo "a detached HEAD announces that grouping restarts per commit"
+
+  # ---- the root-commit fallback is order-independent ----
+  # With no origin the key is the root commit. A repository can have SEVERAL roots (a subtree merge, an
+  # imported root) and `rev-list` lists them in COMMIT-DATE order, so the first entry moves when history is
+  # rewritten - silently regrouping every past review. Sorted, the choice depends on the hashes alone.
+  #
+  # The fixture forces the two orders to DISAGREE (the first root carries a later date, the second an
+  # earlier one). Without that the date order can coincide with the hash order and the case would pass on
+  # an unsorted implementation - which is exactly how the first version of this check proved nothing.
+  _roots_repo="$tmp/rootsrepo"
+  mkdir -p "$_roots_repo"
+  _root_id() {
+    bash -c '. "$1"; __preflight_render_settings "$2" "$3" >/dev/null 2>&1; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"' \
+      _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" "$_roots_repo" >"$tmp/pathR" 2>/dev/null
+    python3 - "$(cat "$tmp/pathR")" <<'PY3'
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+print(d.get("litellm", {}).get("extra_headers", ""))
+PY3
+    rm -f "$(cat "$tmp/pathR")"
+  }
+  _rg() {
+    git -C "$_roots_repo" -c commit.gpgsign=false -c user.name=preflight -c user.email=preflight@localhost \
+      "$@" >/dev/null 2>&1
+  }
+  _rg init -q .
+  # The branch is pinned for both readings: the id keys on the branch as well as the root, so a rename
+  # between them would change the id for a reason this case is not about.
+  _rg checkout -q -B main
+  GIT_AUTHOR_DATE="2030-01-01T00:00:00 +0000" GIT_COMMITTER_DATE="2030-01-01T00:00:00 +0000" \
+    _rg commit -q --allow-empty -m root-late-date
+  _root_first="$(git -C "$_roots_repo" rev-parse HEAD)"
+  _id_one_root="$(_root_id)"
+  _rg checkout -q --orphan second-root
+  GIT_AUTHOR_DATE="2001-01-01T00:00:00 +0000" GIT_COMMITTER_DATE="2001-01-01T00:00:00 +0000" \
+    _rg commit -q --allow-empty -m root-early-date
+  _rg checkout -q -B main "$_root_first"
+  GIT_AUTHOR_DATE="2030-01-02T00:00:00 +0000" GIT_COMMITTER_DATE="2030-01-02T00:00:00 +0000" \
+    _rg merge -q --allow-unrelated-histories --no-edit second-root -m merge-roots
+  if [ "$(git -C "$_roots_repo" rev-list --max-parents=0 HEAD | wc -l | tr -d ' ')" -gt 1 ]; then
+    # The fixture is only meaningful if the date order and the hash order really differ; assert that
+    # BEFORE asserting the behaviour, so a fixture that stopped discriminating fails rather than passes.
+    if [ "$(git -C "$_roots_repo" rev-list --max-parents=0 HEAD | head -1)" = \
+         "$(git -C "$_roots_repo" rev-list --max-parents=0 HEAD | sort | head -1)" ]; then
+      echo "the two-root fixture does not discriminate sorted from unsorted roots, so it cannot test the property" >&2
+      rc=1
+    fi
+    # The property is that the pick depends on the HASHES, not on commit dates - so the id must be the
+    # uuid5 of the LEXICOGRAPHICALLY FIRST root, and must NOT be the date-first one. (It is not invariant
+    # to adding a root: a new root can sort below the old one. Stability under a rewrite of DATES is the
+    # claim, and the fixture below is the one shape where the two orders disagree.)
+    _date_first="$(git -C "$_roots_repo" rev-list --max-parents=0 HEAD | head -1)"
+    _hash_first="$(git -C "$_roots_repo" rev-list --max-parents=0 HEAD | sort | head -1)"
+    _branch_now="$(git -C "$_roots_repo" rev-parse --abbrev-ref HEAD)"
+    _id_sorted="$(_root_id)"
+    python3 - "$_id_sorted" "$_hash_first" "$_date_first" "$_branch_now" <<'PY4' || rc=1
+import json, sys, uuid
+raw, hash_first, date_first, branch = sys.argv[1:5]
+derived = json.loads(raw)["session-id"]
+want = str(uuid.uuid5(uuid.NAMESPACE_URL, hash_first + ":" + branch))
+wrong = str(uuid.uuid5(uuid.NAMESPACE_URL, date_first + ":" + branch))
+if derived != want:
+    raise SystemExit(
+        "the root-commit fallback did not pick the lexicographically first root, so the key depends on "
+        "commit dates and a date rewrite regroups every past review")
+if derived == wrong:
+    raise SystemExit("the root-commit fallback picked the date-first root, which is what sorting must prevent")
+print("the root-commit fallback keys on a root's hash, not its commit date")
+PY4
+  else
+    echo "root-commit stability NOT asserted: the fixture did not end up with two roots" >&2
+    rc=1
+  fi
+
+  # ---- the refusals fire, and each names what to change ----
+  # `[preflight]` is stripped from pr-agent's config, so a key this renderer does not know would vanish
+  # with no error - the "looks configured, does nothing" shape. The repository-side refusal matters for a
+  # second reason: a committed file choosing the header name could collide with an authentication header.
+  # The stage's own `rc` must be what a failure sets: `local rc` here would shadow it, so an accepted
+  # refusal would print its complaint and still leave the stage green.
+  _refuse_case() {
+    local label="$1" needle="$2" settings_text="$3" providers_text="$4" out case_rc=0
+    printf '%s' "$settings_text" > "$tmp/cfg/settings.toml"
+    if [ -n "$providers_text" ]; then cp "$tmp/cfg/providers.toml" "$tmp/prov.bak"; printf '%s' "$providers_text" >> "$tmp/cfg/providers.toml"; fi
+    out="$( bash -c '. "$1"; __preflight_render_settings "$2" "$3"' _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" "$tmp/repo" 2>&1 )"
+    case_rc=$?
+    if [ -n "$providers_text" ]; then cp "$tmp/prov.bak" "$tmp/cfg/providers.toml"; fi
+    if [ "$case_rc" = 0 ]; then
+      echo "the renderer accepted $label instead of refusing it" >&2; rc=1
+    elif ! printf '%s' "$out" | grep -qF -- "$needle"; then
+      echo "the refusal for $label did not name the cause (wanted: $needle)" >&2
+      printf '%s\n' "$out" | sed 's/^/    /' >&2; rc=1
+    fi
+    return 0
+  }
+  # Builds a fixture from the base with `session_id_name` set to the given value, or with the line removed.
+  # A second `[preflight]` table would be a TOML error, so the value is substituted rather than appended.
+  _cfg_with_name() {
+    # $1 is the RAW TOML value as it should appear after `=`, so a caller passes `42` or `"   "` verbatim
+    # and quoting is decided here rather than by three layers of shell escaping.
+    python3 - "$_cfg_base" "$1" <<'PYN'
+import sys
+base, value = sys.argv[1], sys.argv[2]
+out = []
+for line in base.splitlines():
+    out.append("session_id_name = " + value if line.strip().startswith("session_id_name = ") else line)
+sys.stdout.write("\n".join(out) + "\n")
+PYN
+  }
+  # The stray key is placed INSIDE [preflight] by substituting the line, not appended: appended after the
+  # last table it lands in that table instead, and the case then tests nothing while still passing.
+  _refuse_case "an unknown [preflight] key" "'bogus'" \
+    "$(_cfg_with_name '"session-id"
+bogus = 1')" ''
+  _refuse_case "a non-string session_id_name" "'session_id_name' must be a string" \
+    "$(_cfg_with_name '42')" ''
+  _refuse_case "an invalid header name" "not a valid HTTP header name" \
+    "$(_cfg_with_name '"bad name!"')" ''
+  # A header VALUE is a string. A TOML date is not JSON-serializable at all, so it used to die with a
+  # Python traceback rather than a refusal; an integer serialized fine and then made the transport raise
+  # "Header value must be str or bytes" at request time, far from the config. Both are refused by name.
+  _refuse_case "a TOML date as a header value" "value for 'X-Date' is not a string" \
+    "$(printf '%s\n\n[litellm.extra_headers]\n\"X-Date\" = 1979-05-27\n' "$_cfg_base")" ''
+  _refuse_case "a number as a header value" "value for 'X-Num' is not a string" \
+    "$(printf '%s\n\n[litellm.extra_headers]\n\"X-Num\" = 1\n' "$_cfg_base")" ''
+  # A whitespace-only name reads as configured but would behave as disabled; refused, like every other
+  # invalid value, rather than silently switching the feature off. `""` stays the documented disable.
+  _refuse_case "a whitespace-only session_id_name" "is whitespace only" \
+    "$(_cfg_with_name '"   "')" ''
+  # A JSON string that parses to a NON-object (an array, a scalar) is refused rather than read as "no
+  # headers": treating it as empty would silently inject the derived id over a value the operator wrote.
+  _refuse_case "a JSON array as extra_headers" "is not a JSON object" \
+    "$(printf '%s\n\n[litellm]\nextra_headers = \"[1,2]\"\n' "$_cfg_base")" ''
+  _refuse_case "[preflight] in providers.toml" "belongs in settings.toml" \
+    "$_cfg_base" "$(printf '\n[preflight]\nsession_id_name = "x"\n')"
+  # The repository-side override, written where the renderer looks for it: a `.preflight.toml` beside the
+  # reviewed repository's toplevel. Removed afterwards so the cases below see the tree they expect.
+  printf '[preflight]\nsession_id_name = "evil"\n' > "$tmp/repo/.preflight.toml"
+  _refuse_case "a .preflight.toml [preflight]" "a repository cannot override" "$_cfg_base" ''
+  rm -f "$tmp/repo/.preflight.toml"
+  printf '%s\n' "$_cfg_base" > "$tmp/cfg/settings.toml"
+  echo "the [preflight] refusals fire by name"
+
+  # ---- extra_headers is validated AFTER the provider's own [litellm] merge ----
+  # The duplicate-key and non-string-value checks read the table once, so a value merged in from
+  # [providers.<name>.litellm] AFTER them would skip validation - and could then collide case-insensitively
+  # with the derived header. Nothing enforced that ordering before this; it was a comment. A provider that
+  # supplies a duplicate is refused here, which can only happen if the merge ran first.
+  _cfg_snapshot2="$(cat "$tmp/cfg/settings.toml")"
+  _prov_snapshot="$(cat "$tmp/cfg/providers.toml")"
+  python3 - "$tmp/cfg/providers.toml" <<'PYO'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+p.write_text(p.read_text() + '\n[providers.alpha.litellm]\nextra_headers = \'{"Session-Id": "from-provider"}\'\n')
+PYO
+  _ord_out="$( bash -c '. "$1"; __preflight_render_settings "$2" "$3"' _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" "$tmp/repo" 2>&1 )"
+  _ord_rc=$?
+  printf '%s' "$_prov_snapshot" > "$tmp/cfg/providers.toml"
+  printf '%s\n' "$_cfg_snapshot2" > "$tmp/cfg/settings.toml"
+  # Either refusal is acceptable evidence the merge ran first; what is NOT acceptable is a render that
+  # silently produced a colliding header.
+  if [ "$_ord_rc" = 0 ]; then
+    echo "a provider-supplied extra_headers skipped validation: the provider merge must run before the checks" >&2; rc=1
+  elif ! printf '%s' "$_ord_out" | grep -qE "duplicate header names|unknown key 'extra_headers'|not a setting name"; then
+    echo "the provider extra_headers case refused for an unexpected reason:" >&2
+    printf '%s\n' "$_ord_out" | sed 's/^/    /' >&2; rc=1
+  fi
+  echo "the provider [litellm] merge runs before extra_headers is validated"
 
 
   # ---- a provider's own [litellm]: merged for the run, with the derived three refused ----
@@ -818,28 +1137,36 @@ PY
   rm -f "$renderedM"
 
   # ---- switching providers: the second endpoint, with its own key, and no inherited streaming ----
+  # NOTE: this fixture is a distinct scenario from config/settings.toml.example; its profile/model
+  # names need not match that file's placeholders.
   write_cfg '[selection]
-main = "work-main"
-fallback = ["work-small"]
+main = "switch-main"
+fallback = ["switch-fallback"]
 
-[profiles.work-main]
-provider = "work"
-model = "their-model-id"
+[profiles.switch-main]
+provider = "provider-2"
+model = "switch-model-1"
 
-[profiles.work-small]
-provider = "work"
-model = "their-small"
+[profiles.switch-fallback]
+provider = "provider-2"
+model = "switch-model-2"
+
+[providers.provider-2]
+api_base = "https://llm.internal.corp/v1"
+key = "key-two"
 '
-  bash -c '. "$1"; __preflight_render_settings "$2" >/dev/null 2>&1; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
-    _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" >"$tmp/path2" 2>/dev/null
+  if ! bash -c '. "$1"; __preflight_render_settings "$2" "$3" >/dev/null; _rc=$?; printf "%s" "$PREFLIGHT_RENDERED_CONFIG"; exit "$_rc"' \
+       _ "$PWD/scripts/settings-render.sh" "$tmp/cfg" "$tmp/repo" >"$tmp/path2" 2>"$tmp/err2"; then
+    echo "switching-providers render failed:" >&2; sed 's/^/    /' "$tmp/err2" >&2; rc=1
+  fi
   rendered2="$(cat "$tmp/path2")"
   rendered_files="$rendered_files $rendered2"
   python3 - "$rendered2" <<'PY' || rc=1
 import sys, tomllib
 d = tomllib.load(open(sys.argv[1], "rb"))
 # A bare model id is sent as written: the pin decides the transport, so the id needs no provider prefix.
-assert d["config"]["model"] == "their-model-id", d["config"]
-assert d["config"]["fallback_models"] == ["their-small"], d["config"]
+assert d["config"]["model"] == "switch-model-1", d["config"]
+assert d["config"]["fallback_models"] == ["switch-model-2"], d["config"]
 assert d["openai"]["api_base"] == "https://llm.internal.corp/v1", d["openai"]
 assert d["openai"]["key"] == "key-two", d["openai"]
 assert d["litellm"]["custom_llm_provider"] == "openai", d["litellm"]

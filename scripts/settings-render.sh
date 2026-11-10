@@ -214,7 +214,7 @@ __preflight_render_settings() {
     printf '%s: add an assignment naming a [profiles.<name>] table from %s:\n' \
       "$__preflight_caller_name" "$cfgdir/providers.toml" >&2
     printf '%s:   [%s]\n' "$__preflight_caller_name" "selection" >&2
-    printf '%s:   main = "mine"          # the name of a [profiles.<name>] table in providers.toml\n' \
+    printf '%s:   main = "main-profile"          # the name of a [profiles.<name>] table in providers.toml\n' \
       "$__preflight_caller_name" >&2
     printf '%s: then re-run:  %s review\n' "$__preflight_caller_name" "$__preflight_caller_name" >&2
     printf '%s: refusing to review on pr-agent default settings\n' "$__preflight_caller_name" >&2
@@ -333,7 +333,7 @@ __preflight_render_settings() {
   # subdirectory finds the same file the commit does. Empty outside a repository, where there is nothing
   # to override.
   if ! python3 - "$settings" "$cfgdir/providers.toml" "$out" "$repo_override" "$__preflight_caller_name" <<'PY'
-import copy, json, os, re, sys
+import copy, json, os, re, subprocess, sys
 
 # The command that sourced this file (`preflight-code` or `preflight-pr`); every message below names
 # it, because a refusal has to identify the command the operator actually ran.
@@ -450,6 +450,7 @@ SELECTION_KEYS = ("main", "fallback")
 # rendered config, because writing it there would look configured and do nothing. It lives in the same
 # file so a repository has ONE file for everything preflight can be told.
 GATE_SECTION = "gate"
+PREFLIGHT_SECTION = "preflight"
 # Written by the render from the assignment, so a value here would be a second answer.
 ASSIGNMENT_KEYS = ("model", "fallback_models")
 
@@ -559,7 +560,7 @@ if repo_path and os.path.exists(repo_path):
     # its key - is chosen, so a committed file that assigned one would decide which credential a review
     # spends on every machine that clones the repository. It is the same hazard as naming a provider
     # directly, one indirection away.
-    for _stray in ("providers", "profiles", SELECTION_SECTION, ENVELOPE_SECTION):
+    for _stray in ("providers", "profiles", SELECTION_SECTION, ENVELOPE_SECTION, PREFLIGHT_SECTION):
         if _stray in repo_data:
             refuse(f".preflight.toml defines [{_stray}], which a repository cannot override",
                    "the profiles, the providers, the assignment and the envelope hosts decide a model, a",
@@ -648,18 +649,18 @@ for key in DERIVED_CONFIG_KEYS:
 main_name = root_config.get("main", "")
 if not isinstance(main_name, str):
     refuse("settings.toml [selection] main must be a profile name in quotes",
-           fix=['write it as a quoted string, e.g.  main = "mine"  (the name of a [profiles.<name>] table)',
+           fix=['write it as a quoted string, e.g.  main = "main-profile"  (the name of a [profiles.<name>] table)',
                 f"then re-run:  {PROG} review"])
 main_name = main_name.strip()
 
 fallback_value = root_config.get("fallback", [])
 if isinstance(fallback_value, str):
     refuse("settings.toml [selection] fallback must be a list of profile names, in the order pr-agent should try them",
-           fix=['write it as a list, e.g.  fallback = ["mine-backup"]  - or delete the line for no fallback',
+           fix=['write it as a list, e.g.  fallback = ["fallback-profile-1", "fallback-profile-2"]  - or delete the line for no fallback',
                 f"then re-run:  {PROG} review"])
 if not isinstance(fallback_value, list) or not all(isinstance(n, str) for n in fallback_value):
     refuse("settings.toml [selection] fallback must be a list of profile names",
-           fix=['write it as a list of quoted names, e.g.  fallback = ["mine-backup"]',
+           fix=['write it as a list of quoted names, e.g.  fallback = ["fallback-profile-1", "fallback-profile-2"]',
                 f"then re-run:  {PROG} review"])
 fallback_names = [n.strip() for n in fallback_value if n.strip()]
 
@@ -688,7 +689,11 @@ if os.path.exists(providers_path):
                    fix=[f"make it readable by you alone:  chmod 600 {shq(providers_path)}",
                         f"then re-run:  {PROG} review"])
     providers = load(providers_path, "providers.toml")
-    for key in sorted(set(providers) - {"providers", "profiles"}):
+    if "preflight" in providers:
+        refuse("providers.toml defines [preflight], which belongs in settings.toml",
+               "[preflight] is consumed by the renderer from settings.toml only",
+               fix=["move [preflight] to settings.toml, then re-run:  " + PROG + " review"])
+    for key in sorted(set(providers) - {"providers", "profiles", "preflight"}):
         refuse(f"providers.toml has unknown top-level key '{key}'; expected 'providers' or 'profiles'",
                fix=[f"move the tables under [providers.<name>] or [profiles.<name>], or delete '{key}',",
                     f"then re-run:  {PROG} review"])
@@ -1024,6 +1029,8 @@ rendered.pop(SELECTION_SECTION, None)
 # The gate's policy is preflight's, not pr-agent's: leaving it in would be a section pr-agent reads nothing
 # from, which is the "looks configured, does nothing" shape refused everywhere else in this file.
 rendered.pop(GATE_SECTION, None)
+# Preflight's own settings (e.g. session_id_name) are consumed by the renderer; never pass them to pr-agent.
+rendered.pop(PREFLIGHT_SECTION, None)
 
 config = rendered.setdefault("config", {})
 if not isinstance(config, dict):
@@ -1217,6 +1224,246 @@ if entry["envelope"]:
                fix=[f'write the endpoint with its host, e.g.  api_base = "https://<your-endpoint>/v1",',
                     f"then re-run:  {PROG} review"])
     rendered[ENVELOPE_SECTION] = {"key": entry["envelope"], "hosts": [envelope_host]}
+
+# Derive a stable LiteLLM session id from the reviewed repository and its HEAD, so local reviews
+# group their requests even without a PR URL. Injected as an extra header; an explicit value from
+# config wins, so a run that sets its own session-id is not overwritten.
+if not repo_path:
+    _session_repo = ""
+elif os.path.isdir(repo_path):
+    _session_repo = repo_path
+else:
+    _session_repo = os.path.dirname(repo_path)
+
+# Validate extra_headers regardless of whether a session id is derived, so a malformed
+# value is refused rather than silently passed through.
+# Runs after the provider's [litellm] merge above, so provider-level extra_headers is
+# already present in rendered["litellm"] and is validated here too.
+_lt_check = rendered.get("litellm")
+if _lt_check is not None and not isinstance(_lt_check, dict):
+    refuse("settings.toml [litellm] is not a table",
+           fix=["write it as a [litellm] table of settings, or delete it, then re-run:  " + PROG + " review"])
+if isinstance(_lt_check, dict) and "extra_headers" in _lt_check:
+    _eh = _lt_check.get("extra_headers")
+    _eh_ok = isinstance(_eh, dict)
+    if isinstance(_eh, str):
+        try:
+            _eh_ok = isinstance(json.loads(_eh), dict)
+        except Exception:
+            _eh_ok = False
+    if not _eh_ok:
+        refuse("settings.toml [litellm] 'extra_headers' is not a JSON object",
+               "it must be a JSON object (or a TOML table) mapping header names to values",
+               fix=["write it as a JSON object, e.g.  extra_headers = '{\"session-id\": \"value\"}',",
+                    "or as a TOML table, then re-run:  " + PROG + " review"])
+    # Reject non-string keys and case-insensitive duplicates, which fold ambiguously downstream.
+    _parsed_for_dup = None
+    if isinstance(_eh, dict):
+        _parsed_for_dup = _eh
+    elif isinstance(_eh, str):
+        try:
+            _parsed_for_dup = json.loads(_eh)
+        except Exception:
+            _parsed_for_dup = None
+    if isinstance(_parsed_for_dup, dict):
+        _seen = set()
+        for _k, _v in _parsed_for_dup.items():
+            if not isinstance(_k, str):
+                refuse("settings.toml [litellm] 'extra_headers' keys must be strings",
+                       fix=["use string header names, then re-run:  " + PROG + " review"])
+            if _k.lower() in _seen:
+                refuse("settings.toml [litellm] 'extra_headers' has duplicate header names differing only in case",
+                       fix=["use a single casing for each header name, then re-run:  " + PROG + " review"])
+            _seen.add(_k.lower())
+            # An HTTP header value is a string. A non-string would survive json.dumps and then fail at
+            # request time inside httpx - a traceback from the transport, not a refusal naming this file.
+            if not isinstance(_v, str):
+                refuse("settings.toml [litellm] 'extra_headers' value for '%s' is not a string" % _k,
+                       "an HTTP header value is a string; a number, boolean or TOML date cannot be sent",
+                       fix=['quote it, e.g.  "%s" = "..."' % _k,
+                            "then re-run:  " + PROG + " review"])
+# Branch, not HEAD: a session id that moved on every commit would split one piece of work
+# across several groups, defeating the cache-warming the header exists for. A detached HEAD
+# has no branch name to key on, so fall back to the commit hash there.
+# Runs after the provider's [litellm] merge above, so a provider-level extra_headers is
+# already in _litellm and is merged rather than clobbered.
+# Validate session_id_name whenever it is present, regardless of whether a session id
+# can be derived (the render may run outside a repository).
+_preflight_sec = data.get(PREFLIGHT_SECTION)
+if _preflight_sec is not None and not isinstance(_preflight_sec, dict):
+    refuse("settings.toml [preflight] must be a table",
+           "it is preflight's own section and holds only 'session_id_name'",
+           fix=["write it as  [preflight]  then  session_id_name = \"session-id\",",
+                "or delete the section, then re-run:  " + PROG + " review"])
+if isinstance(_preflight_sec, dict):
+    for _unknown in sorted(set(_preflight_sec) - {"session_id_name"}):
+        refuse("settings.toml [preflight] sets '%s', which preflight does not recognize" % _unknown,
+               "the only key in [preflight] is 'session_id_name'; an unknown one would be stripped",
+               "and silently ignored, which is the 'looks configured, does nothing' shape this renderer refuses",
+               fix=["delete '%s' from settings.toml [preflight], then re-run:  " % _unknown + PROG + " review"])
+# Defaults to `session-id`, the generic ingress name a gateway translates per backend. It is a DEFAULT, not
+# a portable concept: point it at whatever header YOUR gateway reads, and set it to "" to disable. Shipping
+# it on means a gateway that reads that name groups from the first run with nothing to configure.
+_header_name = "session-id"
+if isinstance(_preflight_sec, dict) and "session_id_name" in _preflight_sec:
+    _configured = _preflight_sec.get("session_id_name")
+    if not isinstance(_configured, str):
+        refuse("settings.toml [preflight] 'session_id_name' must be a string",
+               "it names the HTTP header carrying the derived session id, or \"\" to disable it",
+               "a non-string value cannot be used as a header name and would be ignored",
+               fix=["write it as a quoted string, e.g.  session_id_name = \"session-id\",",
+                    "or  session_id_name = \"\"  to disable the injection, then re-run:  " + PROG + " review"])
+    # A whitespace-only value is refused rather than stripped to "": it reads as configured and would
+    # silently turn the injection off, which is the "looks configured, does nothing" shape refused
+    # everywhere else here. An empty string stays the documented way to disable it.
+    if _configured and not _configured.strip():
+        refuse("settings.toml [preflight] 'session_id_name' is whitespace only",
+               "a blank header name cannot be sent, and silently reading it as disabled would look configured",
+               fix=['use a header name, e.g.  session_id_name = "session-id",',
+                    'or  session_id_name = ""  to disable the injection, then re-run:  ' + PROG + " review"])
+    _header_name = _configured.strip()
+    if _header_name and not re.fullmatch(r"[A-Za-z0-9-]+", _header_name):
+        refuse("settings.toml [preflight] 'session_id_name' is not a valid HTTP header name",
+               "header names are tokens of letters, digits and hyphens",
+               fix=["use a simple header name, e.g.  session_id_name = \"session-id\",",
+                    "or  session_id_name = \"\"  to disable the injection, then re-run:  " + PROG + " review"])
+
+_session_branch = ""
+if _header_name and _session_repo:
+    try:
+        _session_branch = subprocess.check_output(
+            ["git", "-C", _session_repo, "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).decode().strip()
+    except Exception:
+        _session_branch = ""
+    if not _session_branch or _session_branch == "HEAD":
+        try:
+            _session_branch = subprocess.check_output(
+                ["git", "-C", _session_repo, "rev-parse", "HEAD"],
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            ).decode().strip()
+        except Exception:
+            _session_branch = ""
+        if _session_branch:
+            # A detached HEAD has no branch to key on, so the commit is the honest key - but it means the
+            # group restarts at every commit, which is the split this header exists to avoid. Announced
+            # rather than silent, and not fatal: a detached checkout is a legitimate place to review.
+            sys.stderr.write(
+                "%s: HEAD is detached, so the session id is keyed on the commit (%s); a new group starts at "
+                "the next commit. Check out the branch to group the whole piece of work.\n"
+                % (PROG, _session_branch[:12])
+            )
+
+if _session_repo and _header_name and not _session_branch:
+    sys.stderr.write(
+        "%s: could not derive a session id from %s (git unavailable or not a repository); "
+        "no session-id header will be injected\n" % (PROG, _session_repo)
+    )
+
+if _session_branch and _header_name:
+    # Prefer the origin URL over the on-disk path, so the same work groups together
+    # even when cloned to different locations. Fall back to the absolute path when
+    # there is no origin (a local-only repository).
+    try:
+        _session_origin = subprocess.check_output(
+            ["git", "-C", _session_repo, "remote", "get-url", "origin"],
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).decode().strip()
+    except Exception:
+        _session_origin = ""
+    # Strip embedded credentials, so two clones of the same work with different
+    # embedded tokens do not derive different session ids.
+    if "://" in _session_origin:
+        _prefix, _rest = _session_origin.split("://", 1)
+        _path_start = _rest.find("/")
+        if _path_start == -1:
+            _host_part, _tail = _rest, ""
+        else:
+            _host_part, _tail = _rest[:_path_start], _rest[_path_start:]
+        if "@" in _host_part:
+            _host_part = _host_part.rsplit("@", 1)[-1]
+        _session_origin = _prefix + "://" + _host_part + _tail
+    elif "@" in _session_origin:
+        # A scheme-less remote is scp-like ONLY when it carries a colon (`user@host:path`); git reads
+        # anything else as a local path, so an `@` in `work@home/repo` is part of a DIRECTORY name and
+        # stripping it would key two clones of one repository differently. Verified against `git
+        # ls-remote`: `work@home/repo` is a path, `git@github.com:o/r.git` is an SSH remote.
+        _before_colon, _colon, _after_colon = _session_origin.partition(":")
+        _local_user, _at, _local_host = _before_colon.rpartition("@")
+        if _colon and _at and "/" not in _local_user and "/" not in _local_host:
+            _session_origin = _local_host + ":" + _after_colon
+    if _session_origin:
+        _session_key = _session_origin
+    else:
+        # No origin remote: key on the root commit (stable across clones of the same
+        # repository) rather than the on-disk path, which is neither stable nor leak-free.
+        try:
+            # `sort` before taking one: a repository with several root commits (a subtree merge, an
+            # imported root) lists them in commit-date order, so the first entry moves when history is
+            # rewritten and every past review silently regroups. Sorted, the choice is a function of the
+            # hashes alone - still arbitrary, but stable.
+            _session_key = sorted(
+                subprocess.check_output(
+                    ["git", "-C", _session_repo, "rev-list", "--max-parents=0", "HEAD"],
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                ).decode().split()
+            )[0]
+        except Exception:
+            _session_key = os.path.abspath(_session_repo)
+    _session_raw = _session_key + ":" + _session_branch
+    _session_id = str(__import__("uuid").uuid5(__import__("uuid").NAMESPACE_URL, _session_raw))
+    _litellm = rendered.setdefault("litellm", {})
+    if not isinstance(_litellm, dict):
+        refuse("settings.toml [litellm] is not a table",
+               fix=["write it as a [litellm] table of settings, or delete it, then re-run:  " + PROG + " review"])
+    # extra_headers validity is already enforced by the _lt_check block above, so here we only merge.
+    _existing = _litellm.get("extra_headers")
+    _headers = {}
+    if isinstance(_existing, dict):
+        _headers = dict(_existing)
+    elif isinstance(_existing, str):
+        # Parse WITHOUT refusing inside the `try`: refuse() exits with SystemExit (a BaseException, so the
+        # handler below cannot catch it), but a call that raises inside a try whose handler calls the same
+        # function reads as a double refusal waiting for one edit. Decide, then refuse.
+        try:
+            _parsed = json.loads(_existing)
+        except (ValueError, TypeError):
+            _parsed = None
+        if isinstance(_parsed, dict):
+            _headers = _parsed
+        else:
+            # Unreachable while the validator above runs first, and kept as the fail-closed backstop for
+            # exactly that reason: this block must never fall through with `{}`, which would inject the
+            # derived id over a value the operator wrote. The gate's array case asserts the BEHAVIOUR
+            # (an array is refused by name); it is the validator above that it exercises.
+            refuse("settings.toml [litellm] 'extra_headers' is not a JSON object",
+                   fix=["write it as a JSON object, then re-run:  " + PROG + " review"])
+    if not any(isinstance(_k, str) and _k.lower() == _header_name.lower() for _k in _headers):
+        _headers[_header_name] = _session_id
+    # Always a JSON string: pr-agent parses LITELLM.EXTRA_HEADERS with json.loads,
+    # so a TOML table here would raise at startup.
+    try:
+        _litellm["extra_headers"] = json.dumps(_headers)
+    except (TypeError, ValueError):
+        refuse("settings.toml [litellm] 'extra_headers' cannot be written as JSON",
+               "every header name and value must be a plain string",
+               fix=["quote every header value, then re-run:  " + PROG + " review"])
+
+# Normalize extra_headers to a JSON string regardless of whether an id was injected:
+# pr-agent parses LITELLM.EXTRA_HEADERS with json.loads, so a TOML table there would raise at startup.
+_lt = rendered.get("litellm")
+if isinstance(_lt, dict) and isinstance(_lt.get("extra_headers"), dict):
+    try:
+        _lt["extra_headers"] = json.dumps(_lt["extra_headers"])
+    except (TypeError, ValueError):
+        refuse("settings.toml [litellm] 'extra_headers' cannot be written as JSON",
+               "every header name and value must be a plain string",
+               fix=["quote every header value, then re-run:  " + PROG + " review"])
 
 lines = ["# Generated by preflight from settings.toml and providers.toml. Do not edit: it is rewritten before",
          f"# every run. Edit those two files instead. Generated {__import__('time').strftime('%Y-%m-%dT%H:%M:%SZ', __import__('time').gmtime())}.", ""]

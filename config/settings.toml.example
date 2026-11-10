@@ -30,10 +30,23 @@
 # Profile names are QUOTED wherever they appear, here and in providers.toml: a bare TOML key cannot contain
 # a dot. `[profiles.v4.1-flash]` would split into a table `v4` with a child `1-flash`.
 
+# ---------------------------------------------------------------------------- [preflight]
+# Preflight's own knobs, consumed by the renderer rather than by pr-agent.
+
+[preflight]
+# Header name for a session id preflight derives from the reviewed repository's origin URL and branch, and
+# sends on every request so a GATEWAY can group one branch's work.
+#
+# The DEFAULT is `session-id`: a gateway that reads that generic ingress name groups from the first run with
+# nothing to configure (underclass reads it and translates per backend - `x-opencode-session` for OpenCode
+# Go). It is a default, not a portable concept: CHANGE IT to whatever header YOUR gateway reads, and set it
+# to "" to disable the injection. Against a plain OpenAI-compatible endpoint the header is simply ignored.
+session_id_name = "session-id"
+
 [selection]
 # The name of a [profiles.<name>] table in providers.toml - rename this and that table together.
-main = "mine"
-# fallback = ["mine-backup"]
+main = "main-profile"
+# fallback = ["fallback-profile-1", "fallback-profile-2"]
 
 # ---------------------------------------------------------------------------- [config]
 
@@ -59,6 +72,13 @@ output_run_details = true
 # output_run_cost = false
 # Languages to skip when looking for something to review.
 # ignore_language_framework = []
+
+# ---------------------------------------------------------------------------- [litellm]
+
+[litellm]
+# Group every request for the same PR into one LiteLLM session (hosted PRs only; needs a PR URL).
+# add_session_id_to_requests = true
+
 
 # ---------------------------------------------------------------------------- [pr_reviewer]
 # The review's knobs. pr-agent applies these to the WHOLE run - one num_max_findings, one heading - so they

@@ -10,13 +10,13 @@ the `[providers.<name>]` entry the assigned profile names, as `key = "..."` (the
 `api_key`**):
 
 ```toml
-[providers.mine]
+[providers.provider-1]
 api_base = "https://api.example.com/v1"   # your endpoint
 key      = "..."                          # this file is chmod 600
 
-[profiles.mine]
-provider = "mine"                         # and settings.toml must name this profile
-model    = "your-model-id"
+[profiles.main-profile]
+provider = "provider-1"                         # and settings.toml must name this profile
+model    = "model-id-1"
 ```
 
 Then check that `settings.toml`'s `[selection] main` names a profile that actually exists <!-- doc-path-ok: [selection] is preflight's own table, not a pr-agent section --> — `preflight-code`
@@ -402,7 +402,7 @@ that governs the credential.
   every `reasoning_content` delta and the whole call on a mid-stream cut. Name the wrapping key instead:
 
   ```toml
-  [providers.mine]
+  [providers.provider-1]
   envelope = "data"
   ```
 

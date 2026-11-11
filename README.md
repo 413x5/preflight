@@ -30,7 +30,7 @@ one. pr-agent's own log records are saved there as `run.log`.
 - [`docs/architecture.md`](docs/architecture.md) — how it works and why; [troubleshooting](docs/runbooks/troubleshooting.md) for a symptom and its fix.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, and how to propose a change.
 - [`AGENTS.md`](AGENTS.md) — the operational rules for whoever changes this repo.
-- [`CHANGELOG.md`](CHANGELOG.md) — what changed, per version; [`docs/roadmap.md`](docs/roadmap.md) — planned work.
+- [`CHANGELOG.md`](CHANGELOG.md) — what changed, per version.
 - [`SECURITY.md`](SECURITY.md) — the trust model, and how to report privately. [`LICENSE`](LICENSE) — MIT.
 
 ## Requirements

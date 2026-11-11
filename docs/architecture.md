@@ -504,8 +504,8 @@ measurements and the symptom are in `docs/runbooks/troubleshooting.md`.
 
 There is deliberately **no sampling pin**, and it is inert anyway: `config.temperature` (upstream default
 0.2) and `config.seed` (default -1, i.e. unset) are left alone, and the endpoint measured here ignored
-`seed` even when set. Reviews therefore sample freely - the stated limit of `new=N/M` - and
-`docs/roadmap.md` records the probes.
+`seed` even when set. Reviews therefore sample freely - the stated limit of `new=N/M`. The probes that
+established this are in `CHANGELOG.md`.
 
 ## The gate
 
@@ -624,7 +624,7 @@ and is architecturally dead here: the plain-diff provider implements neither `ge
 `get_repo_context_ref`, so `build_repo_context` returns empty for a `--stdin` run. The `[artifacts]`
 channel does reach `pr_reviewer`, so it carries the file. It composes into the same prompt slot
 `extra_instructions` occupies - which is why `[pr_reviewer]` still does not set that key (see
-docs/roadmap.md).
+`CHANGELOG.md`).
 
 **Everything for it must come through the environment, not `config/settings.toml.example`.** pr-agent calls
 `inject_artifact_context()` from `cli.py` *before* `apply_repo_settings()` loads `--extra_config_url`,
@@ -693,8 +693,7 @@ other, and fixing only one leaves the loop slow.
 **The model returns few findings.** `pr_reviewer.num_max_findings` caps how many are returned (upstream
 default 3). `config/settings.toml.example` raises it. It does not set `pr_reviewer.extra_instructions`, so pr-agent's
 reviewer prompt is sent unmodified - including its own guidance to prefer not reporting over guessing, and
-its schema's "an empty list is acceptable". See `CHANGELOG.md` for why that text is gone and `docs/roadmap.md`
-for the open experiment.
+its schema's "an empty list is acceptable". See `CHANGELOG.md` for why that text is gone.
 
 That cap is a prompt instruction, not a hard truncation: pr-agent does not slice the merged list (checked
 against its source - the value feeds the prompt and one resolution heuristic only). It is still a bound,

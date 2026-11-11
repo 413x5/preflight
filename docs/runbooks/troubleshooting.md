@@ -541,12 +541,17 @@ git add .githooks/post-commit && git commit -m "chore(hooks): sync post-commit"
 The file is 23 lines after this and never changes again - the logic lives in the installed helper, which
 `install.sh` updates.
 
-**Tell whether a repository needs this** by looking for the comparison in its committed copy. The fixed
-version mentions the tree; the old one does not:
+**Tell whether a repository needs this** by looking at the shape of its committed copy. The tree
+comparison is NOT the discriminator: it lives in the installed helper now, so the shim has none either.
 
 ```sh
-grep -c 'HEAD^{tree}' .githooks/post-commit    # 0 means the stale advisory
+wc -l < .githooks/post-commit                        # 23 = synced, 57 = stale
+grep -c 'preflight-advisory' .githooks/post-commit   # 2 = synced, 0 = stale
 ```
+
+For reference, the three shapes this file has had: **57 lines** with no tree comparison (pre-fix, what an
+un-upgraded repository has), **86 lines** with the comparison (fixed, but still a copy that needed
+propagating), and **23 lines** execing `preflight-advisory` (the shim).
 
 **A repository whose `core.hooksPath` is unset is unaffected** - no hook runs there at all, so there is
 nothing to sync. That setting is clone-local git config and does not travel with the repository.

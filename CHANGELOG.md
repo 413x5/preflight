@@ -38,7 +38,9 @@ _(nothing yet)_
   git add .githooks/post-commit && git commit -m "chore(hooks): sync post-commit"
   ```
 
-  `grep -c 'HEAD^{tree}' .githooks/post-commit` returns 0 for the stale advisory and 2 for the shim.
+  `wc -l < .githooks/post-commit` gives 23 for the shim and 57 for the stale advisory, and
+  `grep -c 'preflight-advisory' .githooks/post-commit` gives 2 and 0. The tree comparison is not the
+  discriminator - it lives in the installed helper, so the shim has none either.
   A repository whose `core.hooksPath` is unset is unaffected - no hook runs there at all. The symptom and
   the fix are in `docs/runbooks/troubleshooting.md`.
 

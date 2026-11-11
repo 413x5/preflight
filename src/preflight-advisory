@@ -1,0 +1,91 @@
+#!/bin/sh
+# preflight-advisory — the post-commit half: say when a commit was NOT covered by the review hook.
+#
+# A post-commit hook runs after the commit exists, so it cannot block; it only reports. Its single job is
+# to speak when enforcement silently did NOT apply, and since it cannot block its failure mode is silence -
+# so it errs toward saying too much rather than too little.
+#
+# THIS FILE IS THE LOGIC; the committed .githooks/post-commit is a shim that execs it. The two hooks were
+# deliberately made the same shape: a fix that lives in a committed file has to be propagated to every
+# repository that committed one, and forgetting was a real defect twice - once shipping a stale copy in
+# this repo, once leaving four consumers on the old logic while every test passed against the new. With
+# the logic here, `install.sh` updates it once and every repository picks it up with no commit at all.
+#
+# PREFLIGHT_SKIP=1 silences this. An ABSENT sidecar is silent too: no review has run, and pre-commit would
+# have refused first (the one exception is a repo's first commit, allowed unenforced by design).
+# A sidecar that is PRESENT but unreadable must warn - it is indistinguishable from a verified one.
+set -u
+
+[ "${PREFLIGHT_SKIP:-0}" = "1" ] && exit 0
+
+dir="${PREFLIGHT_DIR:-.preflight}"
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 0
+
+meta="$dir/review.meta.json"
+[ -f "$meta" ] || exit 0
+
+warn_unreadable() {
+  printf 'preflight-code: advisory: cannot read %s (%s), so this commit was NOT verified by the hook.\n' "$meta" "$1" >&2
+  printf "preflight-code: run 'preflight-code review' with the default scope to make the hook enforce commits.\n" >&2
+  exit 0
+}
+
+command -v python3 >/dev/null 2>&1 || warn_unreadable 'python3 not found'
+
+# One read, three fields: `scope` decides whether a tree was recorded at all, `reviewed_tree` decides
+# whether THIS commit is the one it covered, and `verdict` decides whether the run recorded an accepted
+# outcome that has no tree to compare. Tab-separated because any of them can be empty.
+fields=$(python3 - "$meta" <<'PY' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+    gate = d.get('gate') if isinstance(d.get('gate'), dict) else {}
+    print('%s\t%s\t%s' % (d.get('scope') or '', d.get('reviewed_tree') or '', gate.get('verdict') or ''))
+except Exception:
+    print('\t\t')
+PY
+)
+
+scope=${fields%%	*}
+rest=${fields#*	}
+pf_tree=${rest%%	*}
+pf_verdict=${rest#*	}
+
+# An empty scope means this is not the sidecar it claims to be (malformed JSON, or no `scope` key).
+# Unreadable for this hook's purposes, so it is reported rather than passed over.
+[ -n "$scope" ] || warn_unreadable 'malformed sidecar or missing scope'
+
+case "$scope" in
+  commit|worktree) ;;
+  *)
+    printf 'preflight-code: advisory: the last review used scope=%s, so this commit was NOT verified by the hook.\n' "$scope" >&2
+    printf "preflight-code: run 'preflight-code review' with the default scope to make the hook enforce commits.\n" >&2
+    exit 0
+    ;;
+esac
+
+# A run that found nothing to review recorded that as the outcome, because every changed file was filtered
+# out (a lockfile, a minified asset, an ignore rule). There is no content to compare against, so the note
+# is the honest report rather than a comparison. Said out loud, so it does not read as a clean review.
+if [ "$pf_verdict" = 'nothing_to_review' ]; then
+  printf 'preflight-code: advisory: this commit had nothing to review - every changed file was filtered out (a lockfile, a minified asset or an ignore rule).\n' >&2
+  exit 0
+fi
+
+# The scope says a tree SHOULD be here. A missing one cannot vouch for this commit, so it warns.
+[ -n "$pf_tree" ] || warn_unreadable 'the recorded review names no reviewed tree'
+
+# The comparison that makes the advisory mean something. `git rev-parse HEAD^{tree}` is the tree the
+# commit just made - unavailable only if the commit itself failed, in which case there is nothing to
+# report and silence is correct.
+head_tree=$(git rev-parse 'HEAD^{tree}' 2>/dev/null) || exit 0
+
+[ "$pf_tree" = "$head_tree" ] && exit 0
+
+printf 'preflight-code: advisory: this commit was NOT the tree the last review covered.\n' >&2
+printf 'preflight-code:   reviewed %s\n' "$pf_tree" >&2
+printf 'preflight-code:   committed %s\n' "$head_tree" >&2
+printf "preflight-code: run 'preflight-code review' again to cover what was actually committed.\n" >&2
+exit 0

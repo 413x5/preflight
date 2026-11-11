@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Changed
+
+- **`post-commit` is a shim, like `pre-commit`, so a fix reaches every repository through one install.**
+  The two hooks had different shapes: `pre-commit` resolves the installed `preflight-hook` and execs it,
+  while `post-commit` carried its own scope check, sidecar read and tree comparison inside the committed
+  file. That made it a COPY, so every fix had to be propagated to every repository that committed one - and
+  forgetting was a real defect twice: a stale `.githooks/post-commit` shipped in this repository, and four
+  consumer repositories stayed on the old advisory while every test passed against the new.
+
+  The logic now lives in `preflight-advisory`, installed beside `preflight-hook`, and the committed
+  `.githooks/post-commit` is a 23-line stub that execs it. A fix ships once. The trade-off - a repository
+  needs the bundle installed for the advisory - already applied to `pre-commit`, which fails closed
+  without the helper, so the asymmetry bought nothing. A missing advisory helper is silent rather than
+  fatal, because `pre-commit` cannot have let the commit through in that state.
 
 ## [0.12.2] - 2026-11-11
 

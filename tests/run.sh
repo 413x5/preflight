@@ -550,6 +550,11 @@ case_post_commit_advisory() {
   install -m 0755 "$repo_root/src/githooks/post-commit" "$d/.githooks/post-commit"
   local post="$d/.githooks/post-commit" meta="$d/.preflight/review.meta.json"
 
+  # post-commit is now a SHIM that execs the installed helper, exactly as pre-commit does. The logic under
+  # test is preflight-advisory, so the shim is pointed at the checkout's copy - testing the shim alone would
+  # assert nothing about the behaviour it delegates.
+  export PREFLIGHT_ADVISORY="$repo_root/src/preflight-advisory"
+
   run_post() { ( cd "$d" && sh "$post" ) 2>&1; }
   set_meta() { mkdir -p "$d/.preflight"; printf '%s\n' "$1" > "$meta"; }
 

@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Fixed
+
+- **The `post-commit` advisory no longer passes an unreviewed commit in silence.** It decided whether a
+  commit was covered by reading `scope` from the review sidecar and nothing else, so once ANY default-scope
+  review had run, every later commit looked covered - including one made with `--no-verify`, the exact
+  bypass the advisory exists to report. It now compares the sidecar's `reviewed_tree` against the tree the
+  commit actually made (`git rev-parse HEAD^{tree}`): equal is silent, different warns with both hashes,
+  and a `commit`/`worktree` sidecar naming no tree warns rather than passing quietly. `REQ-HOOK-27` had
+  been asserting the old behaviour - its case used a bogus tree and demanded silence - so it now separates
+  the three states, and reverting the fix turns it red. `REQ-HOOK-36` now also compares the committed
+  `.githooks/` copy against `src/githooks/` by content: fixing one and not the other leaves this
+  repository running the old logic while every test passes against the new, which is exactly what
+  happened on the first attempt at this fix.
+
+### Added
+
+- **This repository enforces its own gate.** `.githooks/` is committed and `core.hooksPath` points at it
+  (relative, so it holds in every worktree), so a commit carrying content the last review did not cover is
+  refused by `pre-commit`. The hook never runs a review - it verifies that what is being committed is what
+  was reviewed - so the cost is a review you already ran, not a review per commit.
 
 ## [0.12.0] - 2026-11-11
 

@@ -562,21 +562,41 @@ case_post_commit_advisory() {
   [ -z "$out" ] || problems="$problems
         | absent sidecar should be silent, got: $out"
 
-  # A worktree-scope review is an enforced case, so nothing to say.
-  set_meta '{"scope": "worktree", "reviewed_tree": "abc"}'
+  # A worktree-scope review is an enforced case, so nothing to say - provided its tree is this commit's.
+  # Filled in after `d` has its first commit, below; the placeholder keeps the ordering obvious.
+  local wt_tree; wt_tree="$( cd "$d" && git rev-parse 'HEAD^{tree}' 2>/dev/null || echo '' )"
+  set_meta "{\"scope\": \"worktree\", \"reviewed_tree\": \"$wt_tree\"}"
   out="$(run_post)"
   [ -z "$out" ] || problems="$problems
-        | worktree scope should be silent, got: $out"
+        | worktree scope with a matching tree should be silent, got: $out"
 
   # `commit` is the DEFAULT scope and is enforced - src/preflight-hook accepts `commit|worktree`.
-  # This assertion is the regression guard for an advisory that warned on every default-scope commit:
-  # it only recognised `worktree`, which was correct before `commit` became the default and stale
-  # after, and the message it printed ("run 'preflight-code review' with the default worktree scope") named
-  # a scope that is no longer the default.
-  set_meta '{"scope": "commit", "reviewed_tree": "abc"}'
+  # This half is the regression guard for an advisory that warned on every default-scope commit: it only
+  # recognised `worktree`, which was correct before `commit` became the default and stale after.
+  #
+  # SCOPE ALONE IS NOT PROOF. The sidecar's tree is compared with the tree THIS commit made, so a review
+  # from an earlier commit does not silently vouch for a later unreviewed one - which is what used to
+  # happen, and what let `--no-verify` commits pass unmentioned. The three cases below are the states the
+  # comparison has to separate; a real tree is used for the last two so the comparison is meaningful.
+  local real_tree; real_tree="$( cd "$d" && git rev-parse 'HEAD^{tree}' )"
+
+  # (a) the sidecar names the tree this commit has: genuinely covered, silent.
+  set_meta "{\"scope\": \"commit\", \"reviewed_tree\": \"$real_tree\"}"
   out="$(run_post)"
   [ -z "$out" ] || problems="$problems
-        | commit scope is enforced and must be silent, got: $out"
+        | a sidecar whose tree matches the commit must be silent, got: $out"
+
+  # (b) the sidecar names a tree that is NOT this commit: unreviewed content, must warn.
+  set_meta '{"scope": "commit", "reviewed_tree": "0000000000000000000000000000000000000000"}'
+  out="$(run_post)"
+  printf '%s' "$out" | grep -q 'NOT the tree the last review covered' || problems="$problems
+        | a stale reviewed_tree must warn that this commit was not covered, got: $out"
+
+  # (c) scope=commit with no tree at all cannot vouch for anything - warn, do not pass quietly.
+  set_meta '{"scope": "commit", "reviewed_tree": ""}'
+  out="$(run_post)"
+  printf '%s' "$out" | grep -q 'names no reviewed tree' || problems="$problems
+        | a commit-scope sidecar with no tree must warn, got: $out"
 
   # A head-scope review covers already-committed content, so it cannot vouch for this commit.
   set_meta '{"scope": "head", "reviewed_tree": ""}'
@@ -2253,9 +2273,20 @@ case_bundle_hooks_executable() {
         | $f is committed with unexpected mode $mode" ;;
     esac
   done
+  # THE TWO COPIES MUST NOT DRIFT. `src/githooks/` is the source the installer ships and the suite
+  # exercises; `.githooks/` is the copy this repository runs. Fixing one and not the other leaves the repo
+  # enforcing the OLD logic while every test passes against the new - which happened, and was caught only
+  # by reviewing the change. Compared by content here, so the next divergence fails the suite.
+  for f in pre-commit post-commit; do
+    [ -f "$repo_root/.githooks/$f" ] || continue   # not every checkout commits .githooks/
+    if ! cmp -s "$repo_root/src/githooks/$f" "$repo_root/.githooks/$f"; then
+      problems="$problems
+        | .githooks/$f differs from src/githooks/$f, so this repository runs different hook logic than the suite tests"
+    fi
+  done
   if [ -n "$problems" ]; then
     bad "the shipped git hooks are executable, on disk and in the index" "REQ-HOOK-36" \
-        "src/githooks/* executable on disk and committed as 100755" "see below" "$problems
+        "src/githooks/* executable and committed as 100755, and any committed .githooks/ copy identical" "see below" "$problems
 "
   elif [ -n "$index_note" ]; then
     skip "the shipped git hooks are executable, on disk and in the index" "REQ-HOOK-36" \

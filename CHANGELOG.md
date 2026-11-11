@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+## [0.12.3] - 2026-11-11
+
 ### Changed
 
 - **`post-commit` is a shim, like `pre-commit`, so a fix reaches every repository through one install.**
@@ -21,6 +25,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needs the bundle installed for the advisory - already applied to `pre-commit`, which fails closed
   without the helper, so the asymmetry bought nothing. A missing advisory helper is silent rather than
   fatal, because `pre-commit` cannot have let the commit through in that state.
+
+  **Upgrading an existing repository.** One whose `.githooks/post-commit` was committed before this
+  release is still running the old advisory - it decides coverage by the sidecar's `scope` alone, so it
+  stays silent on a `--no-verify` commit its sidecar does not cover. The blocking half is unaffected:
+  `pre-commit` calls the installed `preflight-hook`, so unreviewed commits are still refused. To sync,
+  once per repository:
+
+  ```sh
+  ./install.sh
+  install -m 0755 ~/.config/preflight/githooks/post-commit .githooks/
+  git add .githooks/post-commit && git commit -m "chore(hooks): sync post-commit"
+  ```
+
+  `grep -c 'HEAD^{tree}' .githooks/post-commit` returns 0 for the stale advisory and 2 for the shim.
+  A repository whose `core.hooksPath` is unset is unaffected - no hook runs there at all. The symptom and
+  the fix are in `docs/runbooks/troubleshooting.md`.
 
 ## [0.12.2] - 2026-11-11
 
@@ -1222,7 +1242,8 @@ Initial release: a deployable, machine-local PR-Agent review setup for one OpenA
   initial commits plus the `v0.1.0` tag are **GPG-signed** (the signed history replaces earlier unsigned
   commits).
 
-[Unreleased]: https://github.com/413x5/preflight/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.12.3...HEAD
+[0.12.3]: https://github.com/413x5/preflight/releases/tag/v0.12.3
 [0.12.2]: https://github.com/413x5/preflight/releases/tag/v0.12.2
 [0.12.1]: https://github.com/413x5/preflight/releases/tag/v0.12.1
 [0.12.0]: https://github.com/413x5/preflight/releases/tag/v0.12.0

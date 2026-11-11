@@ -517,3 +517,36 @@ observed, or use a provider whose headers are specific. Do not read a high `new=
 findings are new; read it as a question about the header, and compare the finding **bodies** against the
 previous `review.md` yourself. The counter's wording and its stated limits are in
 [`../architecture.md`](../architecture.md).
+
+## A repository committed `.githooks/post-commit` before 0.12.3 and its advisory is silent
+
+`post-commit` used to carry its own logic inside the committed file, so a fix had to be copied into every
+repository that committed one. It is now a shim, like `pre-commit`: it resolves the installed
+`preflight-advisory` and execs it. A repository that committed the old 86-line file is still running the
+old advisory - the one that decided coverage by the sidecar's `scope` alone, so it stayed silent on a
+`--no-verify` commit that its sidecar did not cover.
+
+**Symptom.** `git commit --no-verify` in that repository reports nothing, when it should say
+`this commit was NOT the tree the last review covered`. The **blocking** half still works: `pre-commit`
+calls the installed `preflight-hook`, so unreviewed commits are still refused. Only the advisory is stale.
+
+**Fix, once per repository:**
+
+```sh
+./install.sh                                                   # installs preflight-advisory
+install -m 0755 ~/.config/preflight/githooks/post-commit .githooks/
+git add .githooks/post-commit && git commit -m "chore(hooks): sync post-commit"
+```
+
+The file is 23 lines after this and never changes again - the logic lives in the installed helper, which
+`install.sh` updates.
+
+**Tell whether a repository needs this** by looking for the comparison in its committed copy. The fixed
+version mentions the tree; the old one does not:
+
+```sh
+grep -c 'HEAD^{tree}' .githooks/post-commit    # 0 means the stale advisory
+```
+
+**A repository whose `core.hooksPath` is unset is unaffected** - no hook runs there at all, so there is
+nothing to sync. That setting is clone-local git config and does not travel with the repository.

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+## [0.12.1] - 2026-11-11
+
 ### Fixed
 
 - **The `post-commit` advisory no longer passes an unreviewed commit in silence.** It decided whether a
@@ -30,8 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hook in a `mktemp -d` repository still stands. The setting is clone-local, so a fresh clone has no hook
   until `git config core.hooksPath .githooks` is run in it. Where it is set, a machine without the bundle
   cannot commit until it installs one or bypasses with `git commit --no-verify` - and the `post-commit`
-  advisory now names such a commit rather than staying silent. The hook never runs a review - it verifies that what is being committed is what
-  was reviewed - so the cost is a review you already ran, not a review per commit.
+  advisory now names such a commit rather than staying silent. The hook never runs a review - it verifies
+  that what is being committed is what was reviewed - so the cost is a review already run, not one per
+  commit.
 
 ## [0.12.0] - 2026-11-11
 
@@ -1184,7 +1189,8 @@ Initial release: a deployable, machine-local PR-Agent review setup for one OpenA
   initial commits plus the `v0.1.0` tag are **GPG-signed** (the signed history replaces earlier unsigned
   commits).
 
-[Unreleased]: https://github.com/413x5/preflight/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/413x5/preflight/releases/tag/v0.12.1
 [0.12.0]: https://github.com/413x5/preflight/releases/tag/v0.12.0
 [0.11.0]: https://github.com/413x5/preflight/releases/tag/v0.11.0
 [0.10.1]: https://github.com/413x5/preflight/releases/tag/v0.10.1

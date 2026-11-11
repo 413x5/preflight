@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Every local review now carries a stable session id, so a gateway can group its spend.** pr-agent
+  0.50.0 added `litellm.add_session_id_to_requests`, which derives an `x-litellm-session-id` from a PR
+  URL - and plain-diff reviews have no PR URL, so that path returns an empty string and local reviews were
+  grouped not at all. The renderer now derives the id itself from the reviewed repository's **origin URL
+  and its branch** (the commit hash on a detached HEAD) as a deterministic uuid5, so it survives commits on
+  one piece of work, matches across two clones of the same work, and never splits a branch's reviews. It
+  reaches pr-agent as `[litellm] extra_headers`, the pass-through that already existed.
+
+  Preflight's own knob is a new `[preflight] session_id_name` in `settings.toml`, default `session-id`,
+  where an empty value disables the injection. The default is the generic ingress name a gateway
+  translates per backend (underclass maps it to `x-opencode-session` for OpenCode Go); it is a default to
+  change for your own gateway, not a name every endpoint honours. It is deliberately not settable from `.preflight.toml` -
+  a committed file naming the header could collide with an authentication header - and `[preflight]` is
+  stripped from the config pr-agent receives, so pr-agent never sees it. An explicit value already in
+  `extra_headers` wins, in either the TOML-table or JSON-string form, matched case-insensitively, so a run
+  that pins its own id is not overwritten; a malformed `extra_headers` (anything that is not a JSON object)
+  is refused by name rather than silently dropped. `extra_headers` is always emitted as a JSON string
+  because pr-agent parses `LITELLM.EXTRA_HEADERS` with `json.loads`.
+
+  ```toml
+  [preflight]
+  session_id_name = "session-id"   # your gateway's header; "" disables the injection
+  ```
+
 ### Changed
 
 - **`config.ai_timeout` is documented, and what it bounds is stated.** The bundle never set the key and

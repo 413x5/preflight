@@ -78,15 +78,15 @@ endpoint or a model:
 
 ```toml
 # ~/.config/preflight/providers.toml
-[providers.mine]
+[providers.provider-1]
 api_base = "https://api.example.com/v1"
 key      = "sk-..."                # this file is chmod 600
 # envelope = "data"                # a reply wrapped as {"data": {...}} - see below
 # stream = true                    # only if the non-streaming path does not answer at all
 
-[profiles.mine]
-provider = "mine"
-model    = "your-model-id"
+[profiles.main-profile]
+provider = "provider-1"
+model    = "model-id-1"
 ```
 
 Then point `settings.toml`'s `[selection]` at that profile name. Variables that configure the *install
@@ -118,12 +118,12 @@ profiles that use it:
 
 ```toml
 # providers.toml
-[providers.mine]
+[providers.provider-1]
 api_base = "https://api.example.com/v1"
 key      = "sk-..."
 # envelope = "data"              # only if this host wraps its reply in a key
 
-[providers.work]
+[providers.provider-2]
 api_base = "https://llm.internal.corp/v1"
 key      = "sk-..."
 ```
@@ -131,8 +131,8 @@ key      = "sk-..."
 ```toml
 # settings.toml - says what the REVIEW does
 [selection]
-main = "mine"                    # the profile to use first, by name
-# fallback = ["mine-backup"]       # commented because nothing defines that profile below; assign a
+main = "main-profile"                    # the profile to use first, by name
+# fallback = ["fallback-profile-1", "fallback-profile-2"]       # commented because nothing defines that profile below; assign a
                                    # [profiles.*] table you actually have, or leave it out
 
 [pr_reviewer]
@@ -141,18 +141,18 @@ num_max_findings = 10
 
 ```toml
 # providers.toml - the same file, above the [providers.*] tables
-[profiles.mine]
-provider = "mine"
-model    = "your-model-id"
+[profiles.main-profile]
+provider = "provider-1"
+model    = "model-id-1"
 
-[profiles.mine.config]           # this model's own budgets
+[profiles.main-profile.config]           # this model's own budgets
 custom_model_max_tokens = 200000
 max_model_tokens        = 150000
 max_output_tokens       = 100000
 
-[profiles.work]
-provider = "work"
-model    = "their-model-id"
+[profiles.fallback-profile-1]
+provider = "provider-2"
+model    = "model-id-2"
 ```
 
 A profile is a complete description of one model — its id, the endpoint that serves it, and the settings
@@ -166,7 +166,7 @@ so any pr-agent key works there even if the template does not list it.
 `[litellm]` settings are per endpoint too, so they go on the provider:
 
 ```toml
-[providers.mine.litellm]
+[providers.provider-1.litellm]
 callback_timeout_seconds = 5
 turn_off_message_logging = true
 cache_control_injection_points = [{ location = "message", role = "system" }]
@@ -211,7 +211,7 @@ machine's `settings.toml` had it.
 ```toml
 # .preflight.toml - committed with the repository
 [pr_reviewer]
-num_max_findings = 16
+num_max_findings = 5
 
 [gate]                     # the same table, so the gate's policy travels with the repo too
 doc_blocks = true
@@ -299,7 +299,7 @@ not the same as unresolved. Full detail in
 
 ## Teach your coding agents
 
-Paste `AGENTS-review-snippet.md` into the repo's `AGENTS.md` so every agent follows the loop: review → fix all
+Ask your agent to merge `AGENTS-review-snippet.md` into the repo's `AGENTS.md` so every agent follows the loop: review → fix all
 findings in one pass → re-review → commit once when the gate is green. **Adapt it rather than copying it
 whole** - every section is classified `required` or `setup`, and the `setup` parts (the install and
 hook-adoption recipes) are worth nothing once they have been run. Keep the `required` facts as written,

@@ -257,9 +257,43 @@ stage — which skips, deliberately and visibly, on a machine without pr-agent, 
 key is configured and nowhere pretends to have run.
 
 **No provider prefix is needed in a model id.** With the pin set, pr-agent routes every model to that
-transport, and LiteLLM strips a matching prefix — so `their-model-id` reaches the endpoint as written.
+transport, and LiteLLM strips a matching prefix — so `model-id-2` reaches the endpoint as written.
 A prefix that disagrees with the pin is *not* an error either; it is passed through as part of the model
 name, which is why naming the provider on its own line is the supported way to choose an endpoint.
+
+## Grouping a branch's reviews: the derived session id
+
+pr-agent 0.50.0 can stamp a LiteLLM session id onto every request, from the PR URL - which plain-diff
+reviews do not have, so the built-in path returns an empty string here and local reviews are grouped not at
+all. The renderer derives the id instead, from the reviewed repository's **origin URL and branch** (the
+commit hash on a detached HEAD), as a deterministic uuid5. The branch rather than `HEAD` is the key so a
+session survives commits on one piece of work; the origin URL rather than the on-disk path is the key so two
+clones of the same work group together, and credentials embedded in that URL are stripped first so two
+clones with different tokens do not. With no origin remote it keys on the root commit, not the path, which
+is neither stable nor leak-free.
+
+It reaches pr-agent as `[litellm] extra_headers`, always as a **JSON string** <!-- doc-path-ok: derived, not a pr-agent key --> because
+pr-agent parses `LITELLM.EXTRA_HEADERS` with `json.loads`, so a TOML table there raises at startup.
+
+The header name is `[preflight] session_id_name` in `settings.toml` <!-- doc-path-ok: preflight's own table -->, default `session-id`,
+where an empty value disables the injection. The default is one gateway's name rather than a portable
+concept - underclass reads that generic ingress name and translates per backend (`x-opencode-session` for
+OpenCode Go), while a plain OpenAI-compatible endpoint ignores it - so it is a default to CHANGE for your
+gateway, not an assumption that every endpoint honours it. The table is stripped from what pr-agent
+receives, because pr-agent reads nothing from it, and it is deliberately not settable from
+`.preflight.toml`: a committed file choosing a header name could collide with an authentication header.
+The value is also an **account binding** where the gateway supports one (underclass holds a request on the
+account its key names for 24h), not only a spending label - which is why the key is a branch: coarser would
+pin unrelated concurrent work together.
+
+An explicit value already in `extra_headers` wins - matched case-insensitively, in either the TOML-table or
+JSON-string form - and every other header is preserved, so a run that pins its own id or sets an unrelated
+header is merged with rather than overwritten. A value that is neither a dict nor a JSON object is refused
+by name: silently dropping it would be the "looks configured, does nothing" shape this renderer refuses
+everywhere else. The id is a grouping key, not a secret - an observer who can guess the origin and branch
+can recompute it, and that is the accepted trade, since a random id would not group and a salt would be
+operator configuration the bundle does not have. `REQ-HOOK-29` and the `models` stage assert the injection
+reaches the rendered config, that `session_id_name = ""` disables it, and that each refusal fires.
 
 ## Secrets
 

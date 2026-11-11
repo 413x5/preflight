@@ -32,7 +32,7 @@
 # `api_base` is your OpenAI-compatible endpoint; `key` is that endpoint's credential.
 # This file is a REFERENCE: copy it to providers.toml (mode 600) and edit that one. install.sh installs
 # this file only - it never creates providers.toml, because it knows none of the values in it.
-[providers.mine]
+[providers.provider-1]
 api_base = "https://api.example.com/v1"    # replace with your endpoint
 key = ""                                   # paste the API key here; this file is chmod 600
 # A gateway that WRAPS its non-streaming reply, so the `choices` list is one level down:
@@ -53,7 +53,7 @@ key = ""                                   # paste the API key here; this file i
 # A second OpenAI-compatible endpoint, with its own key. Switching to it is one line in settings.toml.
 # It cannot be a FALLBACK beside the first: pr-agent holds one endpoint per run, so the resolver refuses
 # a chain spanning two providers rather than serving half of it from the wrong host.
-# [providers.work]
+# [providers.provider-2]
 # api_base = "https://llm.internal.corp/v1"
 # key = ""
 #
@@ -87,9 +87,9 @@ key = ""                                   # paste the API key here; this file i
 # `[profiles.v4.1-flash]` would split into a table `v4` with a child `1-flash`, which is not a profile -
 # the resolver diagnoses an unquoted one rather than reporting the fragment it parsed.
 
-[profiles.mine]
-provider = "mine"
-model = "your-model-id"   # replace with the id THIS endpoint serves
+[profiles.main-profile]
+provider = "provider-1"
+model = "model-id-1"   # replace with the id THIS endpoint serves
 
 # The budgets are example values for a large-window model; set them to your model's own numbers.
 # `custom_model_max_tokens` is what pr-agent measures the prompt against when LiteLLM does not know the
@@ -98,19 +98,19 @@ model = "your-model-id"   # replace with the id THIS endpoint serves
 # model can spend all of it thinking, returning truncated output that pr-agent treats as a failed call.
 # For a model LiteLLM does know, the first two may be 0 - "look the window up" - but the output cap should
 # stay generous for the reason above.
-[profiles.mine.config]
+[profiles.main-profile.config]
 custom_model_max_tokens = 200000
 max_model_tokens = 150000
 max_output_tokens = 100000
 
-# [profiles.mine-backup]
-# provider = "mine"
-# model = "your-backup-model-id"
+# [profiles.fallback-profile-1]
+# provider = "provider-1"
+# model = "model-id-2"
 
 # Pointing the review at another endpoint is a change of assignment, and that endpoint is another provider.
-# [profiles."reviewer-api"]
-# provider = "work"
-# model = "their-model-id"
+# [profiles."fallback-profile-2"]
+# provider = "provider-2"
+# model = "model-id-2"
 
 # ---------------------------------------------------------------------------- a provider's [litellm]
 #
@@ -128,6 +128,6 @@ max_output_tokens = 100000
 #
 # A key identical for EVERY endpoint belongs in settings.toml's [litellm] instead.
 #
-# [providers.work.litellm]
+# [providers.provider-2.litellm]
 # callback_timeout_seconds = 5
 # turn_off_message_logging = true

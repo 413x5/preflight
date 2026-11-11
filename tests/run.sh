@@ -3025,7 +3025,7 @@ api_base = "https://alpha.example.com/v1"
 key      = "key-one"
 stream   = true
 
-[providers.work]
+[providers.provider-2]
 transport = "openrouter"
 api_base  = "https://llm.internal.corp/v1"
 key       = "key-two"
@@ -3041,8 +3041,8 @@ TOML
   # "the pin is derived from the provider" falsifiable.
   model_cfg_write "$cfg" "$(cat <<'TOML'
 [selection]
-main = "work-main"
-fallback = ["work-small"]
+main = "main-profile"
+fallback = ["fallback-profile-2"]
 
 # Run-wide, independent of which profile is assigned.
 [pr_reviewer]
@@ -3052,12 +3052,12 @@ review_heading = "From settings.toml"
 [config]
 max_output_tokens = 384000
 
-[profiles.work-main]
-provider = "work"
-model = "their-model-id"
+[profiles.main-profile]
+provider = "provider-2"
+model = "model-id-2"
 
-[profiles.work-small]
-provider = "work"
+[profiles.fallback-profile-2]
+provider = "provider-2"
 model = "their-small"
 TOML
 )"
@@ -3101,7 +3101,7 @@ import os, sys, tomllib
 path = sys.argv[1]
 d = tomllib.load(open(path, "rb"))
 bad = []
-if d["config"]["model"] != "their-model-id":
+if d["config"]["model"] != "model-id-2":
     bad.append(f"model={d['config']['model']!r} (want the named provider id)")
 if d["config"]["fallback_models"] != ["their-small"]:
     bad.append(f"fallback_models={d['config']['fallback_models']!r}")
@@ -3182,10 +3182,10 @@ FAKE
   before_sum="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$_fixed" 2>/dev/null)"
   model_cfg_write "$cfg" "$(cat <<'TOML'
 [selection]
-main = "work-main"
+main = "main-profile"
 
-[profiles.work-main]
-provider = "work"
+[profiles.main-profile]
+provider = "provider-2"
 model = "a-different-model"
 TOML
 )"
@@ -3202,11 +3202,11 @@ TOML
   # not refuses and says what to add.
   model_cfg_write "$cfg" "$(cat <<'TOML'
 [selection]
-main = "work-main"
+main = "main-profile"
 
-[profiles.work-main]
-provider = "work"
-model = "their-model-id"
+[profiles.main-profile]
+provider = "provider-2"
+model = "model-id-2"
 TOML
 )"
   _home_in_repo="$d/home-in-repo"
@@ -3349,13 +3349,13 @@ TOML
   # case's file in place when the fixture names no settings section at all.
   printf '[pr_reviewer]\nnum_max_findings = 10\n' > "$cfg/settings.toml"
   cat > "$cfg/providers.toml" <<'TOML'
-[providers.work]
+[providers.provider-2]
 api_base = "https://llm.internal.corp/v1"
 key = "key-two"
 
 [profiles.decided-later]
-provider = "work"
-model = "their-model-id"
+provider = "provider-2"
+model = "model-id-2"
 TOML
   run_models
   [ "$rc" = 2 ] || problems="$problems
@@ -3366,8 +3366,8 @@ TOML
         | the refusal for a profiles-only settings.toml did not name the cause: $(cat "$work/models.out")" ;;
   esac
 
-  printf '[selection]\nmain = "work-main"\n' > "$cfg/settings.toml"
-  printf '[providers.work]\napi_base = "https://llm.internal.corp/v1"\nkey = "key-two"\n\n[profiles.work-main]\nprovider = "work"\nmodel = "their-model-id"\n' \
+  printf '[selection]\nmain = "main-profile"\n' > "$cfg/settings.toml"
+  printf '[providers.provider-2]\napi_base = "https://llm.internal.corp/v1"\nkey = "key-two"\n\n[profiles.main-profile]\nprovider = "provider-2"\nmodel = "model-id-2"\n' \
     > "$cfg/providers.toml"
   chmod 600 "$cfg/providers.toml"
   # TWO RUNS NEVER SHARE A FILE. (Placed here, with its own valid pair: every assertion above this point
@@ -3406,13 +3406,13 @@ TOML
   # profile the fallback names to EXIST, so the refusal can only be about `main`.
   printf '[selection]\nfallback = ["backup"]\n' > "$cfg/settings.toml"
   cat > "$cfg/providers.toml" <<'TOML'
-[providers.work]
+[providers.provider-2]
 api_base = "https://llm.internal.corp/v1"
 key = "key-two"
 
 [profiles.backup]
-provider = "work"
-model = "their-model-id"
+provider = "provider-2"
+model = "model-id-2"
 TOML
   run_models
   [ "$rc" = 2 ] || problems="$problems
@@ -3428,8 +3428,8 @@ TOML
   # every other [pr_reviewer] value from settings.toml survives - a whole-file replacement would silently
   # drop the finding cap that keeps the loop convergent. Asserted on the bytes pr-agent receives, because
   # a merge that only happened in the resolver's head would look identical from here.
-  printf '[selection]\nmain = "work-main"\n\n[pr_reviewer]\nreview_heading = "From settings.toml"\nnum_max_findings = 10\n' > "$cfg/settings.toml"
-  printf '[providers.work]\napi_base = "https://llm.internal.corp/v1"\nkey = "key-two"\n\n[profiles.work-main]\nprovider = "work"\nmodel = "their-model-id"\n' \
+  printf '[selection]\nmain = "main-profile"\n\n[pr_reviewer]\nreview_heading = "From settings.toml"\nnum_max_findings = 10\n' > "$cfg/settings.toml"
+  printf '[providers.provider-2]\napi_base = "https://llm.internal.corp/v1"\nkey = "key-two"\n\n[profiles.main-profile]\nprovider = "provider-2"\nmodel = "model-id-2"\n' \
     > "$cfg/providers.toml"
   chmod 600 "$cfg/providers.toml"
   printf '[pr_reviewer]\nnum_max_findings = 4\n\n[gate]\nallow_issues = true\n' > "$d/.preflight.toml"
@@ -3479,7 +3479,7 @@ PY
 
   # A committed file must not choose which credential a review spends: naming a provider directly, or a
   # profile through [selection], is the same decision one indirection apart. Both are refused by name.
-  for _bad in '[providers.x]\nkey = "k"' '[profiles.x]\nprovider = "work"\nmodel = "m"' '[selection]\nmain = "work-main"'; do
+  for _bad in '[providers.x]\nkey = "k"' '[profiles.x]\nprovider = "provider-2"\nmodel = "m"' '[selection]\nmain = "main-profile"'; do
     printf '%b\n' "$_bad" > "$d/.preflight.toml"
     rc=0
     ( cd "$d" && bash -c '. "$1"; __preflight_render_settings "$2" "$3"' \
@@ -3910,15 +3910,15 @@ case_render_dir_selection() {
   model_cfg_dir "$cfg"
   model_cfg_write "$cfg" "$(cat <<'TOML'
 [selection]
-main = "work-main"
+main = "main-profile"
 
-[providers.work]
+[providers.provider-2]
 api_base = "https://llm.internal.corp/v1"
 key = "key-two"
 
-[profiles.work-main]
-provider = "work"
-model = "their-model-id"
+[profiles.main-profile]
+provider = "provider-2"
+model = "model-id-2"
 TOML
 )"
   # Writes both artifacts, so the run is a COMPLETE review: the point is that a read-only config dir does
@@ -4074,15 +4074,15 @@ case_refusals_name_a_command() {
   model_cfg_dir "$cfg"
   model_cfg_write "$cfg" "$(cat <<'TOML'
 [selection]
-main = "work-main"
+main = "main-profile"
 
-[providers.work]
+[providers.provider-2]
 api_base = "https://llm.internal.corp/v1"
 key = "key-two"
 
-[profiles.work-main]
-provider = "work"
-model = "their-model-id"
+[profiles.main-profile]
+provider = "provider-2"
+model = "model-id-2"
 TOML
 )"
   model_stub "$fake"

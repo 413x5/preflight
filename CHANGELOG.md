@@ -25,7 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **This repository enforces its own gate.** `.githooks/` is committed and `core.hooksPath` points at it
   (relative, so it holds in every worktree), so a commit carrying content the last review did not cover is
-  refused by `pre-commit`. The hook never runs a review - it verifies that what is being committed is what
+  refused by `pre-commit`. `AGENTS.md` previously forbade setting `core.hooksPath` here; that rule is now
+  inverted, with the reasoning kept: it is clone-wide, which is the point, and the recipe for testing a
+  hook in a `mktemp -d` repository still stands. The setting is clone-local, so a fresh clone has no hook
+  until `git config core.hooksPath .githooks` is run in it. Where it is set, a machine without the bundle
+  cannot commit until it installs one or bypasses with `git commit --no-verify` - and the `post-commit`
+  advisory now names such a commit rather than staying silent. The hook never runs a review - it verifies that what is being committed is what
   was reviewed - so the cost is a review you already ran, not a review per commit.
 
 ## [0.12.0] - 2026-11-11

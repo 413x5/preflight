@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Fixed
+
+- **A change that touches only a lockfile no longer blocks every commit.** pr-agent filters auto-generated
+  files (`Cargo.lock`, `uv.lock`, `package-lock.json`, minified assets and the rest) from the diff with a
+  hardcoded list and no setting to turn it off, so a lockfile-only change produces no review artifact at
+  all. `preflight-code` already detected that and said so, but the sidecar was written only when an
+  artifact existed, so the commit hook could only report `no review found` and `preflight-gate` exited 3 -
+  forever, with no way to tell "nothing to review" from "the review broke". Operators reached for
+  `PREFLIGHT_SKIP=1`, which bypasses enforcement entirely.
+
+  The run now records a distinct `nothing_to_review` verdict in the sidecar, and both enforcement layers
+  accept it while naming why: the commit goes through with an explicit "every changed file was filtered
+  out" message rather than silently, and the gate exits 0 with the same reason. It is deliberately not
+  recorded as `pass` - a pass means a model read the content and found nothing, and conflating the two
+  would let an absent review read as a clean one. Every other verdict still fails closed, and
+  `preflight-code review` itself still exits non-zero, because the operator asked for a review and did not
+  get one. `REQ-HOOK-51` covers all three states and each mutation turns it red.
 
 ## [0.12.1] - 2026-11-11
 

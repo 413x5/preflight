@@ -2054,6 +2054,9 @@ PY
   # output path keeps it from archiving the PREVIOUS run's file as its own. Without that removal this
   # filed the earlier run's description.md under a run that never wrote it (found by reviewing this
   # change with the tool).
+  # A SILENT stub on purpose: `describe` never consults the skip line, and an echo here would make run.log
+  # non-empty, so the run would archive its log and this case's count assertion would fire for a reason
+  # that has nothing to do with what it tests.
   printf '#!/bin/sh\ncat >/dev/null\nexit 0\n' > "$fake/pr-agent"
   chmod +x "$fake/pr-agent"
   before="$(ls -1 "$d/.preflight/runs" 2>/dev/null | wc -l | tr -d ' ')"
@@ -4276,7 +4279,9 @@ case_no_analyzable_files() {
   mkdir -p "$d" "$fake"
   model_repo "$d"
   model_cfg_dir "$work/noanalyzable-cfg"
-  printf '#!/bin/sh\ncat >/dev/null\nexit 0\n' > "$fake/pr-agent"
+  # pr-agent's own skip line, which is what makes "nothing to review" EVIDENCE rather than an inference
+  # from artifact absence. The counter-stub below omits it on purpose.
+  printf '#!/bin/sh\ncat >/dev/null\necho "PR has no analyzable files: local_diff, skipping review" >&2\nexit 0\n' > "$fake/pr-agent"
   chmod +x "$fake/pr-agent"
   run_it() {
     rc=0
@@ -4303,6 +4308,114 @@ case_no_analyzable_files() {
     *) problems="$problems
         | the failure did not name the artifact that is missing: $out" ;;
   esac
+
+  # ---- the sidecar records WHY, and the enforcement layer can act on it ----
+  # The failure above is still a failure at the call site. What changed is that the run now RECORDS the
+  # distinction "nothing to review" vs "the review did not run", because a lockfile-only change is the
+  # former and blocking it forever taught operators to reach for PREFLIGHT_SKIP. The hook and the gate
+  # both have to accept that recorded state - and only that one.
+  meta="$d/.preflight/review.meta.json"
+  if [ ! -f "$meta" ]; then
+    problems="$problems
+        | the run recorded no sidecar, so the hook cannot tell 'nothing to review' from 'no review found'"
+  else
+    got="$(python3 - "$meta" <<'PYM'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print((d.get('gate') or {}).get('verdict') or '')
+PYM
+)"
+    [ "$got" = 'nothing_to_review' ] || problems="$problems
+        | the sidecar verdict is '$got', so a lockfile-only change is indistinguishable from a clean review"
+
+    # The hook must ACCEPT it - which requires the tree it is asked about to be the tree the review
+    # recorded. `model_repo` leaves an UNSTAGED edit to f.txt, so staging it first is what makes this a
+    # test of the verdict rather than of the containment check (which is asserted separately, above).
+    ( cd "$d" && git add -A ) >/dev/null 2>&1
+    hrc=0
+    hout="$( cd "$d" && PREFLIGHT_HOOK="$repo_root/src/preflight-hook" sh "$repo_root/src/preflight-hook" 2>&1 )" || hrc=$?
+    [ "$hrc" = 0 ] || problems="$problems
+        | the commit hook blocked a change that had nothing to review (exit $hrc): $hout"
+    case "$hout" in
+      *"nothing to review"*) ;;
+      *) problems="$problems
+        | the hook allowed the commit without saying why, so it reads as a clean review: $hout" ;;
+    esac
+
+    # ...the gate must ACCEPT it...
+    grc=0
+    gout="$( cd "$d" && PREFLIGHT_DIR=.preflight bash "$repo_root/src/preflight-gate" 2>&1 )" || grc=$?
+    [ "$grc" = 0 ] || problems="$problems
+        | the gate refused a change that had nothing to review (exit $grc): $gout"
+
+    # ...and a FAILED review must still block, or the new verdict would have opened a hole.
+    python3 - "$meta" <<'PYF'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d['gate'] = {'verdict': 'fail', 'exit': 1}
+json.dump(d, open(p, 'w'))
+PYF
+    hrc=0
+    ( cd "$d" && PREFLIGHT_HOOK="$repo_root/src/preflight-hook" sh "$repo_root/src/preflight-hook" >/dev/null 2>&1 ) || hrc=$?
+    [ "$hrc" != 0 ] || problems="$problems
+        | a FAILED review was allowed through, so accepting 'nothing_to_review' opened a hole"
+
+    # ---- the verdict is EVIDENCE, so a silent exit 0 is a FAILURE ----
+    # Without the skip line in the log, an exit 0 and no artifact means the run did not do what it claims
+    # (a write failure, a full disk, a behaviour change after an upgrade). Recording that as "nothing to
+    # review" would make the hook ACCEPT unreviewed content - fail-open, the opposite of this gate's job.
+    silent="$work/noanalyzable-silent"
+    mkdir -p "$silent"
+    printf '#!/bin/sh\ncat >/dev/null\nexit 0\n' > "$silent/pr-agent"
+    chmod +x "$silent/pr-agent"
+    ( cd "$d" && rm -rf .preflight && PATH="$silent:$PATH" PREFLIGHT_HOME="$work/noanalyzable-cfg" \
+        bash "$repo_root/src/preflight-code" review >/dev/null 2>&1 )
+    if [ -f "$meta" ]; then
+      problems="$problems
+        | a pr-agent that exited 0 without logging the skip still recorded a verdict, so a silent failure would be accepted"
+    fi
+
+    # ---- a STALE 'nothing to review' beside a real review must not suppress it ----
+    # The sidecar is rewritten after the gate runs, so the pair can describe different runs. If the gate
+    # honoured the older verdict it would exit 0 on a review nobody gated.
+    mkdir -p "$d/.preflight"
+    printf '{"gate":{"verdict":"nothing_to_review","exit":0},"scope":"commit","reviewed_tree":"x"}\n' > "$meta"
+    printf '{"review":{"key_issues_to_review":[{"relevant_file":"a.py","issue_header":"Bug","issue_content":"real"}],"security_concerns":"No"}}\n' > "$d/.preflight/review.json"
+    grc=0
+    ( cd "$d" && PREFLIGHT_DIR=.preflight bash "$repo_root/src/preflight-gate" >/dev/null 2>&1 ) || grc=$?
+    [ "$grc" != 0 ] || problems="$problems
+        | a stale 'nothing to review' sidecar suppressed a real review, so unreviewed content passed the gate"
+    rm -f "$d/.preflight/review.json"
+
+    # ---- the gate binds the verdict to the TREE, not just to the absence of an artifact ----
+    # A lockfile-only run records the verdict for one tree; editing real source afterwards must not inherit
+    # it. Without the binding the gate (the layer a coding agent loops on) would exit 0 on a tree that
+    # never contained that code, while the commit hook refused it - the two layers disagreeing.
+    ( cd "$d" && git add -A ) >/dev/null 2>&1
+    printf '{"gate":{"verdict":"nothing_to_review","exit":0},"scope":"commit","reviewed_tree":"%s"}\n' \
+      "$( cd "$d" && git write-tree )" > "$meta"
+    grc=0
+    ( cd "$d" && PREFLIGHT_DIR=.preflight bash "$repo_root/src/preflight-gate" >/dev/null 2>&1 ) || grc=$?
+    [ "$grc" = 0 ] || problems="$problems
+        | the gate refused a recorded outcome whose tree matches the staged content (exit $grc)"
+    printf 'real code\n' > "$d/app.py"
+    ( cd "$d" && git add app.py ) >/dev/null 2>&1
+    grc=0
+    ( cd "$d" && PREFLIGHT_DIR=.preflight bash "$repo_root/src/preflight-gate" >/dev/null 2>&1 ) || grc=$?
+    [ "$grc" != 0 ] || problems="$problems
+        | a 'nothing to review' verdict for a DIFFERENT tree let unreviewed source through the gate"
+    ( cd "$d" && git reset -q && rm -f app.py ) >/dev/null 2>&1
+
+    # Restore the recorded state for the counterweight below.
+    python3 - "$meta" <<'PYR'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d['gate'] = {'verdict': 'nothing_to_review', 'exit': 0}
+json.dump(d, open(p, 'w'))
+PYR
+  fi
 
   # The counterweight: a run that DOES write its artifacts still reports them, so the assertion above
   # cannot be satisfied by removing the message altogether.

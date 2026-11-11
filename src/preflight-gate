@@ -9,6 +9,10 @@
 #       PREFLIGHT_GATE_DOC_BLOCKS=1    count documentation findings as blocking (default: advisory)
 set -euo pipefail
 json="${1:-${PREFLIGHT_DIR:-.preflight}/review.json}"
+# The sidecar sits beside the review it describes, and is where a run records an outcome that has no
+# review to gate - "every changed file was filtered out". Derived from the review path rather than from
+# PREFLIGHT_DIR so an explicit `preflight-gate some/path/review.json` looks beside THAT file.
+meta_sidecar="$(dirname "$json")/review.meta.json"
 
 # The gate is what a coding agent loops on, so its exits and its two opt-outs have to be answerable
 # from the command itself rather than only from the bundle's docs.
@@ -48,6 +52,52 @@ other path - including code under `docs/`, or a `requirements.txt` - blocks.
 EOF
     exit 0 ;;
 esac
+
+# A sidecar that says the change had nothing to review is a RECORDED outcome, not a missing one: exit 0
+# with the reason, so a lockfile-only change can be committed. Checked before the artifact test because
+# that case has no artifact by definition. Read with the same interpreter the rest of this file uses, and
+# treated as "no such state" on any error, so a malformed sidecar still fails closed below.
+if [ -f "$meta_sidecar" ]; then
+  nothing="$(python3 - "$meta_sidecar" <<'PYNOTHING' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+except Exception:
+    sys.exit(0)
+g = d.get('gate') if isinstance(d.get('gate'), dict) else {}
+print('yes' if g.get('verdict') == 'nothing_to_review' else '')
+PYNOTHING
+)"
+  if [ "$nothing" = 'yes' ] && [ ! -f "$json" ]; then
+    # BOUND TO CONTENT, like the commit hook does with the same sidecar. Without this the two enforcement
+    # layers disagree: a lockfile-only run records the verdict, the developer then edits real source, and
+    # the gate - the layer a coding agent loops on - would exit 0 on a tree that never contained that code.
+    # The recorded tree must BE the tree being gated; `git write-tree` is the index, which is what a
+    # pre-commit gate is asked about, and a tree that cannot be read fails closed rather than passing.
+    recorded_tree="$(python3 - "$meta_sidecar" <<'PYTREE' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+except Exception:
+    sys.exit(0)
+print(d.get('reviewed_tree') or '')
+PYTREE
+)"
+    current_tree="$(git write-tree 2>/dev/null || true)"
+    if [ -n "$recorded_tree" ] && [ -n "$current_tree" ] && [ "$recorded_tree" = "$current_tree" ]; then
+      echo "preflight-gate: nothing to review: every changed file was filtered out (a lockfile, a minified asset or an ignore rule)"
+      echo "preflight-gate: this is recorded as an accepted outcome, not as a clean review"
+      exit 0
+    fi
+    # The verdict describes a DIFFERENT tree, so it says nothing about this one. Fall through: with no
+    # review artifact present that is the ordinary "no review" failure below.
+  fi
+  # A sidecar saying "nothing to review" BESIDE a review artifact is stale: `preflight-code` rewrites the
+  # sidecar after it runs the gate, so the pair can describe different runs. Honouring it here would exit 0
+  # on a review nobody gated, so the artifact wins and the ordinary path below gates it.
+fi
 
 if [ ! -f "$json" ]; then echo "preflight-gate: no review at $json (run 'preflight-code review' first)" >&2; exit 3; fi
 python3 - "$json" <<'PY'

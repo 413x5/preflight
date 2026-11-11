@@ -78,7 +78,17 @@ esac
 
 [ -n "${pf_tree:-}" ] || fail "the review sidecar does not name a reviewed tree"
 
-[ "${pf_verdict:-}" = "pass" ] || fail "the last review did not pass (${pf_verdict:-unknown})"
+# Two verdicts are acceptable, and they mean different things. `pass` is a model that read the content and
+# found nothing. `nothing_to_review` is pr-agent having filtered every changed file out (a lockfile-only
+# change), so there was nothing TO read - recording that as `pass` would make an absent review
+# indistinguishable from a clean one. Both allow the commit; every other verdict fails closed.
+case "${pf_verdict:-}" in
+  pass) ;;
+  nothing_to_review)
+    printf 'preflight-code: nothing to review: every changed file was filtered out (a lockfile, a minified asset or an ignore rule), so this commit carries no content a reviewer could read.\n' >&2
+    ;;
+  *) fail "the last review did not pass (${pf_verdict:-unknown})" ;;
+esac
 
 # The binding is CONTENT-based, deliberately: no check that the recorded head equals HEAD, because
 # committing moves HEAD - such a check would invalidate the sidecar after every commit and forbid

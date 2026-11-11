@@ -240,9 +240,16 @@ with Ruby's built-in Psych if you need to inspect config.
   credential field, and the providers example carries a placeholder endpoint and an empty `key`. Real keys
   live in `$PREFLIGHT_HOME/providers.toml` (`~/.config/preflight` by default, chmod 600), never in the
   environment.
-- **Never set `core.hooksPath` in this repository.** It is clone-wide: setting it here would affect this
-  checkout *and* every worktree of this clone, and would start enforcing a hook against this repo's own
-  commits. Do all hook testing in a `mktemp -d` repository.
+- **`core.hooksPath` IS set in this repository, deliberately.** It is clone-wide, so it guards this
+  checkout and every worktree of this clone - which is the point: the bundle should be reviewed by itself
+  before it ships. Run hook *testing* in a `mktemp -d` repository anyway, so a test cannot be rescued by
+  this checkout's own hooks, and remember the commit that installs a hook cannot itself be enforced (the
+  hook does not exist yet when it is made).
+  The setting is CLONE-LOCAL git config, so it does not travel: a fresh clone has no hook until someone
+  runs `git config core.hooksPath .githooks` in it, and until then commits here are neither blocked nor
+  reported. In a clone where it IS set, a machine without the bundle cannot commit until it installs the
+  bundle or bypasses deliberately with `git commit --no-verify` - and `PREFLIGHT_SKIP=1` silences the
+  advisory that follows such a commit.
 - **Never introduce an absolute `core.hooksPath`** in anything you write, including docs and examples. It
   breaks git worktrees - each worktree would run another checkout's hooks dir. Relative `.githooks` only.
 - **Never reintroduce the old names.** `pra`/`pral`/`pral-gate` and `~/.config/pr-agent/` are the former
@@ -344,9 +351,10 @@ PREFLIGHT_HOOK="$CHECKOUT/src/preflight-hook" git -c commit.gpgsign=false commit
 
 The `git add -A` before the first commit is required: `preflight-code review` exits 3 on a repo with no commits,
 and without it the single file stays untracked. The first commit passes unreviewed by design, because the
-hook cannot be installed before the commit that installs it. `core.hooksPath` is local to the clone you set
-it in, so a `mktemp -d` repository is the only thing it affects; never set it in a preflight checkout,
-because it would then guard that checkout's own commits.
+hook cannot be installed before the commit that installs it. `core.hooksPath` is local to the clone you
+set it in. A `mktemp -d` repository is the right place to TEST a hook, so a test cannot be rescued by this
+checkout's own; in a preflight checkout the setting is deliberate and guards that checkout, which is how
+this bundle reviews itself.
 
 A review is a full model call, and what a run costs moves - it is measured in `docs/measurements.md` rather
 than repeated here. Do not run one in a loop.

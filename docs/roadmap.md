@@ -250,3 +250,13 @@ Needs a decision or an external dependency.
   `✗ no API key` line is expected on a correctly configured bundle. Settling it needs either a pr-agent
   change or a way to feed the same values in that the doctor path does read - worth knowing before pointing
   anyone at `doctor` as a first-run self-check.
+
+- **A release recipe that names the re-review as a required step.** Found in a consumer repository that has
+  made three releases under its own `commit-msg` hook and had **all three refused by `pre-commit` after the
+  version bump**: the bump rewrites the changelog and the manifests, so the staged tree is not the one the
+  gate saw, and the hook correctly refuses it. Each time the fix was "review again after the bump, then
+  commit" - correct behaviour, but a manual step a script cannot skip, and the failure mode if someone
+  bypasses it is a release whose changelog was never reviewed. The answer is probably not a new flag:
+  `preflight-code review` already reviews the tree as it is now, and a second entry point would drift. It
+  is a documented sequence - bump, review, commit - with the review named as required rather than implied.
+  This repository already does exactly that, and its `chore(release)` bodies say so.

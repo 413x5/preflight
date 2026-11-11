@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+## [0.12.2] - 2026-11-11
+
 ### Fixed
 
 - **A change that touches only a lockfile no longer blocks every commit.** pr-agent filters auto-generated
@@ -1205,7 +1209,8 @@ Initial release: a deployable, machine-local PR-Agent review setup for one OpenA
   initial commits plus the `v0.1.0` tag are **GPG-signed** (the signed history replaces earlier unsigned
   commits).
 
-[Unreleased]: https://github.com/413x5/preflight/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.12.2...HEAD
+[0.12.2]: https://github.com/413x5/preflight/releases/tag/v0.12.2
 [0.12.1]: https://github.com/413x5/preflight/releases/tag/v0.12.1
 [0.12.0]: https://github.com/413x5/preflight/releases/tag/v0.12.0
 [0.11.0]: https://github.com/413x5/preflight/releases/tag/v0.11.0

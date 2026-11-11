@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+## [0.12.0] - 2026-11-11
+
 ### Added
 
 - **Every local review now carries a stable session id, so a gateway can group its spend.** pr-agent
@@ -1156,7 +1160,8 @@ Initial release: a deployable, machine-local PR-Agent review setup for one OpenA
   initial commits plus the `v0.1.0` tag are **GPG-signed** (the signed history replaces earlier unsigned
   commits).
 
-[Unreleased]: https://github.com/413x5/preflight/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/413x5/preflight/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/413x5/preflight/releases/tag/v0.12.0
 [0.11.0]: https://github.com/413x5/preflight/releases/tag/v0.11.0
 [0.10.1]: https://github.com/413x5/preflight/releases/tag/v0.10.1
 [0.10.0]: https://github.com/413x5/preflight/releases/tag/v0.10.0

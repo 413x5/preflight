@@ -277,6 +277,9 @@ run_started=''
 run_ok=''
 run_stopped=''
 run_verdict=''
+# Set when pr-agent filtered every changed file out, so there was nothing to review. Distinct from a
+# failed run: it is a recorded outcome the commit hook can accept.
+nothing_reviewable=''
 # The rendered model configuration's path, set once the render succeeds. Initialised here with the rest so
 # every reference is defined under `set -u`, including on exit paths that never reach the render; cleanup()
 # is what deletes the file, so it holds the key for exactly the length of the run.
@@ -969,10 +972,37 @@ if [ -n "$out_json" ]; then
     dump_run_log
     printf 'preflight-code: pr-agent exited 0 without writing %s\n' "$out_json" >&2
     printf 'preflight-code: the change has no files left to review after pr-agent filters lockfiles, assets and ignored paths\n' >&2
-    printf 'preflight-code: so this run produced no review; there is nothing for preflight-gate or the commit hook to read\n' >&2
-    exit 1
+    printf 'preflight-code: pr-agent treats lockfiles, minified assets and ignore rules as unanalyzable, and a change\n' >&2
+    printf 'preflight-code: that touches only those has nothing to review. Recording that, so the commit hook can\n' >&2
+    printf 'preflight-code: tell "nothing to review" apart from "the review did not run"\n' >&2
+    # The sidecar is written on THIS path too, and that is the whole point: the hook needs to distinguish
+    # "reviewed and clean" from "there was nothing to review". Without it, a lockfile-only commit blocks
+    # forever with "no review found" and the operator has no way to tell that from a broken review.
+    #
+    # `nothing_to_review` is a distinct verdict, not `pass`: a pass means a model read content and found
+    # nothing. Recording it as `pass` would let a genuinely empty review read as a clean one.
+    # The verdict is EVIDENCE, not an inference from artifact absence. pr-agent writes this exact line
+    # (pr_reviewer.py, the `not remaining_files_list and not partial_files_list` branch) when it filtered
+    # everything out; without it, an exit 0 and no artifact means the run did NOT do what it claims - a
+    # write failure, a full disk, or a behaviour change after an upgrade. Recording that as "nothing to
+    # review" would make the hook ACCEPT unreviewed content, which is fail-open and the opposite of what
+    # this gate exists for. So the skip is only accepted when the log says so.
+    if grep -q 'no analyzable files' "$run_log" 2>/dev/null; then
+      nothing_reviewable=1
+      verdict="nothing_to_review"
+      run_verdict="$verdict"
+      # Deliberately NOT run_ok: that flag means "this run produced output worth filing", and archive_run
+      # would otherwise copy the PREVIOUS run's artifacts into this one's directory - presenting an older
+      # review as this run's result. The recorded verdict is what carries this outcome, not the archive.
+    else
+      printf 'preflight-code: pr-agent exited 0 without writing a review and without logging that every file\n' >&2
+      printf 'preflight-code: was filtered out, so this run did NOT do what it claims. Treating it as a failure\n' >&2
+      printf 'preflight-code: rather than recording "nothing to review", which the commit hook would accept.\n' >&2
+      exit 1
+    fi
+  else
+    run_ok=1
   fi
-  run_ok=1
 else
   # describe/improve/ask write no JSON artifact, so there is nothing to salvage: they are not bounded, and
   # a timeout must never cut off slow-but-valid work.
@@ -999,7 +1029,35 @@ fi
 # Record what was reviewed so the commit hook can verify it later. The hook reads gate.verdict,
 # which comes from the same rules preflight-gate applies (kept in one place: the gate itself).
 if [ "$cmd" = 'review' ] || [ "$cmd" = 'review_pr' ]; then
-  if [ -n "$out_json" ] && [ -f "$out_json" ]; then
+  if [ -n "$nothing_reviewable" ]; then
+    # No artifact exists, so there is nothing for preflight-gate to read and no verdict to derive: the
+    # recorded state IS the outcome. Written here rather than beside the artifact branch because this is
+    # the case the hook previously could not distinguish from a review that never ran.
+    rm -f "$dir/review.meta.json" 2>/dev/null || true
+    python3 - "$dir/review.meta.json" "$scope" "$dir" "$hook_tree" "$(git rev-parse HEAD)" "$verdict" <<'PY' || true
+import json, sys, datetime
+path, scope, d, tree, head, verdict = sys.argv[1:7]
+meta = {
+    "scope": scope,
+    "dir": d,
+    "head": head,
+    "reviewed_tree": tree,
+    "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    # The `gate` object IS required even though no gate ran: the hook reads `gate.verdict`, so removing it
+    # would make this verdict unreadable and the hook would fail closed. `exit: 0` records that nothing
+    # failed - the verdict carries the reason, and the hook accepts that one verdict explicitly.
+    "gate": {"verdict": verdict, "exit": 0},
+}
+with open(path, "w") as fh:
+    json.dump(meta, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+    echo "preflight-code: recorded that this change had nothing to review (${verdict})" >&2
+    # Still a non-zero status at the CALL SITE: the operator asked for a review and did not get one. The
+    # hook reads the recorded state, not this exit, so the two can differ - and they should: "nothing to
+    # commit-block" is not the same as "the command succeeded".
+    exit 1
+  elif [ -n "$out_json" ] && [ -f "$out_json" ]; then
     verdict="fail"
     gate_code=0
     gate_bin=''

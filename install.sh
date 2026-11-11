@@ -245,6 +245,10 @@ fi
 # preflight-hook is what a repo's committed .githooks/pre-commit calls (via $PREFLIGHT_HOOK or
 # ~/.config/preflight/preflight-hook), so it lives with the config rather than on PATH.
 install -m 0755 "$src/preflight-hook" "$cfg/preflight-hook"
+# preflight-advisory is the same shape for the post-commit half. Both are installed here rather than
+# duplicated into each repository's .githooks/, so a fix reaches every consumer through this one command
+# instead of a commit per repository.
+install -m 0755 "$src/preflight-advisory" "$cfg/preflight-advisory"
 if [ -d "$src/githooks" ]; then
   mkdir -p "$cfg/githooks"
   install -m 0755 "$src/githooks/pre-commit"  "$cfg/githooks/pre-commit"

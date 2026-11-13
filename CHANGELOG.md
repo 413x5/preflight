@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Removed
+
+- **`docs/roadmap.md` is retired.** It held a list of intentions - experiments, open questions, deferred
+  ideas - and a list of intentions rots against the code while still reading as current: several entries
+  described work the code had already settled, and a reader could not tell which half was live without
+  checking each one. Nothing in it was carried over; planning moves to GitHub issues, grouped by label.
+  What outlives a session is unchanged and already had a home: `CHANGELOG.md` for what changed, an ADR for
+  why, and `docs/measurements.md` for a dated number.
+
+  The pointers to it are gone from `README.md`, `docs/README.md`, `CONTRIBUTING.md`, `AGENTS.md`,
+  `docs/architecture.md`, `docs/measurements.md`, `docs/runbooks/troubleshooting.md` and `tests/README.md`.
+  `AGENTS.md`'s "check the roadmap for handoff state" section is replaced by the rule that has no
+  substitute for `git status`: work in flight is an issue, and an uncommitted tree is invisible from
+  `git log`.
 
 ## [0.12.3] - 2026-11-11
 

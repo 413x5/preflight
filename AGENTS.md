@@ -35,7 +35,7 @@ the outside - fix one and the loop is still slow.
 
 1. **What the model reports.** `pr_reviewer.num_max_findings` (upstream default 3, raised here). The
    bundle does not set `pr_reviewer.extra_instructions`: pr-agent's own reviewer prompt already carries
-   its severity guidance, and our additions argued against it. See `CHANGELOG.md` and `docs/roadmap.md`.
+   its severity guidance, and our additions argued against it. See `CHANGELOG.md`.
 2. **What the model was shown.** When a diff exceeds the token budget, pr-agent prunes files and reviews
    the first patch - so a "complete" review can cover a slice of the tree. **This is the one that is easy
    to miss**, because every finding in a partial review is a real finding; the missing coverage is
@@ -82,7 +82,6 @@ can never miss anything".
 | `docs/architecture.md` | How the bundle works, and why each non-obvious decision was made |
 | `docs/runbooks/troubleshooting.md` | A symptom, its cause, its fix |
 | `docs/adr/` | Decision records: why, what it beat, what still holds. `0000-template.md` is the shape |
-| `docs/roadmap.md` | What is left, and how to take an item |
 | `docs/history.md` | The narrative of what changed and what it replaced |
 | `docs/measurements.md` | The dated numbers, with the reason each moved |
 | `LICENSE`, `SECURITY.md` | MIT; the trust model and how to report privately |
@@ -364,34 +363,24 @@ Note when testing the *gate*: `PREFLIGHT_GATE_ALLOW_ISSUES=1` relaxes key issues
 `risk_level` are printed by it and `merge_recommendation` by `preflight-code`, never enforced - `docs/architecture.md`
 covers why.
 
-## Before you start: check docs/roadmap.md for handoff state
+## Before you start: read the tree, not a plan
 
-`docs/roadmap.md` is the working document, and its **Now** and **Next** sections carry anything a previous
-session left unfinished - including work that is *implemented but uncommitted* in the working tree, which
-is invisible from `git log`. Read **Now** first. **Next** has two groups: **Experiments** (cheap,
-reversible, each phrased as a question with the result that would settle it) and **Open questions on
-shipped work** (`[x]` items whose still-open paragraph is the work). A second section, "What upstream's
-own docs say", records what pr-agent's shipped `_help_docs/` says about models and settings, so it is not
-re-derived.
-
-The rules it follows, worth keeping: an experiment must state **what would falsify it**, and a lever that
-has been tested and rejected stays in the file **with its result** - re-testing `seed` because nobody
-recorded that it is inert on this endpoint would waste another hour.
+This repository keeps no planning document. Work is tracked as issues, a decision is an
+[ADR](docs/adr/), and what changed and why is `CHANGELOG.md`. Nothing here records what someone intended
+to do next, so do not go looking for it - and do not write one, because a list of intentions in the tree
+rots against the code while reading as current.
 
 Do not assume a clean tree means a clean slate, and do not assume the last commit describes the current
-state. `git status` is the first thing to check in this repo.
+state. `git status` is the first thing to check in this repo - work that is *implemented but uncommitted*
+is invisible from `git log`.
 
-**The roadmap holds to-dos only.** There is no "Done" section: a finished item is deleted from
-`docs/roadmap.md` and its reasoning recorded in `CHANGELOG.md`, which is the file that answers "what changed
-and why". The one exception is a `[x]` item under **Open questions on shipped work**, where the tick marks
-the *shipping* as settled and the paragraph beneath it as still open - that entry stays until the question
-is answered. Committing work is not a roadmap item; it is a routine step, and the roadmap records decisions
-and unresolved questions, not a task list for a single session.
+Committing work is a routine step, not something to be tracked. The two records that outlive a session are
+`CHANGELOG.md` (what changed) and an ADR (why, and what it beat).
 
 ## Working on docs
 
 The docs are part of the product, and they drift. Before claiming something works, run it. If you change
-behaviour, grep for every place that describes it: `README.md`, `AGENTS-review-snippet.md`, `docs/roadmap.md`,
+behaviour, grep for every place that describes it: `README.md`, `AGENTS-review-snippet.md`,
 `CHANGELOG.md`, `docs/architecture.md`, `docs/runbooks/troubleshooting.md`, `tests/README.md`, `CONTRIBUTING.md`. Case
 counts, the requirement table, and the containment table go stale fastest.
 
@@ -456,7 +445,6 @@ audience, and a fact belongs in the one that audience reads:
 | `docs/runbooks/troubleshooting.md` | An operator with a symptom | it is a symptom → cause → fix |
 | `docs/adr/` | Someone questioning a rule | it is a decision, its alternatives, or its cost |
 | `AGENTS.md` | An agent changing this repo | it is a rule, trap, or invariant for editing |
-| `docs/roadmap.md` | A future session picking up work | it is *not done yet*, or an open decision |
 | `CHANGELOG.md` | Someone asking "what changed" | it is history: what changed and why it changed |
 | `docs/history.md` | Someone reconstructing the arc | it is the long-form narrative of what replaced what |
 | `docs/measurements.md` | Anyone about to quote a count | it is a dated number, and the reason it moved |
@@ -558,9 +546,9 @@ until it does not.
   snippet carries it to the consuming agent's round-economy habits.
 - **One fact lives in one file, chosen by audience** - the table under "Each fact lives in exactly one
   file" names which file each kind of fact belongs to.
-- **`docs/roadmap.md` holds to-dos only**, and finished items are deleted from it into `CHANGELOG.md`. A `[x]`
-  item appears only under "Open questions on shipped work", where the tick marks the shipping as settled
-  and the paragraph beneath it as the work; the shipping paragraph is context for it.
+- **Work in flight is an issue, not a document.** A future session reads the issue tracker; nothing in
+  the tree records what someone intended to do next. A decision is an ADR, and what changed is
+  `CHANGELOG.md`.
 - **The review's diff is the pending change against the last commit, and it includes tracked edits that
   are not staged.** So "no `.gitignore` change appears in this diff" is verifiable: run `git diff HEAD`
   and read it before reporting a missing rule. `config/settings.toml` and `config/providers.toml` are

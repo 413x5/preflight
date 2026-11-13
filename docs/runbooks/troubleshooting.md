@@ -483,8 +483,8 @@ and the current choice are in [`docs/architecture.md`](../architecture.md) under
 
 If you do set it, measure on a real diff, interleaved, against `new=N/M` as well as wall clock. A pin of
 `low` was tried on one synthetic 525-line diff and did not survive real content - a cheaper round that
-reports fewer findings just moves the cost into a later round. `docs/roadmap.md` carries the numbers and the
-re-test.
+reports fewer findings just moves the cost into a later round. [`docs/measurements.md`](../measurements.md)
+carries the numbers.
 
 **Related, and also invisible by default:** pr-agent pins `config.temperature` (upstream default `0.2`)
 and its `seed` (default `-1`, which means unset). Neither is set by this bundle, so each review samples

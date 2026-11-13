@@ -9,8 +9,8 @@
 
 The repository was published at <https://github.com/413x5/preflight> with **no licence at all**. An
 unlicensed repository is not "undecided" to anyone reading it: by default it is all rights reserved, so a
-reader has no permission to use, copy or modify the code, however public it looks. The roadmap had
-carried the choice as an open item ("decide: MIT vs proprietary") without settling it.
+reader has no permission to use, copy or modify the code, however public it looks. The roadmap (since
+retired) had carried the choice as an open item ("decide: MIT vs proprietary") without settling it.
 
 ## Considered options
 

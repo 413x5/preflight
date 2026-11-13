@@ -58,8 +58,7 @@ Work on a short-lived branch (`type/slug`), open a pull request, and squash-merg
 Call out breaking changes (renamed commands, renamed env vars) in both the commit body and
 [`CHANGELOG.md`](CHANGELOG.md).
 
-Work not yet done is in [`docs/roadmap.md`](docs/roadmap.md); a decided question is an
-[ADR](docs/adr/), and the reasoning behind the current design is in
+A decided question is an [ADR](docs/adr/), and the reasoning behind the current design is in
 [`docs/architecture.md`](docs/architecture.md).
 
 ## Testing changes

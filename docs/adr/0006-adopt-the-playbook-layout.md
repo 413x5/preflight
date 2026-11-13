@@ -46,7 +46,8 @@ Adopt the playbook's shape, with the naming divergence accepted rather than hidd
 2. **One gate command, [`../../scripts/verify`](../../scripts/verify),** composing the existing checks in
    cost order, cheapest first. CI invokes it rather than re-listing steps.
 3. The docs tree: `docs/README.md` as the index, `docs/adr/` for decisions, `docs/runbooks/` for
-   operations, plus `docs/roadmap.md`, `docs/history.md` and `docs/measurements.md`.
+   operations, plus `docs/history.md` and `docs/measurements.md`. (It also added `docs/roadmap.md`, since
+   retired.)
 4. **One home per fact.** `AGENTS.md` owns the layout, the invariants and the commands, because every
    coding agent reads it by convention; `CONTRIBUTING.md` keeps the human on-ramp and points at the rules
    instead of restating them.

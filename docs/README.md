@@ -7,7 +7,6 @@ The map. One line per document - a document this index does not mention is one n
 | [`architecture.md`](architecture.md) | Explanation | How the bundle works and why each non-obvious decision was made |
 | [`runbooks/troubleshooting.md`](runbooks/troubleshooting.md) | How-to | A symptom, its cause, the fix |
 | [`adr/`](adr/) | Explanation | Why a decision was made, what it beat, what still holds. `0000-template.md` is the shape |
-| [`roadmap.md`](roadmap.md) | — | What is left, and how to take an item |
 | [`history.md`](history.md) | — | The narrative of what changed and what it replaced |
 | [`measurements.md`](measurements.md) | — | The dated numbers, with the reason each moved |
 
